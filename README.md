@@ -3,7 +3,10 @@
 Minimal local tracing SDK for Python LLM applications.
 
 ```python
-from bir import observe, score, span
+from bir import configure, observe, score, span
+
+
+configure(capture_inputs=True, capture_outputs=True)
 
 
 @observe()
@@ -19,7 +22,18 @@ def answer_question(question: str) -> str:
 Trace, span, and score events are written as JSONL to:
 
 ```text
-.llm_observe/traces.jsonl
+.bir/traces.jsonl
+```
+
+Input and output capture is disabled by default. Enable it globally with `configure()`
+or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.
+Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
+and `token` are redacted before events are written.
+
+To write traces somewhere else:
+
+```python
+configure(trace_path="tmp/bir-traces.jsonl")
 ```
 
 ## Development

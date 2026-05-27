@@ -1,5 +1,5 @@
 """Public API for the Bir Python SDK."""
 
-from ._sdk import observe, score, span
+from ._sdk import configure, observe, score, span
 
-__all__ = ["observe", "span", "score"]
+__all__ = ["configure", "observe", "span", "score"]

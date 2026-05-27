@@ -4,20 +4,69 @@ import functools
 import inspect
 import json
 from contextvars import ContextVar, Token
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, Mapping, TypeVar, cast
 from uuid import uuid4
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-_DEFAULT_TRACE_PATH = Path(".llm_observe/traces.jsonl")
+_DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")
+_SCHEMA_VERSION = "1.0"
+_MAX_CAPTURE_DEPTH = 6
+_REDACTED = "[redacted]"
+_SECRET_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth_header",
+    "password",
+    "secret",
+    "token",
+)
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 
 
-def observe(name: str | None = None) -> Callable[[F], F]:
+@dataclass(frozen=True)
+class _Config:
+    trace_path: Path = _DEFAULT_TRACE_PATH
+    capture_inputs: bool = False
+    capture_outputs: bool = False
+
+
+_config = _Config()
+
+
+def configure(
+    *,
+    trace_path: str | Path | None = None,
+    capture_inputs: bool | None = None,
+    capture_outputs: bool | None = None,
+) -> None:
+    """Configure local SDK behavior."""
+
+    global _config
+
+    updates: dict[str, Any] = {}
+    if trace_path is not None:
+        updates["trace_path"] = Path(trace_path)
+    if capture_inputs is not None:
+        updates["capture_inputs"] = capture_inputs
+    if capture_outputs is not None:
+        updates["capture_outputs"] = capture_outputs
+
+    _config = replace(_config, **updates)
+
+
+def observe(
+    name: str | None = None,
+    *,
+    capture_inputs: bool | None = None,
+    capture_outputs: bool | None = None,
+) -> Callable[[F], F]:
     """Decorate a sync function and record one trace event for each call."""
 
     def decorator(func: F) -> F:
@@ -25,6 +74,7 @@ def observe(name: str | None = None) -> Callable[[F], F]:
             raise TypeError("bir.observe supports sync functions only")
 
         trace_name = name or func.__name__
+        signature = inspect.signature(func)
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -32,8 +82,11 @@ def observe(name: str | None = None) -> Callable[[F], F]:
             start_time = _now()
             trace_token = _current_trace_id.set(trace_id)
             parent_token = _current_parent_id.set(trace_id)
+            input_payload = None
 
             try:
+                if _should_capture(capture_inputs, "inputs"):
+                    input_payload = _capture_call_input(signature, args, kwargs)
                 result = func(*args, **kwargs)
             except Exception as exc:
                 end_time = _now()
@@ -48,6 +101,7 @@ def observe(name: str | None = None) -> Callable[[F], F]:
                     end_time=end_time,
                     status="error",
                     error=str(exc),
+                    input=input_payload,
                 )
                 try:
                     _write_event(event)
@@ -57,6 +111,7 @@ def observe(name: str | None = None) -> Callable[[F], F]:
 
             end_time = _now()
             _reset_context(trace_token, parent_token)
+            output_payload = _safe_capture(result) if _should_capture(capture_outputs, "outputs") else None
             _write_event(
                 _event(
                     event_id=trace_id,
@@ -68,6 +123,8 @@ def observe(name: str | None = None) -> Callable[[F], F]:
                     end_time=end_time,
                     status="success",
                     error=None,
+                    input=input_payload,
+                    output=output_payload,
                 )
             )
             return result
@@ -173,9 +230,12 @@ def _event(
     end_time: str,
     status: str,
     error: str | None,
+    input: Any = None,
+    output: Any = None,
     value: int | float | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
+        "schema_version": _SCHEMA_VERSION,
         "id": event_id,
         "trace_id": trace_id,
         "parent_id": parent_id,
@@ -185,8 +245,8 @@ def _event(
         "end_time": end_time,
         "status": status,
         "metadata": {},
-        "input": None,
-        "output": None,
+        "input": input,
+        "output": output,
         "error": error,
     }
     if value is not None:
@@ -195,10 +255,52 @@ def _event(
 
 
 def _write_event(event: dict[str, Any]) -> None:
-    _DEFAULT_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _DEFAULT_TRACE_PATH.open("a", encoding="utf-8") as trace_file:
+    _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with _config.trace_path.open("a", encoding="utf-8") as trace_file:
         trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
         trace_file.write("\n")
+
+
+def _should_capture(override: bool | None, target: str) -> bool:
+    if override is not None:
+        return override
+    if target == "inputs":
+        return _config.capture_inputs
+    return _config.capture_outputs
+
+
+def _capture_call_input(
+    signature: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    bound = signature.bind_partial(*args, **kwargs)
+    bound.apply_defaults()
+    return {name: _safe_capture(value, key=name) for name, value in bound.arguments.items()}
+
+
+def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+    if key is not None and _is_secret_key(key):
+        return _REDACTED
+    if depth >= _MAX_CAPTURE_DEPTH:
+        return repr(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): _safe_capture(item_value, key=str(item_key), depth=depth + 1)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_safe_capture(item, depth=depth + 1) for item in value]
+    return repr(value)
+
+
+def _is_secret_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
 
 
 def _reset_context(
@@ -215,3 +317,8 @@ def _new_id() -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _reset_config_for_tests() -> None:
+    global _config
+    _config = _Config()
