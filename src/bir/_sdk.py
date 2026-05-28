@@ -4,6 +4,7 @@ import functools
 import inspect
 import json
 import math
+import re
 import urllib.error
 import urllib.request
 from contextvars import ContextVar, Token
@@ -178,14 +179,17 @@ def send_events(
     """Send local JSONL trace events to a Bir ingestion server."""
 
     events = load_events(path)
+    accepted = 0
     event_ids: list[str] = []
     endpoint = _events_endpoint(server_url)
 
     for event in events:
-        _post_event(endpoint, event.raw, timeout=timeout)
-        event_ids.append(event.id)
+        event_accepted = _post_event(endpoint, event.raw, timeout=timeout)
+        accepted += event_accepted
+        if event_accepted:
+            event_ids.append(event.id)
 
-    return SendEventsResult(accepted=len(event_ids), event_ids=event_ids)
+    return SendEventsResult(accepted=accepted, event_ids=event_ids)
 
 
 def observe(
@@ -229,7 +233,7 @@ def observe(
                     start_time=start_time,
                     end_time=end_time,
                     status="error",
-                    error=str(exc),
+                    error=_safe_error(exc),
                     input=input_payload,
                 )
                 try:
@@ -378,7 +382,7 @@ class _Span:
             start_time=self.start_time,
             end_time=_now(),
             status="error" if exc is not None else "success",
-            error=str(exc) if exc is not None else None,
+            error=_safe_error(exc) if exc is not None else None,
         )
         try:
             _write_event(event)
@@ -450,7 +454,7 @@ class _Generation:
             start_time=self.start_time,
             end_time=_now(),
             status="error" if exc is not None else "success",
-            error=str(exc) if exc is not None else None,
+            error=_safe_error(exc) if exc is not None else None,
             metadata=_safe_capture(dict(self.metadata or {})),
             input=input_payload,
             output=output_payload,
@@ -545,7 +549,7 @@ class _ToolCall:
             start_time=self.start_time,
             end_time=_now(),
             status="error" if exc is not None else "success",
-            error=str(exc) if exc is not None else None,
+            error=_safe_error(exc) if exc is not None else None,
             metadata=_safe_capture(dict(self.metadata or {})),
             input=input_payload,
             output=output_payload,
@@ -618,7 +622,7 @@ def _events_endpoint(server_url: str) -> str:
     return f"{normalized_url}/v1/events"
 
 
-def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> None:
+def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> int:
     payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
@@ -638,6 +642,20 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> N
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected event with HTTP {status}: {body}")
+    return _accepted_count_from_response(body)
+
+
+def _accepted_count_from_response(body: str) -> int:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return 1
+    if not isinstance(payload, Mapping):
+        return 1
+    accepted = payload.get("accepted")
+    if isinstance(accepted, int) and not isinstance(accepted, bool):
+        return accepted
+    return 1
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:
@@ -803,6 +821,25 @@ def _safe_repr(value: Any) -> str:
         return repr(value)
     except Exception:
         return f"<unrepresentable {type(value).__name__}>"
+
+
+def _safe_error(exc: BaseException) -> str:
+    return _redact_secret_text(str(exc))
+
+
+def _redact_secret_text(value: str) -> str:
+    patterns = (
+        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;]+",
+        r"(?i)\b(api[_-]?key|apikey|password|secret|token)(\s*[:=]\s*)[^\s,;]+",
+    )
+    redacted = value
+    for pattern in patterns:
+        redacted = re.sub(pattern, _redact_secret_match, redacted)
+    return redacted
+
+
+def _redact_secret_match(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{match.group(2) or ''}{_REDACTED}"
 
 
 def _validate_number(value: Any, field: str) -> int | float:

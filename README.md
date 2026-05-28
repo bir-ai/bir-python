@@ -48,13 +48,16 @@ print(result.accepted)
 ```
 
 `send_events()` posts each local JSONL event to `/v1/events`. It uses the Python
-standard library, raises `RuntimeError` when the server rejects an event or cannot
-be reached, and does not remove local events after sending.
+standard library, reports the server's accepted event count, raises `RuntimeError`
+when the server rejects an event or cannot be reached, and does not remove local
+events after sending. Re-sending the same file is safe against the Bir server
+because duplicate event IDs are treated as already ingested.
 
 Input and output capture is disabled by default. Enable it globally with `configure()`
 or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.
 Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
 and `token` are redacted before events are written.
+Secret-like values in captured error messages are also redacted.
 
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested

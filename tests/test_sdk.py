@@ -7,6 +7,7 @@ import urllib.error
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
+from http.client import HTTPMessage
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +35,9 @@ def temporary_workdir() -> Iterator[Path]:
 class FakeHttpResponse:
     status = 201
 
+    def __init__(self, body: bytes = b'{"accepted":1}') -> None:
+        self.body = body
+
     def __enter__(self) -> FakeHttpResponse:
         return self
 
@@ -41,7 +45,7 @@ class FakeHttpResponse:
         return None
 
     def read(self) -> bytes:
-        return b'{"accepted":1}'
+        return self.body
 
 
 def posted_request_body(request: object) -> dict[str, object]:
@@ -512,7 +516,7 @@ class SdkTests(unittest.TestCase):
                     url=request_url(request),
                     code=422,
                     msg="Unprocessable Entity",
-                    hdrs={},
+                    hdrs=HTTPMessage(),
                     fp=BytesIO(b'{"detail":"rejected"}'),
                 )
 
@@ -520,6 +524,24 @@ class SdkTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
                     send_events("http://server.test")
             self.assertEqual(len(posted_events), 1)
+
+    def test_send_events_uses_server_accepted_count(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return FakeHttpResponse(b'{"accepted":0,"id":"already-seen"}')
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 0)
+            self.assertEqual(result.event_ids, [])
 
     def test_load_events_rejects_invalid_jsonl(self) -> None:
         with temporary_workdir() as workdir:
@@ -547,6 +569,46 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(span_event["error"], "boom")
             self.assertEqual(trace_event["status"], "error")
             self.assertEqual(trace_event["error"], "boom")
+
+    def test_error_capture_redacts_secret_like_values(self) -> None:
+        secret_error = "provider failed authorization: Bearer sk-secret api_key=sk-test token=response-token"
+
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def fail_trace() -> None:
+                raise RuntimeError(secret_error)
+
+            @observe()
+            def fail_span() -> None:
+                with span("explode"):
+                    raise RuntimeError(secret_error)
+
+            @observe()
+            def fail_generation() -> None:
+                with generation("local.llm"):
+                    raise RuntimeError(secret_error)
+
+            @observe()
+            def fail_tool() -> None:
+                with tool_call("search_docs"):
+                    raise RuntimeError(secret_error)
+
+            for func in (fail_trace, fail_span, fail_generation, fail_tool):
+                with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                    func()
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw_trace_file = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("sk-secret", raw_trace_file)
+            self.assertNotIn("sk-test", raw_trace_file)
+            self.assertNotIn("response-token", raw_trace_file)
+
+            events = read_events(trace_path)
+            errored_events = [event for event in events if event["status"] == "error"]
+            self.assertGreaterEqual(len(errored_events), 4)
+            for event in errored_events:
+                self.assertIn("[redacted]", str(event["error"]))
 
     def test_context_is_reset_after_observed_exception(self) -> None:
         with temporary_workdir() as workdir:
