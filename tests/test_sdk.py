@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bir import configure, generation, observe, score, span
+from bir import configure, generation, observe, score, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
 
@@ -98,16 +98,16 @@ class SdkTests(unittest.TestCase):
 
             @observe(capture_inputs=True, capture_outputs=True)
             def answer(question: str) -> str:
+                response = "hello"
                 with generation(
                     "openai.chat",
                     model="gpt-4o-mini",
                     input={"question": question, "api_key": "sk-test"},
                     metadata={"provider": "openai"},
                 ) as gen:
-                    response = "hello"
                     gen.set_output({"message": response, "token": "response-token"})
                     gen.set_usage(input_tokens=5, output_tokens=7)
-                    return response
+                return response
 
             answer("hi")
 
@@ -163,6 +163,71 @@ class SdkTests(unittest.TestCase):
             trace_event = next(event for event in events if event["type"] == "trace")
             self.assertEqual(generation_event["status"], "error")
             self.assertEqual(generation_event["error"], "provider failed")
+            self.assertEqual(trace_event["status"], "error")
+
+    def test_tool_call_records_external_call_event(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> list[str]:
+                results = ["doc-1", "doc-2"]
+                with tool_call(
+                    "search_docs",
+                    input={"query": question, "authorization": "Bearer secret"},
+                    metadata={"kind": "retrieval"},
+                ) as tool:
+                    tool.set_output({"results": results, "token": "tool-token"})
+                return results
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(tool_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(tool_event["parent_id"], trace_event["id"])
+            self.assertEqual(tool_event["name"], "search_docs")
+            self.assertEqual(tool_event["metadata"], {"kind": "retrieval"})
+            self.assertEqual(tool_event["input"], {"query": "hello", "authorization": "[redacted]"})
+            self.assertEqual(tool_event["output"], {"results": ["doc-1", "doc-2"], "token": "[redacted]"})
+            self.assertEqual(tool_event["status"], "success")
+
+    def test_tool_call_capture_can_be_enabled_per_call(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with tool_call(
+                    "calculator",
+                    input={"expression": "2 + 2"},
+                    capture_input=True,
+                    capture_output=True,
+                ) as tool:
+                    tool.set_output(4)
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            self.assertEqual(tool_event["input"], {"expression": "2 + 2"})
+            self.assertEqual(tool_event["output"], 4)
+
+    def test_tool_call_exception_is_captured_and_reraised(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def fail() -> None:
+                with tool_call("search_docs"):
+                    raise LookupError("search failed")
+
+            with self.assertRaisesRegex(LookupError, "search failed"):
+                fail()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(tool_event["status"], "error")
+            self.assertEqual(tool_event["error"], "search failed")
             self.assertEqual(trace_event["status"], "error")
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
