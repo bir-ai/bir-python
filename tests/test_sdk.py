@@ -93,6 +93,36 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(score_event["value"], 0.82)
             self.assertEqual(score_event["status"], "success")
 
+    def test_score_uses_current_nested_parent(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with span("retrieve_context"):
+                    score("context_quality", 0.7)
+                    with generation("local.llm"):
+                        score("generation_quality", 0.8)
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            context_score = next(event for event in events if event["name"] == "context_quality")
+            generation_score = next(event for event in events if event["name"] == "generation_quality")
+            self.assertEqual(context_score["parent_id"], span_event["id"])
+            self.assertEqual(generation_score["parent_id"], generation_event["id"])
+
+    def test_score_rejects_non_finite_values(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                score("bad", float("nan"))
+
+            with self.assertRaisesRegex(ValueError, "score value must be finite"):
+                answer()
+
     def test_generation_records_llm_call_event(self) -> None:
         with temporary_workdir() as workdir:
 
@@ -146,6 +176,17 @@ class SdkTests(unittest.TestCase):
             generation_event = next(event for event in events if event["type"] == "generation")
             self.assertEqual(generation_event["input"], {"prompt": "hello"})
             self.assertEqual(generation_event["output"], "world")
+
+    def test_generation_usage_rejects_non_finite_values(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_usage(input_tokens=float("inf"))
+
+            with self.assertRaisesRegex(ValueError, "input_tokens must be finite"):
+                answer()
 
     def test_generation_exception_is_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:
@@ -250,6 +291,43 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(events[-1].raw["name"], "answer")
             self.assertEqual(load_events(workdir / "missing.jsonl"), [])
 
+    def test_load_events_rejects_invalid_schema(self) -> None:
+        with temporary_workdir() as workdir:
+            valid_event = {
+                "schema_version": "1.0",
+                "id": "trace-1",
+                "trace_id": "trace-1",
+                "parent_id": None,
+                "name": "answer",
+                "type": "trace",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T00:00:01+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+            }
+
+            missing_schema_path = workdir / "missing-schema.jsonl"
+            event_without_schema = dict(valid_event)
+            del event_without_schema["schema_version"]
+            missing_schema_path.write_text(json.dumps(event_without_schema) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing required field 'schema_version'"):
+                load_events(missing_schema_path)
+
+            invalid_type_path = workdir / "invalid-type.jsonl"
+            event_with_invalid_type = dict(valid_event, type="unknown")
+            invalid_type_path.write_text(json.dumps(event_with_invalid_type) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unsupported value 'unknown'"):
+                load_events(invalid_type_path)
+
+            invalid_time_path = workdir / "invalid-time.jsonl"
+            event_with_invalid_time = dict(valid_event, end_time="2025-12-31T23:59:59+00:00")
+            invalid_time_path.write_text(json.dumps(event_with_invalid_time) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "end_time before start_time"):
+                load_events(invalid_time_path)
+
     def test_load_traces_groups_events_by_trace_id(self) -> None:
         with temporary_workdir():
 
@@ -277,6 +355,69 @@ class SdkTests(unittest.TestCase):
                 [event.type for event in trace.events],
                 ["trace", "span", "tool_call", "generation", "score"],
             )
+
+    def test_load_traces_orders_root_before_children_with_same_start_time(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "events.jsonl"
+            timestamp = "2026-01-01T00:00:00+00:00"
+            child = {
+                "schema_version": "1.0",
+                "id": "score-1",
+                "trace_id": "trace-1",
+                "parent_id": "trace-1",
+                "name": "helpfulness",
+                "type": "score",
+                "start_time": timestamp,
+                "end_time": timestamp,
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+                "value": 1.0,
+            }
+            root = {
+                "schema_version": "1.0",
+                "id": "trace-1",
+                "trace_id": "trace-1",
+                "parent_id": None,
+                "name": "answer",
+                "type": "trace",
+                "start_time": timestamp,
+                "end_time": "2026-01-01T00:00:01+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+            }
+            trace_path.write_text(json.dumps(child) + "\n" + json.dumps(root) + "\n", encoding="utf-8")
+
+            trace = load_traces(trace_path)[0]
+            self.assertEqual([event.type for event in trace.events], ["trace", "score"])
+
+    def test_load_traces_skips_events_without_root_trace(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "events.jsonl"
+            event = {
+                "schema_version": "1.0",
+                "id": "score-1",
+                "trace_id": "trace-1",
+                "parent_id": "trace-1",
+                "name": "helpfulness",
+                "type": "score",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T00:00:00+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+                "value": 1.0,
+            }
+            trace_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+            self.assertEqual(load_traces(trace_path), [])
 
     def test_load_traces_uses_configured_trace_path(self) -> None:
         with temporary_workdir() as workdir:
@@ -320,6 +461,29 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(trace_event["status"], "error")
             self.assertEqual(trace_event["error"], "boom")
 
+    def test_context_is_reset_after_observed_exception(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def fail() -> None:
+                raise ValueError("boom")
+
+            with self.assertRaisesRegex(ValueError, "boom"):
+                fail()
+            with self.assertRaisesRegex(RuntimeError, "requires an active trace"):
+                score("outside", 1.0)
+
+            @observe()
+            def answer() -> None:
+                with span("child"):
+                    pass
+
+            answer()
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            success_trace = next(event for event in events if event["type"] == "trace" and event["status"] == "success")
+            child = next(event for event in events if event["type"] == "span")
+            self.assertEqual(child["parent_id"], success_trace["id"])
+
     def test_configure_sets_trace_path(self) -> None:
         with temporary_workdir() as workdir:
             trace_path = workdir / "custom" / "events.jsonl"
@@ -334,6 +498,17 @@ class SdkTests(unittest.TestCase):
             self.assertTrue(trace_path.exists())
             events = read_events(trace_path)
             self.assertEqual(events[0]["name"], "answer")
+
+    def test_storage_errors_are_not_swallowed(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(trace_path=workdir)
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            with self.assertRaises(IsADirectoryError):
+                answer()
 
     def test_observe_can_capture_inputs_and_outputs(self) -> None:
         with temporary_workdir() as workdir:
@@ -380,6 +555,36 @@ class SdkTests(unittest.TestCase):
                 {"api_key": "[redacted]", "payload": {"message": "hello", "authorization": "[redacted]"}},
             )
             self.assertEqual(event["output"], {"token": "[redacted]", "message": "hello"})
+
+    def test_capture_is_json_safe_and_depth_limited(self) -> None:
+        class BadRepr:
+            def __repr__(self) -> str:
+                raise RuntimeError("repr failed")
+
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(payload: dict[str, object]) -> dict[str, object]:
+                return {"not_a_number": float("nan"), "bad": BadRepr()}
+
+            deep_payload: dict[str, object] = {}
+            current = deep_payload
+            for _ in range(8):
+                nested: dict[str, object] = {}
+                current["nested"] = nested
+                current = nested
+            current["authorization"] = "Bearer secret"
+
+            answer(deep_payload)
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw_trace_file = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("Bearer secret", raw_trace_file)
+            self.assertNotIn("NaN", raw_trace_file)
+            events = read_events(trace_path)
+            event = events[0]
+            self.assertEqual(event["output"], {"not_a_number": "nan", "bad": "<unrepresentable BadRepr>"})
+            self.assertIn("[max_depth]", raw_trace_file)
 
 
 if __name__ == "__main__":

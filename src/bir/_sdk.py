@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import math
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -16,7 +17,17 @@ F = TypeVar("F", bound=Callable[..., Any])
 _DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")
 _SCHEMA_VERSION = "1.0"
 _MAX_CAPTURE_DEPTH = 6
+_MAX_DEPTH_REACHED = "[max_depth]"
 _REDACTED = "[redacted]"
+_EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
+_EVENT_STATUSES = {"success", "error"}
+_EVENT_SORT_PRIORITY = {
+    "trace": 0,
+    "span": 1,
+    "generation": 1,
+    "tool_call": 1,
+    "score": 2,
+}
 _SECRET_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -132,7 +143,7 @@ def load_traces(path: str | Path | None = None) -> list[LoadedTrace]:
 
     traces: list[LoadedTrace] = []
     for trace_id, trace_events in events_by_trace_id.items():
-        sorted_events = sorted(trace_events, key=lambda event: event.start_time)
+        sorted_events = sorted(trace_events, key=_event_sort_key)
         root = next((event for event in sorted_events if event.type == "trace" and event.id == trace_id), None)
         if root is None:
             continue
@@ -147,7 +158,7 @@ def load_traces(path: str | Path | None = None) -> list[LoadedTrace]:
                 root=root,
             )
         )
-    return sorted(traces, key=lambda trace: trace.start_time)
+    return sorted(traces, key=lambda trace: (trace.start_time, trace.id))
 
 
 def observe(
@@ -278,6 +289,7 @@ def score(name: str, value: int | float) -> None:
     parent_id = _current_parent_id.get()
     if trace_id is None or parent_id is None:
         raise RuntimeError("bir.score() requires an active trace. Use it inside a @observe() function.")
+    score_value = _validate_number(value, "score value")
 
     timestamp = _now()
     _write_event(
@@ -291,7 +303,7 @@ def score(name: str, value: int | float) -> None:
             end_time=timestamp,
             status="success",
             error=None,
-            value=value,
+            value=score_value,
         )
     )
 
@@ -438,13 +450,13 @@ class _Generation:
     ) -> None:
         usage: dict[str, int | float] = {}
         if input_tokens is not None:
-            usage["input_tokens"] = input_tokens
+            usage["input_tokens"] = _validate_number(input_tokens, "input_tokens")
         if output_tokens is not None:
-            usage["output_tokens"] = output_tokens
+            usage["output_tokens"] = _validate_number(output_tokens, "output_tokens")
         if total_tokens is not None:
-            usage["total_tokens"] = total_tokens
+            usage["total_tokens"] = _validate_number(total_tokens, "total_tokens")
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
-            usage["total_tokens"] = input_tokens + output_tokens
+            usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
         self.usage = usage
 
 
@@ -568,12 +580,13 @@ def _event(
 def _write_event(event: dict[str, Any]) -> None:
     _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
     with _config.trace_path.open("a", encoding="utf-8") as trace_file:
-        trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
+        trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False))
         trace_file.write("\n")
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:
     required_fields = (
+        "schema_version",
         "id",
         "trace_id",
         "parent_id",
@@ -591,16 +604,35 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
         if field not in payload:
             raise ValueError(f"Trace file {trace_path} line {line_number} is missing required field {field!r}")
 
+    schema_version = _expect_string(payload["schema_version"], "schema_version", trace_path, line_number)
+    if schema_version != _SCHEMA_VERSION:
+        raise ValueError(
+            f"Trace file {trace_path} line {line_number} has unsupported schema_version {schema_version!r}"
+        )
     event_id = _expect_string(payload["id"], "id", trace_path, line_number)
     trace_id = _expect_string(payload["trace_id"], "trace_id", trace_path, line_number)
     parent_id = _expect_optional_string(payload["parent_id"], "parent_id", trace_path, line_number)
     name = _expect_string(payload["name"], "name", trace_path, line_number)
     event_type = _expect_string(payload["type"], "type", trace_path, line_number)
-    start_time = _expect_string(payload["start_time"], "start_time", trace_path, line_number)
-    end_time = _expect_string(payload["end_time"], "end_time", trace_path, line_number)
+    if event_type not in _EVENT_TYPES:
+        raise ValueError(f"Trace file {trace_path} line {line_number} field 'type' has unsupported value {event_type!r}")
+    start_time = _expect_datetime_string(payload["start_time"], "start_time", trace_path, line_number)
+    end_time = _expect_datetime_string(payload["end_time"], "end_time", trace_path, line_number)
+    if datetime.fromisoformat(end_time) < datetime.fromisoformat(start_time):
+        raise ValueError(f"Trace file {trace_path} line {line_number} has end_time before start_time")
     status = _expect_string(payload["status"], "status", trace_path, line_number)
+    if status not in _EVENT_STATUSES:
+        raise ValueError(f"Trace file {trace_path} line {line_number} field 'status' has unsupported value {status!r}")
     metadata = _expect_mapping(payload["metadata"], "metadata", trace_path, line_number)
     error = _expect_optional_string(payload["error"], "error", trace_path, line_number)
+    if event_type == "trace" and event_id != trace_id:
+        raise ValueError(f"Trace file {trace_path} line {line_number} trace event id must match trace_id")
+    if event_type == "trace" and parent_id is not None:
+        raise ValueError(f"Trace file {trace_path} line {line_number} trace event parent_id must be null")
+    if event_type == "score":
+        if "value" not in payload:
+            raise ValueError(f"Trace file {trace_path} line {line_number} score event is missing required field 'value'")
+        _validate_number(payload["value"], "score value")
     raw = {str(key): value for key, value in payload.items()}
 
     return TraceEvent(
@@ -630,6 +662,17 @@ def _expect_optional_string(value: Any, field: str, trace_path: Path, line_numbe
     if value is None:
         return None
     return _expect_string(value, field, trace_path, line_number)
+
+
+def _expect_datetime_string(value: Any, field: str, trace_path: Path, line_number: int) -> str:
+    timestamp = _expect_string(value, field, trace_path, line_number)
+    try:
+        datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise ValueError(
+            f"Trace file {trace_path} line {line_number} field {field!r} must be an ISO datetime"
+        ) from exc
+    return timestamp
 
 
 def _expect_mapping(value: Any, field: str, trace_path: Path, line_number: int) -> dict[str, Any]:
@@ -668,25 +711,54 @@ def _capture_call_input(
 def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     if key is not None and _is_secret_key(key):
         return _REDACTED
-    if depth >= _MAX_CAPTURE_DEPTH:
-        return repr(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, bool, int)):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else repr(value)
     if isinstance(value, Path):
         return str(value)
+    if depth >= _MAX_CAPTURE_DEPTH:
+        return _MAX_DEPTH_REACHED
     if isinstance(value, Mapping):
-        return {
-            str(item_key): _safe_capture(item_value, key=str(item_key), depth=depth + 1)
-            for item_key, item_value in value.items()
-        }
+        captured: dict[str, Any] = {}
+        for item_key, item_value in value.items():
+            item_key_text = _safe_key(item_key)
+            captured[item_key_text] = _safe_capture(item_value, key=item_key_text, depth=depth + 1)
+        return captured
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_safe_capture(item, depth=depth + 1) for item in value]
-    return repr(value)
+    return _safe_repr(value)
 
 
 def _is_secret_key(key: str) -> bool:
     normalized = key.lower().replace("-", "_")
     return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
+
+
+def _safe_key(value: Any) -> str:
+    try:
+        return str(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _safe_repr(value: Any) -> str:
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _validate_number(value: Any, field: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"bir {field} must be an int or float")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"bir {field} must be finite")
+    return value
+
+
+def _event_sort_key(event: TraceEvent) -> tuple[str, int, str, str]:
+    return (event.start_time, _EVENT_SORT_PRIORITY.get(event.type, 99), event.end_time, event.id)
 
 
 def _reset_context(

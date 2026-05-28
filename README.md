@@ -45,6 +45,15 @@ or for a single function with `@observe(capture_inputs=True, capture_outputs=Tru
 Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
 and `token` are redacted before events are written.
 
+Captured values are normalized to JSON-compatible data before writing. Non-finite
+floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
+values are truncated. `score()` and generation token usage require finite numeric
+values.
+
+`load_events()` validates JSONL records against the current event schema and
+raises `ValueError` for malformed rows, unsupported event types, invalid
+timestamps, or unsupported schema versions.
+
 To write traces somewhere else:
 
 ```python
