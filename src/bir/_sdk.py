@@ -4,6 +4,8 @@ import functools
 import inspect
 import json
 import math
+import urllib.error
+import urllib.request
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -86,6 +88,12 @@ class LoadedTrace:
         return self.root.duration_ms
 
 
+@dataclass(frozen=True)
+class SendEventsResult:
+    accepted: int
+    event_ids: list[str]
+
+
 _config = _Config()
 
 
@@ -159,6 +167,25 @@ def load_traces(path: str | Path | None = None) -> list[LoadedTrace]:
             )
         )
     return sorted(traces, key=lambda trace: (trace.start_time, trace.id))
+
+
+def send_events(
+    server_url: str = "http://127.0.0.1:8000",
+    *,
+    path: str | Path | None = None,
+    timeout: float = 10.0,
+) -> SendEventsResult:
+    """Send local JSONL trace events to a Bir ingestion server."""
+
+    events = load_events(path)
+    event_ids: list[str] = []
+    endpoint = _events_endpoint(server_url)
+
+    for event in events:
+        _post_event(endpoint, event.raw, timeout=timeout)
+        event_ids.append(event.id)
+
+    return SendEventsResult(accepted=len(event_ids), event_ids=event_ids)
 
 
 def observe(
@@ -582,6 +609,35 @@ def _write_event(event: dict[str, Any]) -> None:
     with _config.trace_path.open("a", encoding="utf-8") as trace_file:
         trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False))
         trace_file.write("\n")
+
+
+def _events_endpoint(server_url: str) -> str:
+    normalized_url = server_url.rstrip("/")
+    if not normalized_url:
+        raise ValueError("bir server_url must not be empty")
+    return f"{normalized_url}/v1/events"
+
+
+def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> None:
+    payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"bir server rejected event with HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"bir could not send event to {endpoint}: {exc.reason}") from exc
+
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"bir server rejected event with HTTP {status}: {body}")
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:

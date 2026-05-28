@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import urllib.error
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
-from bir import configure, generation, load_events, load_traces, observe, score, span, tool_call
+from bir import configure, generation, load_events, load_traces, observe, score, send_events, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
 
@@ -26,6 +29,36 @@ def temporary_workdir() -> Iterator[Path]:
             yield workdir
         finally:
             os.chdir(previous)
+
+
+class FakeHttpResponse:
+    status = 201
+
+    def __enter__(self) -> FakeHttpResponse:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b'{"accepted":1}'
+
+
+def posted_request_body(request: object) -> dict[str, object]:
+    data = getattr(request, "data")
+    if not isinstance(data, bytes):
+        raise TypeError("expected request data to be bytes")
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("expected request body to be a JSON object")
+    return payload
+
+
+def request_url(request: object) -> str:
+    url = getattr(request, "full_url")
+    if not isinstance(url, str):
+        raise TypeError("expected request to have a full_url")
+    return url
 
 
 class SdkTests(unittest.TestCase):
@@ -433,6 +466,60 @@ class SdkTests(unittest.TestCase):
             traces = load_traces()
             self.assertEqual(len(traces), 1)
             self.assertEqual(traces[0].name, "answer")
+
+    def test_send_events_posts_local_events_to_server(self) -> None:
+        with temporary_workdir():
+
+            @observe(capture_inputs=True)
+            def answer(question: str) -> str:
+                score("helpfulness", 0.9)
+                return question.upper()
+
+            answer("hello")
+            posted_events: list[dict[str, object]] = []
+            posted_urls: list[str] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                self.assertEqual(timeout, 10.0)
+                posted_urls.append(request_url(request))
+                posted_events.append(posted_request_body(request))
+                return FakeHttpResponse()
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 2)
+            self.assertEqual(len(result.event_ids), 2)
+            self.assertEqual(posted_urls, ["http://server.test/v1/events", "http://server.test/v1/events"])
+            posted_types = [event["type"] for event in posted_events]
+            self.assertEqual(posted_types, ["score", "trace"])
+            trace_event = next(event for event in posted_events if event["type"] == "trace")
+            self.assertEqual(trace_event["input"], {"question": "hello"})
+
+    def test_send_events_raises_when_server_rejects_event(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            posted_events: list[dict[str, object]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                posted_events.append(posted_request_body(request))
+                raise urllib.error.HTTPError(
+                    url=request_url(request),
+                    code=422,
+                    msg="Unprocessable Entity",
+                    hdrs={},
+                    fp=BytesIO(b'{"detail":"rejected"}'),
+                )
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
+                    send_events("http://server.test")
+            self.assertEqual(len(posted_events), 1)
 
     def test_load_events_rejects_invalid_jsonl(self) -> None:
         with temporary_workdir() as workdir:

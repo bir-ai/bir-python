@@ -3,7 +3,7 @@
 Minimal local tracing SDK for Python LLM applications.
 
 ```python
-from bir import configure, generation, load_traces, observe, score, span, tool_call
+from bir import configure, generation, load_traces, observe, score, send_events, span, tool_call
 
 
 configure(capture_inputs=True, capture_outputs=True)
@@ -39,6 +39,17 @@ for trace in load_traces():
     for event in trace.events:
         print(event.type, event.name)
 ```
+
+To send local events to a running Bir server:
+
+```python
+result = send_events("http://127.0.0.1:8000")
+print(result.accepted)
+```
+
+`send_events()` posts each local JSONL event to `/v1/events`. It uses the Python
+standard library, raises `RuntimeError` when the server rejects an event or cannot
+be reached, and does not remove local events after sending.
 
 Input and output capture is disabled by default. Enable it globally with `configure()`
 or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.
