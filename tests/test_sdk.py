@@ -15,6 +15,9 @@ from unittest.mock import patch
 from bir import configure, generation, load_events, load_traces, observe, score, send_events, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
+ROOT = Path(__file__).resolve().parents[3]
+CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
+
 
 def read_events(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -328,6 +331,20 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(events[-1].raw["name"], "answer")
             self.assertEqual(load_events(workdir / "missing.jsonl"), [])
 
+    def test_load_events_accepts_schema_contract_fixtures(self) -> None:
+        events = load_events(CONTRACT_EVENTS_PATH)
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["trace", "span", "tool_call", "generation", "score"],
+        )
+        generation_event = next(event for event in events if event.type == "generation")
+        score_event = next(event for event in events if event.type == "score")
+        self.assertEqual(generation_event.parent_id, "trace-fixture-1")
+        self.assertEqual(generation_event.raw["usage"], {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})
+        self.assertEqual(score_event.parent_id, "generation-fixture-1")
+        self.assertEqual(score_event.raw["value"], 0.82)
+
     def test_load_events_rejects_invalid_schema(self) -> None:
         with temporary_workdir() as workdir:
             valid_event = {
@@ -364,6 +381,53 @@ class SdkTests(unittest.TestCase):
             invalid_time_path.write_text(json.dumps(event_with_invalid_time) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "end_time before start_time"):
                 load_events(invalid_time_path)
+
+            child_without_parent_path = workdir / "child-without-parent.jsonl"
+            child_without_parent = dict(
+                valid_event,
+                id="span-1",
+                type="span",
+                parent_id=None,
+            )
+            child_without_parent_path.write_text(json.dumps(child_without_parent) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "span event requires parent_id"):
+                load_events(child_without_parent_path)
+
+            non_finite_input_path = workdir / "non-finite-input.jsonl"
+            event_with_non_finite_input = dict(valid_event, input={"value": float("nan")})
+            non_finite_input_path.write_text(
+                json.dumps(event_with_non_finite_input, allow_nan=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "input.value"):
+                load_events(non_finite_input_path)
+
+            invalid_usage_path = workdir / "invalid-usage.jsonl"
+            event_with_invalid_usage = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                usage={"input_tokens": float("inf")},
+            )
+            invalid_usage_path.write_text(
+                json.dumps(event_with_invalid_usage, allow_nan=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "usage.input_tokens"):
+                load_events(invalid_usage_path)
+
+            invalid_model_path = workdir / "invalid-model.jsonl"
+            event_with_invalid_model = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                model=123,
+            )
+            invalid_model_path.write_text(json.dumps(event_with_invalid_model) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "model"):
+                load_events(invalid_model_path)
 
     def test_load_traces_groups_events_by_trace_id(self) -> None:
         with temporary_workdir():

@@ -703,10 +703,31 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
         raise ValueError(f"Trace file {trace_path} line {line_number} trace event id must match trace_id")
     if event_type == "trace" and parent_id is not None:
         raise ValueError(f"Trace file {trace_path} line {line_number} trace event parent_id must be null")
+    if event_type != "trace" and parent_id is None:
+        raise ValueError(f"Trace file {trace_path} line {line_number} {event_type} event requires parent_id")
     if event_type == "score":
         if "value" not in payload:
             raise ValueError(f"Trace file {trace_path} line {line_number} score event is missing required field 'value'")
         _validate_number(payload["value"], "score value")
+    elif payload.get("value") is not None:
+        _validate_number(payload["value"], "value")
+    if payload.get("model") is not None:
+        _expect_string(payload["model"], "model", trace_path, line_number)
+    if "usage" in payload:
+        usage = payload["usage"]
+        if usage is not None:
+            if not isinstance(usage, Mapping):
+                raise ValueError(f"Trace file {trace_path} line {line_number} field 'usage' must be an object")
+            for key, value in usage.items():
+                _expect_string(key, "usage key", trace_path, line_number)
+                _validate_number(value, f"usage.{key}")
+    _validate_json_value(metadata, "metadata", trace_path, line_number)
+    _validate_json_value(payload["input"], "input", trace_path, line_number)
+    _validate_json_value(payload["output"], "output", trace_path, line_number)
+    for key, value in payload.items():
+        _expect_string(key, "event key", trace_path, line_number)
+        if key not in required_fields and key not in {"value", "model", "usage"}:
+            _validate_json_value(value, key, trace_path, line_number)
     raw = {str(key): value for key, value in payload.items()}
 
     return TraceEvent(
@@ -753,6 +774,28 @@ def _expect_mapping(value: Any, field: str, trace_path: Path, line_number: int) 
     if not isinstance(value, Mapping):
         raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be an object")
     return {str(key): item for key, item in value.items()}
+
+
+def _validate_json_value(value: Any, field: str, trace_path: Path, line_number: int) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        try:
+            _validate_number(value, field)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be finite") from exc
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{field}[{index}]", trace_path, line_number)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} keys must be strings")
+            _validate_json_value(item, f"{field}.{key}", trace_path, line_number)
+        return
+    raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be JSON-compatible")
 
 
 def _duration_ms(start_time: str, end_time: str) -> float:

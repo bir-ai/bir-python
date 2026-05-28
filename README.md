@@ -3,20 +3,17 @@
 Minimal local tracing SDK for Python LLM applications.
 
 ```python
-from bir import configure, generation, load_traces, observe, score, send_events, span, tool_call
-
-
-configure(capture_inputs=True, capture_outputs=True)
+from bir import generation, load_traces, observe, score, send_events, span, tool_call
 
 
 @observe()
 def answer_question(question: str) -> str:
     with span("retrieve_context"):
-        with tool_call("search_docs", input={"query": question}) as tool:
+        with tool_call("search_docs") as tool:
             documents = ["local context"]
             tool.set_output(documents)
 
-    with generation("local.llm", model="demo-model", input={"question": question}) as gen:
+    with generation("local.llm", model="demo-model") as gen:
         response = f"{documents[0]}: {question}"
         gen.set_output(response)
         gen.set_usage(input_tokens=12, output_tokens=24)
@@ -58,6 +55,12 @@ or for a single function with `@observe(capture_inputs=True, capture_outputs=Tru
 Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
 and `token` are redacted before events are written.
 Secret-like values in captured error messages are also redacted.
+
+```python
+from bir import configure
+
+configure(capture_inputs=True, capture_outputs=True)
+```
 
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
