@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bir import configure, observe, score, span
+from bir import configure, generation, observe, score, span
 from bir._sdk import _reset_config_for_tests
 
 
@@ -92,6 +92,78 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(score_event["name"], "helpfulness")
             self.assertEqual(score_event["value"], 0.82)
             self.assertEqual(score_event["status"], "success")
+
+    def test_generation_records_llm_call_event(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with generation(
+                    "openai.chat",
+                    model="gpt-4o-mini",
+                    input={"question": question, "api_key": "sk-test"},
+                    metadata={"provider": "openai"},
+                ) as gen:
+                    response = "hello"
+                    gen.set_output({"message": response, "token": "response-token"})
+                    gen.set_usage(input_tokens=5, output_tokens=7)
+                    return response
+
+            answer("hi")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(generation_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(generation_event["parent_id"], trace_event["id"])
+            self.assertEqual(generation_event["name"], "openai.chat")
+            self.assertEqual(generation_event["model"], "gpt-4o-mini")
+            self.assertEqual(generation_event["metadata"], {"provider": "openai"})
+            self.assertEqual(generation_event["input"], {"question": "hi", "api_key": "[redacted]"})
+            self.assertEqual(generation_event["output"], {"message": "hello", "token": "[redacted]"})
+            self.assertEqual(
+                generation_event["usage"],
+                {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
+            )
+            self.assertEqual(generation_event["status"], "success")
+
+    def test_generation_capture_can_be_enabled_per_call(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with generation(
+                    "local.llm",
+                    input={"prompt": "hello"},
+                    capture_input=True,
+                    capture_output=True,
+                ) as gen:
+                    gen.set_output("world")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["input"], {"prompt": "hello"})
+            self.assertEqual(generation_event["output"], "world")
+
+    def test_generation_exception_is_captured_and_reraised(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def fail() -> None:
+                with generation("openai.chat"):
+                    raise RuntimeError("provider failed")
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                fail()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(generation_event["status"], "error")
+            self.assertEqual(generation_event["error"], "provider failed")
+            self.assertEqual(trace_event["status"], "error")
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:

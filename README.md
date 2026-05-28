@@ -3,7 +3,7 @@
 Minimal local tracing SDK for Python LLM applications.
 
 ```python
-from bir import configure, observe, score, span
+from bir import configure, generation, observe, score, span
 
 
 configure(capture_inputs=True, capture_outputs=True)
@@ -14,12 +14,16 @@ def answer_question(question: str) -> str:
     with span("retrieve_context"):
         context = "local context"
 
-    response = f"{context}: {question}"
+    with generation("local.llm", model="demo-model", input={"question": question}) as gen:
+        response = f"{context}: {question}"
+        gen.set_output(response)
+        gen.set_usage(input_tokens=12, output_tokens=24)
+
     score("helpfulness", 0.82)
     return response
 ```
 
-Trace, span, and score events are written as JSONL to:
+Trace, span, generation, and score events are written as JSONL to:
 
 ```text
 .bir/traces.jsonl

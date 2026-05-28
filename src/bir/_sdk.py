@@ -28,6 +28,8 @@ _SECRET_KEY_PARTS = (
 )
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
+_current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
+_current_capture_outputs: ContextVar[bool | None] = ContextVar("bir_current_capture_outputs", default=None)
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,8 @@ def observe(
             start_time = _now()
             trace_token = _current_trace_id.set(trace_id)
             parent_token = _current_parent_id.set(trace_id)
+            capture_inputs_token = _current_capture_inputs.set(_should_capture(capture_inputs, "inputs"))
+            capture_outputs_token = _current_capture_outputs.set(_should_capture(capture_outputs, "outputs"))
             input_payload = None
 
             try:
@@ -90,7 +94,7 @@ def observe(
                 result = func(*args, **kwargs)
             except Exception as exc:
                 end_time = _now()
-                _reset_context(trace_token, parent_token)
+                _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
                 event = _event(
                     event_id=trace_id,
                     trace_id=trace_id,
@@ -110,7 +114,7 @@ def observe(
                 raise
 
             end_time = _now()
-            _reset_context(trace_token, parent_token)
+            _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
             output_payload = _safe_capture(result) if _should_capture(capture_outputs, "outputs") else None
             _write_event(
                 _event(
@@ -138,6 +142,27 @@ def span(name: str) -> _Span:
     """Create a nested span inside the current trace."""
 
     return _Span(name)
+
+
+def generation(
+    name: str,
+    *,
+    model: str | None = None,
+    input: Any = None,
+    metadata: Mapping[str, Any] | None = None,
+    capture_input: bool | None = None,
+    capture_output: bool | None = None,
+) -> _Generation:
+    """Create a generation event for an LLM call inside the current trace."""
+
+    return _Generation(
+        name=name,
+        model=model,
+        input=input,
+        metadata=metadata,
+        capture_input=capture_input,
+        capture_output=capture_output,
+    )
 
 
 def score(name: str, value: int | float) -> None:
@@ -219,6 +244,104 @@ class _Span:
         return False
 
 
+class _Generation:
+    def __init__(
+        self,
+        *,
+        name: str,
+        model: str | None,
+        input: Any,
+        metadata: Mapping[str, Any] | None,
+        capture_input: bool | None,
+        capture_output: bool | None,
+    ) -> None:
+        self.name = name
+        self.model = model
+        self.input = input
+        self.metadata = metadata
+        self.capture_input = capture_input
+        self.capture_output = capture_output
+        self.id: str | None = None
+        self.trace_id: str | None = None
+        self.parent_id: str | None = None
+        self.start_time: str | None = None
+        self.output: Any = None
+        self.usage: dict[str, int | float] | None = None
+        self._parent_token: Token[str | None] | None = None
+
+    def __enter__(self) -> _Generation:
+        trace_id = _current_trace_id.get()
+        parent_id = _current_parent_id.get()
+        if trace_id is None or parent_id is None:
+            raise RuntimeError("bir.generation() requires an active trace. Use it inside a @observe() function.")
+
+        self.id = _new_id()
+        self.trace_id = trace_id
+        self.parent_id = parent_id
+        self.start_time = _now()
+        self._parent_token = _current_parent_id.set(self.id)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        if self._parent_token is not None:
+            _current_parent_id.reset(self._parent_token)
+
+        if self.id is None or self.trace_id is None or self.start_time is None:
+            raise RuntimeError("bir.generation() exited before it was entered")
+
+        input_payload = _safe_capture(self.input) if _should_capture(self.capture_input, "inputs") else None
+        output_payload = _safe_capture(self.output) if _should_capture(self.capture_output, "outputs") else None
+        event = _event(
+            event_id=self.id,
+            trace_id=self.trace_id,
+            parent_id=self.parent_id,
+            name=self.name,
+            event_type="generation",
+            start_time=self.start_time,
+            end_time=_now(),
+            status="error" if exc is not None else "success",
+            error=str(exc) if exc is not None else None,
+            metadata=_safe_capture(dict(self.metadata or {})),
+            input=input_payload,
+            output=output_payload,
+            model=self.model,
+            usage=self.usage,
+        )
+        try:
+            _write_event(event)
+        except Exception as storage_error:
+            if exc is not None:
+                raise exc from storage_error
+            raise
+        return False
+
+    def set_output(self, output: Any) -> None:
+        self.output = output
+
+    def set_usage(
+        self,
+        *,
+        input_tokens: int | float | None = None,
+        output_tokens: int | float | None = None,
+        total_tokens: int | float | None = None,
+    ) -> None:
+        usage: dict[str, int | float] = {}
+        if input_tokens is not None:
+            usage["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            usage["output_tokens"] = output_tokens
+        if total_tokens is not None:
+            usage["total_tokens"] = total_tokens
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            usage["total_tokens"] = input_tokens + output_tokens
+        self.usage = usage
+
+
 def _event(
     *,
     event_id: str,
@@ -230,9 +353,12 @@ def _event(
     end_time: str,
     status: str,
     error: str | None,
+    metadata: Mapping[str, Any] | None = None,
     input: Any = None,
     output: Any = None,
     value: int | float | None = None,
+    model: str | None = None,
+    usage: Mapping[str, int | float] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
@@ -244,13 +370,17 @@ def _event(
         "start_time": start_time,
         "end_time": end_time,
         "status": status,
-        "metadata": {},
+        "metadata": dict(metadata or {}),
         "input": input,
         "output": output,
         "error": error,
     }
     if value is not None:
         event["value"] = value
+    if model is not None:
+        event["model"] = model
+    if usage is not None:
+        event["usage"] = dict(usage)
     return event
 
 
@@ -264,6 +394,9 @@ def _write_event(event: dict[str, Any]) -> None:
 def _should_capture(override: bool | None, target: str) -> bool:
     if override is not None:
         return override
+    context_value = _current_capture_inputs.get() if target == "inputs" else _current_capture_outputs.get()
+    if context_value is not None:
+        return context_value
     if target == "inputs":
         return _config.capture_inputs
     return _config.capture_outputs
@@ -306,7 +439,11 @@ def _is_secret_key(key: str) -> bool:
 def _reset_context(
     trace_token: Token[str | None],
     parent_token: Token[str | None],
+    capture_inputs_token: Token[bool | None],
+    capture_outputs_token: Token[bool | None],
 ) -> None:
+    _current_capture_outputs.reset(capture_outputs_token)
+    _current_capture_inputs.reset(capture_inputs_token)
     _current_parent_id.reset(parent_token)
     _current_trace_id.reset(trace_token)
 
