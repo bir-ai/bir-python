@@ -178,7 +178,7 @@ def send_events(
 ) -> SendEventsResult:
     """Send local JSONL trace events to a Bir ingestion server."""
 
-    events = load_events(path)
+    events = _events_for_sending(path)
     accepted = 0
     event_ids: list[str] = []
     endpoint = _events_endpoint(server_url)
@@ -190,6 +190,21 @@ def send_events(
             event_ids.append(event.id)
 
     return SendEventsResult(accepted=accepted, event_ids=event_ids)
+
+
+def _events_for_sending(path: str | Path | None = None) -> list[TraceEvent]:
+    events = load_events(path)
+    traces = load_traces(path)
+    ordered_events: list[TraceEvent] = []
+    ordered_event_ids: set[str] = set()
+
+    for trace in traces:
+        for event in trace.events:
+            ordered_events.append(event)
+            ordered_event_ids.add(event.id)
+
+    ordered_events.extend(event for event in events if event.id not in ordered_event_ids)
+    return ordered_events
 
 
 def observe(
@@ -211,14 +226,16 @@ def observe(
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             trace_id = _new_id()
             start_time = _now()
+            capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
+            capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
             trace_token = _current_trace_id.set(trace_id)
             parent_token = _current_parent_id.set(trace_id)
-            capture_inputs_token = _current_capture_inputs.set(_should_capture(capture_inputs, "inputs"))
-            capture_outputs_token = _current_capture_outputs.set(_should_capture(capture_outputs, "outputs"))
+            capture_inputs_token = _current_capture_inputs.set(capture_inputs_for_call)
+            capture_outputs_token = _current_capture_outputs.set(capture_outputs_for_call)
             input_payload = None
 
             try:
-                if _should_capture(capture_inputs, "inputs"):
+                if capture_inputs_for_call:
                     input_payload = _capture_call_input(signature, args, kwargs)
                 result = func(*args, **kwargs)
             except Exception as exc:
@@ -244,7 +261,7 @@ def observe(
 
             end_time = _now()
             _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
-            output_payload = _safe_capture(result) if _should_capture(capture_outputs, "outputs") else None
+            output_payload = _safe_capture(result) if capture_outputs_for_call else None
             _write_event(
                 _event(
                     event_id=trace_id,

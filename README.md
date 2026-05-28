@@ -49,6 +49,8 @@ standard library, reports the server's accepted event count, raises `RuntimeErro
 when the server rejects an event or cannot be reached, and does not remove local
 events after sending. Re-sending the same file is safe against the Bir server
 because duplicate event IDs are treated as already ingested.
+Complete traces are sent root-first so the server receives the trace event before
+its spans, tool calls, generations, and scores.
 
 Input and output capture is disabled by default. Enable it globally with `configure()`
 or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.

@@ -560,9 +560,40 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(len(result.event_ids), 2)
             self.assertEqual(posted_urls, ["http://server.test/v1/events", "http://server.test/v1/events"])
             posted_types = [event["type"] for event in posted_events]
-            self.assertEqual(posted_types, ["score", "trace"])
+            self.assertEqual(posted_types, ["trace", "score"])
             trace_event = next(event for event in posted_events if event["type"] == "trace")
             self.assertEqual(trace_event["input"], {"question": "hello"})
+
+    def test_send_events_posts_complete_traces_root_first(self) -> None:
+        with temporary_workdir():
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    with tool_call("search_docs", input={"query": question}) as tool:
+                        tool.set_output(["doc-1"])
+                with generation("local.llm", model="demo", input={"question": question}) as gen:
+                    gen.set_output("ok")
+                    gen.set_usage(input_tokens=1, output_tokens=2)
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer("hello")
+            posted_events: list[dict[str, object]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                posted_events.append(posted_request_body(request))
+                return FakeHttpResponse()
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 5)
+            self.assertEqual(
+                [event["type"] for event in posted_events],
+                ["trace", "span", "tool_call", "generation", "score"],
+            )
+            self.assertEqual(result.event_ids, [event["id"] for event in posted_events])
 
     def test_send_events_raises_when_server_rejects_event(self) -> None:
         with temporary_workdir():
@@ -751,6 +782,21 @@ class SdkTests(unittest.TestCase):
             event = events[0]
             self.assertEqual(event["input"], {"question": "hello"})
             self.assertEqual(event["output"], "HELLO")
+
+    def test_observe_capture_settings_are_stable_during_call(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer(question: str) -> str:
+                configure(capture_inputs=True, capture_outputs=True)
+                return question.upper()
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            event = events[0]
+            self.assertIsNone(event["input"])
+            self.assertIsNone(event["output"])
 
     def test_capture_redacts_secret_like_inputs_and_outputs(self) -> None:
         with temporary_workdir() as workdir:
