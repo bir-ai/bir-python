@@ -3,7 +3,7 @@
 Minimal local tracing SDK for Python LLM applications.
 
 ```python
-from bir import configure, generation, observe, score, span, tool_call
+from bir import configure, generation, load_traces, observe, score, span, tool_call
 
 
 configure(capture_inputs=True, capture_outputs=True)
@@ -29,6 +29,15 @@ Trace, span, tool call, generation, and score events are written as JSONL to:
 
 ```text
 .bir/traces.jsonl
+```
+
+You can also read local traces back from the same file:
+
+```python
+for trace in load_traces():
+    print(trace.name, trace.status, trace.duration_ms)
+    for event in trace.events:
+        print(event.type, event.name)
 ```
 
 Input and output capture is disabled by default. Enable it globally with `configure()`

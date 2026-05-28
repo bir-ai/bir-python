@@ -39,6 +39,42 @@ class _Config:
     capture_outputs: bool = False
 
 
+@dataclass(frozen=True)
+class TraceEvent:
+    id: str
+    trace_id: str
+    parent_id: str | None
+    name: str
+    type: str
+    start_time: str
+    end_time: str
+    status: str
+    metadata: dict[str, Any]
+    input: Any
+    output: Any
+    error: str | None
+    raw: dict[str, Any]
+
+    @property
+    def duration_ms(self) -> float:
+        return _duration_ms(self.start_time, self.end_time)
+
+
+@dataclass(frozen=True)
+class LoadedTrace:
+    id: str
+    name: str
+    start_time: str
+    end_time: str
+    status: str
+    events: list[TraceEvent]
+    root: TraceEvent
+
+    @property
+    def duration_ms(self) -> float:
+        return self.root.duration_ms
+
+
 _config = _Config()
 
 
@@ -61,6 +97,57 @@ def configure(
         updates["capture_outputs"] = capture_outputs
 
     _config = replace(_config, **updates)
+
+
+def load_events(path: str | Path | None = None) -> list[TraceEvent]:
+    """Load local JSONL trace events."""
+
+    trace_path = Path(path) if path is not None else _config.trace_path
+    if not trace_path.exists():
+        return []
+
+    events: list[TraceEvent] = []
+    with trace_path.open("r", encoding="utf-8") as trace_file:
+        for line_number, line in enumerate(trace_file, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in trace file {trace_path} at line {line_number}") from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"Trace file {trace_path} line {line_number} must contain a JSON object")
+            events.append(_trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number))
+    return events
+
+
+def load_traces(path: str | Path | None = None) -> list[LoadedTrace]:
+    """Load local traces grouped by trace_id."""
+
+    events = load_events(path)
+    events_by_trace_id: dict[str, list[TraceEvent]] = {}
+    for event in events:
+        events_by_trace_id.setdefault(event.trace_id, []).append(event)
+
+    traces: list[LoadedTrace] = []
+    for trace_id, trace_events in events_by_trace_id.items():
+        sorted_events = sorted(trace_events, key=lambda event: event.start_time)
+        root = next((event for event in sorted_events if event.type == "trace" and event.id == trace_id), None)
+        if root is None:
+            continue
+        traces.append(
+            LoadedTrace(
+                id=trace_id,
+                name=root.name,
+                start_time=root.start_time,
+                end_time=root.end_time,
+                status=root.status,
+                events=sorted_events,
+                root=root,
+            )
+        )
+    return sorted(traces, key=lambda trace: trace.start_time)
 
 
 def observe(
@@ -483,6 +570,78 @@ def _write_event(event: dict[str, Any]) -> None:
     with _config.trace_path.open("a", encoding="utf-8") as trace_file:
         trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
         trace_file.write("\n")
+
+
+def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:
+    required_fields = (
+        "id",
+        "trace_id",
+        "parent_id",
+        "name",
+        "type",
+        "start_time",
+        "end_time",
+        "status",
+        "metadata",
+        "input",
+        "output",
+        "error",
+    )
+    for field in required_fields:
+        if field not in payload:
+            raise ValueError(f"Trace file {trace_path} line {line_number} is missing required field {field!r}")
+
+    event_id = _expect_string(payload["id"], "id", trace_path, line_number)
+    trace_id = _expect_string(payload["trace_id"], "trace_id", trace_path, line_number)
+    parent_id = _expect_optional_string(payload["parent_id"], "parent_id", trace_path, line_number)
+    name = _expect_string(payload["name"], "name", trace_path, line_number)
+    event_type = _expect_string(payload["type"], "type", trace_path, line_number)
+    start_time = _expect_string(payload["start_time"], "start_time", trace_path, line_number)
+    end_time = _expect_string(payload["end_time"], "end_time", trace_path, line_number)
+    status = _expect_string(payload["status"], "status", trace_path, line_number)
+    metadata = _expect_mapping(payload["metadata"], "metadata", trace_path, line_number)
+    error = _expect_optional_string(payload["error"], "error", trace_path, line_number)
+    raw = {str(key): value for key, value in payload.items()}
+
+    return TraceEvent(
+        id=event_id,
+        trace_id=trace_id,
+        parent_id=parent_id,
+        name=name,
+        type=event_type,
+        start_time=start_time,
+        end_time=end_time,
+        status=status,
+        metadata=metadata,
+        input=payload["input"],
+        output=payload["output"],
+        error=error,
+        raw=raw,
+    )
+
+
+def _expect_string(value: Any, field: str, trace_path: Path, line_number: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be a string")
+    return value
+
+
+def _expect_optional_string(value: Any, field: str, trace_path: Path, line_number: int) -> str | None:
+    if value is None:
+        return None
+    return _expect_string(value, field, trace_path, line_number)
+
+
+def _expect_mapping(value: Any, field: str, trace_path: Path, line_number: int) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be an object")
+    return {str(key): item for key, item in value.items()}
+
+
+def _duration_ms(start_time: str, end_time: str) -> float:
+    start = datetime.fromisoformat(start_time)
+    end = datetime.fromisoformat(end_time)
+    return (end - start).total_seconds() * 1000
 
 
 def _should_capture(override: bool | None, target: str) -> bool:

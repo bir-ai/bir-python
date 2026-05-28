@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bir import configure, generation, observe, score, span, tool_call
+from bir import configure, generation, load_events, load_traces, observe, score, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
 
@@ -229,6 +229,77 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(tool_event["status"], "error")
             self.assertEqual(tool_event["error"], "search failed")
             self.assertEqual(trace_event["status"], "error")
+
+    def test_load_events_returns_local_trace_events(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with tool_call("search_docs", input={"query": question}) as tool:
+                    tool.set_output(["doc-1"])
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer("hello")
+
+            events = load_events()
+            self.assertEqual([event.type for event in events], ["tool_call", "score", "trace"])
+            self.assertEqual(events[0].name, "search_docs")
+            self.assertEqual(events[0].input, {"query": "hello"})
+            self.assertGreaterEqual(events[-1].duration_ms, 0)
+            self.assertEqual(events[-1].raw["name"], "answer")
+            self.assertEqual(load_events(workdir / "missing.jsonl"), [])
+
+    def test_load_traces_groups_events_by_trace_id(self) -> None:
+        with temporary_workdir():
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    with tool_call("search_docs", input={"query": question}) as tool:
+                        tool.set_output(["doc-1"])
+                with generation("local.llm", model="demo", input={"question": question}) as gen:
+                    gen.set_output("ok")
+                    gen.set_usage(input_tokens=1, output_tokens=2)
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer("hello")
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+            trace = traces[0]
+            self.assertEqual(trace.name, "answer")
+            self.assertEqual(trace.status, "success")
+            self.assertEqual(trace.id, trace.root.id)
+            self.assertGreaterEqual(trace.duration_ms, 0)
+            self.assertEqual(
+                [event.type for event in trace.events],
+                ["trace", "span", "tool_call", "generation", "score"],
+            )
+
+    def test_load_traces_uses_configured_trace_path(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "custom" / "events.jsonl"
+            configure(trace_path=trace_path)
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(traces[0].name, "answer")
+
+    def test_load_events_rejects_invalid_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "bad.jsonl"
+            trace_path.write_text("not-json\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Invalid JSON"):
+                load_events(trace_path)
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:
