@@ -1,10 +1,13 @@
 {
   "include": [
     "packages/python-sdk/src",
-    "packages/python-sdk/tests"
+    "packages/python-sdk/tests",
+    "apps/server/app",
+    "apps/server/tests"
   ],
   "extraPaths": [
-    "packages/python-sdk/src"
+    "packages/python-sdk/src",
+    "apps/server"
   ],
   "venvPath": ".",
   "venv": ".venv"
