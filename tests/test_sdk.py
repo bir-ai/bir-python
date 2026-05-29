@@ -417,6 +417,41 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "usage.input_tokens"):
                 load_events(invalid_usage_path)
 
+            bool_usage_path = workdir / "bool-usage.jsonl"
+            event_with_bool_usage = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                usage={"input_tokens": True},
+            )
+            bool_usage_path.write_text(json.dumps(event_with_bool_usage) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(TypeError, "usage.input_tokens"):
+                load_events(bool_usage_path)
+
+            bool_score_path = workdir / "bool-score.jsonl"
+            event_with_bool_score = dict(
+                valid_event,
+                id="score-1",
+                type="score",
+                parent_id="trace-1",
+                value=True,
+            )
+            bool_score_path.write_text(json.dumps(event_with_bool_score) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(TypeError, "score value"):
+                load_events(bool_score_path)
+
+            missing_score_value_path = workdir / "missing-score-value.jsonl"
+            event_without_score_value = dict(
+                valid_event,
+                id="score-1",
+                type="score",
+                parent_id="trace-1",
+            )
+            missing_score_value_path.write_text(json.dumps(event_without_score_value) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "score event is missing required field 'value'"):
+                load_events(missing_score_value_path)
+
             invalid_model_path = workdir / "invalid-model.jsonl"
             event_with_invalid_model = dict(
                 valid_event,
