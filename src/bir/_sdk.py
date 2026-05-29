@@ -845,12 +845,14 @@ def _capture_call_input(
 def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     if key is not None and _is_secret_key(key):
         return _REDACTED
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, str):
+        return _redact_secret_text(value)
     if isinstance(value, float):
         return value if math.isfinite(value) else repr(value)
     if isinstance(value, Path):
-        return str(value)
+        return _redact_secret_text(str(value))
     if depth >= _MAX_CAPTURE_DEPTH:
         return _MAX_DEPTH_REACHED
     if isinstance(value, Mapping):
@@ -878,7 +880,7 @@ def _safe_key(value: Any) -> str:
 
 def _safe_repr(value: Any) -> str:
     try:
-        return repr(value)
+        return _redact_secret_text(repr(value))
     except Exception:
         return f"<unrepresentable {type(value).__name__}>"
 
@@ -889,8 +891,8 @@ def _safe_error(exc: BaseException) -> str:
 
 def _redact_secret_text(value: str) -> str:
     patterns = (
-        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;]+",
-        r"(?i)\b(api[_-]?key|apikey|password|secret|token)(\s*[:=]\s*)[^\s,;]+",
+        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;\)\]\}]+",
+        r"(?i)\b(api[_-]?key|apikey|password|secret|token)(\s*[:=]\s*)[^\s,;\)\]\}]+",
     )
     redacted = value
     for pattern in patterns:

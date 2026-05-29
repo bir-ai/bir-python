@@ -815,6 +815,66 @@ class SdkTests(unittest.TestCase):
             )
             self.assertEqual(event["output"], {"token": "[redacted]", "message": "hello"})
 
+    def test_capture_redacts_secret_like_text_values_and_reprs(self) -> None:
+        class SecretRepr:
+            def __repr__(self) -> str:
+                return "SecretRepr(api_key=sk-repr)"
+
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def call_tool(payload: dict[str, object]) -> dict[str, object]:
+                with tool_call(
+                    "search_docs",
+                    input={"query": "authorization: Bearer sk-tool-input"},
+                    metadata={"note": "token=tool-metadata-token"},
+                    capture_input=True,
+                    capture_output=True,
+                ) as tool:
+                    tool.set_output(["password=tool-output-password"])
+                return {"message": "secret=response-secret", "repr": SecretRepr()}
+
+            call_tool(
+                {
+                    "message": "hello",
+                    "headers": ["Authorization: Bearer sk-input-header"],
+                    "object": SecretRepr(),
+                }
+            )
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw_trace_file = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("sk-input-header", raw_trace_file)
+            self.assertNotIn("sk-tool-input", raw_trace_file)
+            self.assertNotIn("tool-metadata-token", raw_trace_file)
+            self.assertNotIn("tool-output-password", raw_trace_file)
+            self.assertNotIn("response-secret", raw_trace_file)
+            self.assertNotIn("sk-repr", raw_trace_file)
+
+            events = read_events(trace_path)
+            trace_event = next(event for event in events if event["type"] == "trace")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            self.assertEqual(
+                trace_event["input"],
+                {
+                    "payload": {
+                        "message": "hello",
+                        "headers": ["Authorization: Bearer [redacted]"],
+                        "object": "SecretRepr(api_key=[redacted])",
+                    }
+                },
+            )
+            self.assertEqual(
+                trace_event["output"],
+                {
+                    "message": "secret=[redacted]",
+                    "repr": "SecretRepr(api_key=[redacted])",
+                },
+            )
+            self.assertEqual(tool_event["input"], {"query": "authorization: Bearer [redacted]"})
+            self.assertEqual(tool_event["metadata"], {"note": "token=[redacted]"})
+            self.assertEqual(tool_event["output"], ["password=[redacted]"])
+
     def test_capture_is_json_safe_and_depth_limited(self) -> None:
         class BadRepr:
             def __repr__(self) -> str:

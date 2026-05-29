@@ -56,7 +56,8 @@ Input and output capture is disabled by default. Enable it globally with `config
 or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.
 Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
 and `token` are redacted before events are written.
-Secret-like values in captured error messages are also redacted.
+Captured strings, fallback object representations, and captured error messages
+are also scanned for common secret-like text patterns before events are written.
 
 ```python
 from bir import configure
