@@ -32,14 +32,23 @@ _EVENT_SORT_PRIORITY = {
     "score": 2,
 }
 _SECRET_KEY_PARTS = (
+    "access_key",
     "api_key",
     "apikey",
     "authorization",
     "auth_header",
+    "client_secret",
     "password",
+    "private_key",
     "secret",
     "token",
 )
+_SECRET_KEY_NAMES = {
+    "auth",
+    "credential",
+    "credentials",
+    "creds",
+}
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 _current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
@@ -68,6 +77,9 @@ class TraceEvent:
     output: Any
     error: str | None
     raw: dict[str, Any]
+    value: int | float | None = None
+    model: str | None = None
+    usage: dict[str, int | float] | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -722,22 +734,26 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
         raise ValueError(f"Trace file {trace_path} line {line_number} trace event parent_id must be null")
     if event_type != "trace" and parent_id is None:
         raise ValueError(f"Trace file {trace_path} line {line_number} {event_type} event requires parent_id")
+    event_value = None
     if event_type == "score":
         if "value" not in payload:
             raise ValueError(f"Trace file {trace_path} line {line_number} score event is missing required field 'value'")
-        _validate_number(payload["value"], "score value")
+        event_value = _validate_number(payload["value"], "score value")
     elif payload.get("value") is not None:
-        _validate_number(payload["value"], "value")
+        event_value = _validate_number(payload["value"], "value")
+    event_model = None
     if payload.get("model") is not None:
-        _expect_string(payload["model"], "model", trace_path, line_number)
+        event_model = _expect_string(payload["model"], "model", trace_path, line_number)
+    event_usage = None
     if "usage" in payload:
         usage = payload["usage"]
         if usage is not None:
             if not isinstance(usage, Mapping):
                 raise ValueError(f"Trace file {trace_path} line {line_number} field 'usage' must be an object")
+            event_usage = {}
             for key, value in usage.items():
-                _expect_string(key, "usage key", trace_path, line_number)
-                _validate_number(value, f"usage.{key}")
+                usage_key = _expect_string(key, "usage key", trace_path, line_number)
+                event_usage[usage_key] = _validate_number(value, f"usage.{key}")
     _validate_json_value(metadata, "metadata", trace_path, line_number)
     _validate_json_value(payload["input"], "input", trace_path, line_number)
     _validate_json_value(payload["output"], "output", trace_path, line_number)
@@ -761,6 +777,9 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
         output=payload["output"],
         error=error,
         raw=raw,
+        value=event_value,
+        model=event_model,
+        usage=event_usage,
     )
 
 
@@ -868,7 +887,7 @@ def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     normalized = key.lower().replace("-", "_")
-    return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
+    return normalized in _SECRET_KEY_NAMES or any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
 
 
 def _safe_key(value: Any) -> str:
@@ -890,18 +909,35 @@ def _safe_error(exc: BaseException) -> str:
 
 
 def _redact_secret_text(value: str) -> str:
-    patterns = (
-        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;\)\]\}]+",
-        r"(?i)\b(api[_-]?key|apikey|password|secret|token)(\s*[:=]\s*)[^\s,;\)\]\}]+",
-    )
     redacted = value
-    for pattern in patterns:
-        redacted = re.sub(pattern, _redact_secret_match, redacted)
+    redacted = re.sub(
+        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;\)\]\}]+",
+        _redact_labeled_secret_match,
+        redacted,
+    )
+    redacted = re.sub(
+        (
+            r"(?i)\b(access[_-]?key|api[_-]?key|apikey|auth|client[_-]?secret|credential|credentials|password|"
+            r"private[_-]?key|secret|token)(\s*[:=]\s*)[^\s,;\)\]\}]+"
+        ),
+        _redact_labeled_secret_match,
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)\b(bearer\s+)(?!\[redacted\])[^\s,;\)\]\}]+",
+        _redact_bearer_secret_match,
+        redacted,
+    )
+    redacted = re.sub(r"\b(sk-[A-Za-z0-9_-]{4,})\b", _REDACTED, redacted)
     return redacted
 
 
-def _redact_secret_match(match: re.Match[str]) -> str:
+def _redact_labeled_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{match.group(2) or ''}{_REDACTED}"
+
+
+def _redact_bearer_secret_match(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_REDACTED}"
 
 
 def _validate_number(value: Any, field: str) -> int | float:

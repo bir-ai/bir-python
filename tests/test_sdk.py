@@ -341,8 +341,11 @@ class SdkTests(unittest.TestCase):
         generation_event = next(event for event in events if event.type == "generation")
         score_event = next(event for event in events if event.type == "score")
         self.assertEqual(generation_event.parent_id, "trace-fixture-1")
+        self.assertEqual(generation_event.model, "demo-model")
+        self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})
         self.assertEqual(generation_event.raw["usage"], {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})
         self.assertEqual(score_event.parent_id, "generation-fixture-1")
+        self.assertEqual(score_event.value, 0.82)
         self.assertEqual(score_event.raw["value"], 0.82)
 
     def test_load_events_rejects_invalid_schema(self) -> None:
@@ -849,6 +852,79 @@ class SdkTests(unittest.TestCase):
                 {"api_key": "[redacted]", "payload": {"message": "hello", "authorization": "[redacted]"}},
             )
             self.assertEqual(event["output"], {"token": "[redacted]", "message": "hello"})
+
+    def test_capture_redacts_broader_secret_like_values(self) -> None:
+        secret_values = {
+            "auth": "raw-auth-value",
+            "credentials": "raw-credentials-value",
+            "client_secret": "raw-client-secret",
+            "access_key": "raw-access-key",
+            "private_key": "raw-private-key",
+            "headers": ["Bearer raw-bearer-token"],
+            "openai_key": "sk-rawopenaitoken",
+        }
+
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def call_provider(payload: dict[str, object]) -> dict[str, object]:
+                with generation(
+                    "local.llm",
+                    metadata={"credential": "raw-generation-credential"},
+                    capture_output=True,
+                ) as gen:
+                    gen.set_output("Authorization=Bearer raw-generation-bearer")
+                with tool_call(
+                    "provider_call",
+                    metadata={"note": "client_secret=raw-tool-client-secret"},
+                    capture_output=True,
+                ) as tool:
+                    tool.set_output("token: raw-tool-token")
+                return {"message": "ok", "text": "use sk-rawoutputtoken"}
+
+            call_provider(secret_values)
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw_trace_file = trace_path.read_text(encoding="utf-8")
+            for secret in (
+                "raw-auth-value",
+                "raw-credentials-value",
+                "raw-client-secret",
+                "raw-access-key",
+                "raw-private-key",
+                "raw-bearer-token",
+                "sk-rawopenaitoken",
+                "raw-generation-credential",
+                "raw-generation-bearer",
+                "raw-tool-client-secret",
+                "raw-tool-token",
+                "sk-rawoutputtoken",
+            ):
+                self.assertNotIn(secret, raw_trace_file)
+
+            events = read_events(trace_path)
+            trace_event = next(event for event in events if event["type"] == "trace")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            self.assertEqual(
+                trace_event["input"],
+                {
+                    "payload": {
+                        "auth": "[redacted]",
+                        "credentials": "[redacted]",
+                        "client_secret": "[redacted]",
+                        "access_key": "[redacted]",
+                        "private_key": "[redacted]",
+                        "headers": ["Bearer [redacted]"],
+                        "openai_key": "[redacted]",
+                    }
+                },
+            )
+            self.assertEqual(trace_event["output"], {"message": "ok", "text": "use [redacted]"})
+            self.assertEqual(generation_event["metadata"], {"credential": "[redacted]"})
+            self.assertEqual(generation_event["output"], "Authorization=Bearer [redacted]")
+            self.assertEqual(tool_event["metadata"], {"note": "client_secret=[redacted]"})
+            self.assertEqual(tool_event["output"], "token: [redacted]")
 
     def test_capture_redacts_secret_like_text_values_and_reprs(self) -> None:
         class SecretRepr:

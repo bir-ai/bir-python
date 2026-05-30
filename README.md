@@ -58,6 +58,8 @@ Common secret-like fields such as `api_key`, `authorization`, `password`, `secre
 and `token` are redacted before events are written.
 Captured strings, fallback object representations, and captured error messages
 are also scanned for common secret-like text patterns before events are written.
+Redaction is best-effort, so keep capture opt-in for sensitive payloads and review
+what your application records.
 
 ```python
 from bir import configure
