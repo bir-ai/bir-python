@@ -96,6 +96,154 @@ class SdkTests(unittest.TestCase):
             self.assertIsInstance(event["start_time"], str)
             self.assertIsInstance(event["end_time"], str)
 
+    def test_nested_observe_creates_span_inside_active_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(name="inner_step")
+            def inner() -> str:
+                return "inner"
+
+            @observe()
+            def outer() -> str:
+                return inner()
+
+            self.assertEqual(outer(), "inner")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_events = [event for event in events if event["type"] == "trace"]
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual(len(trace_events), 1)
+            self.assertEqual(len(span_events), 1)
+
+            trace_event = trace_events[0]
+            nested_event = span_events[0]
+            self.assertEqual(nested_event["name"], "inner_step")
+            self.assertEqual(nested_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(nested_event["parent_id"], trace_event["id"])
+            self.assertEqual(nested_event["status"], "success")
+
+    def test_nested_observe_uses_current_parent_id(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def inner() -> None:
+                pass
+
+            @observe()
+            def outer() -> None:
+                with span("current_parent"):
+                    inner()
+
+            outer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            parent_span = next(event for event in events if event["name"] == "current_parent")
+            nested_event = next(event for event in events if event["name"] == "inner")
+            self.assertEqual(nested_event["type"], "span")
+            self.assertEqual(nested_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(nested_event["parent_id"], parent_span["id"])
+
+    def test_nested_observe_becomes_parent_for_child_events(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def inner() -> None:
+                score("inner_score", 0.8)
+                with generation("inner_generation"):
+                    pass
+                with tool_call("inner_tool"):
+                    pass
+                with span("inner_span"):
+                    pass
+
+            @observe()
+            def outer() -> None:
+                inner()
+
+            outer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            nested_event = next(event for event in events if event["name"] == "inner")
+            for child_name in ("inner_score", "inner_generation", "inner_tool", "inner_span"):
+                child_event = next(event for event in events if event["name"] == child_name)
+                self.assertEqual(child_event["trace_id"], nested_event["trace_id"])
+                self.assertEqual(child_event["parent_id"], nested_event["id"])
+
+    def test_nested_observe_captures_inputs_and_outputs(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def inner(question: str) -> dict[str, str]:
+                return {"answer": question.upper()}
+
+            @observe()
+            def outer() -> dict[str, str]:
+                return inner("hello")
+
+            outer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            nested_event = next(event for event in events if event["name"] == "inner")
+            self.assertEqual(nested_event["type"], "span")
+            self.assertEqual(nested_event["input"], {"question": "hello"})
+            self.assertEqual(nested_event["output"], {"answer": "HELLO"})
+
+    def test_nested_observe_records_error_and_reraises(self) -> None:
+        with temporary_workdir() as workdir:
+            secret_error = "provider failed api_key=sk-secret"
+
+            @observe()
+            def inner() -> None:
+                raise RuntimeError(secret_error)
+
+            @observe()
+            def outer() -> None:
+                inner()
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                outer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            nested_event = next(event for event in events if event["name"] == "inner")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(nested_event["type"], "span")
+            self.assertEqual(nested_event["status"], "error")
+            self.assertEqual(nested_event["error"], "provider failed api_key=[redacted]")
+            self.assertEqual(trace_event["status"], "error")
+
+    def test_context_is_reset_after_nested_observed_exception(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def fail_inner() -> None:
+                raise ValueError("boom")
+
+            @observe()
+            def recover_outer() -> None:
+                with self.assertRaisesRegex(ValueError, "boom"):
+                    fail_inner()
+                score("after_failure", 1.0)
+
+            recover_outer()
+            with self.assertRaisesRegex(RuntimeError, "requires an active trace"):
+                score("outside", 1.0)
+
+            @observe()
+            def answer() -> None:
+                with span("child"):
+                    pass
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            recover_trace = next(event for event in events if event["name"] == "recover_outer")
+            score_event = next(event for event in events if event["name"] == "after_failure")
+            success_trace = next(event for event in events if event["name"] == "answer")
+            child = next(event for event in events if event["name"] == "child")
+            self.assertEqual(score_event["parent_id"], recover_trace["id"])
+            self.assertEqual(child["parent_id"], success_trace["id"])
+
     def test_span_creates_nested_event(self) -> None:
         with temporary_workdir() as workdir:
 

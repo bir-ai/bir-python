@@ -236,12 +236,22 @@ def observe(
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            trace_id = _new_id()
+            active_trace_id = _current_trace_id.get()
+            active_parent_id = _current_parent_id.get()
+            event_id = _new_id()
+            if active_trace_id is not None and active_parent_id is not None:
+                trace_id = active_trace_id
+                parent_id = active_parent_id
+                event_type = "span"
+            else:
+                trace_id = event_id
+                parent_id = None
+                event_type = "trace"
             start_time = _now()
             capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
             capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
             trace_token = _current_trace_id.set(trace_id)
-            parent_token = _current_parent_id.set(trace_id)
+            parent_token = _current_parent_id.set(event_id)
             capture_inputs_token = _current_capture_inputs.set(capture_inputs_for_call)
             capture_outputs_token = _current_capture_outputs.set(capture_outputs_for_call)
             input_payload = None
@@ -254,11 +264,11 @@ def observe(
                 end_time = _now()
                 _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
                 event = _event(
-                    event_id=trace_id,
+                    event_id=event_id,
                     trace_id=trace_id,
-                    parent_id=None,
+                    parent_id=parent_id,
                     name=trace_name,
-                    event_type="trace",
+                    event_type=event_type,
                     start_time=start_time,
                     end_time=end_time,
                     status="error",
@@ -276,11 +286,11 @@ def observe(
             output_payload = _safe_capture(result) if capture_outputs_for_call else None
             _write_event(
                 _event(
-                    event_id=trace_id,
+                    event_id=event_id,
                     trace_id=trace_id,
-                    parent_id=None,
+                    parent_id=parent_id,
                     name=trace_name,
-                    event_type="trace",
+                    event_type=event_type,
                     start_time=start_time,
                     end_time=end_time,
                     status="success",
