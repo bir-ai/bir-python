@@ -17,6 +17,7 @@ from bir._sdk import _reset_config_for_tests
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
+CONTRACT_SCHEMA_PATH = ROOT / "tests" / "fixtures" / "event-schema-v1.json"
 
 
 def read_events(path: Path) -> list[dict[str, object]]:
@@ -68,6 +69,13 @@ def request_url(request: object) -> str:
     return url
 
 
+def load_contract_schema() -> dict[str, object]:
+    payload = json.loads(CONTRACT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("expected event schema to be a JSON object")
+    return payload
+
+
 class SdkTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -95,6 +103,45 @@ class SdkTests(unittest.TestCase):
             self.assertIsNone(event["error"])
             self.assertIsInstance(event["start_time"], str)
             self.assertIsInstance(event["end_time"], str)
+
+    def test_sdk_event_contract_matches_schema_artifact(self) -> None:
+        schema = load_contract_schema()
+        properties = schema["properties"]
+        if not isinstance(properties, dict):
+            raise TypeError("expected schema properties to be an object")
+
+        required_fields = schema["required"]
+        event_type = properties["type"]
+        event_status = properties["status"]
+        schema_version = properties["schema_version"]
+        if not isinstance(required_fields, list):
+            raise TypeError("expected schema required fields to be a list")
+        if not isinstance(event_type, dict) or not isinstance(event_status, dict) or not isinstance(schema_version, dict):
+            raise TypeError("expected schema property definitions to be objects")
+
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    with tool_call("search_docs", input={"query": question}) as tool:
+                        tool.set_output(["doc-1"])
+                with generation("local.llm", model="demo", input={"question": question}) as gen:
+                    gen.set_output("ok")
+                    gen.set_usage(input_tokens=1, output_tokens=2)
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual({event["type"] for event in events}, set(event_type["enum"]))
+            for event in events:
+                self.assertEqual(event["schema_version"], schema_version["const"])
+                self.assertIn(event["type"], event_type["enum"])
+                self.assertIn(event["status"], event_status["enum"])
+                for field in required_fields:
+                    self.assertIn(field, event)
 
     def test_nested_observe_creates_span_inside_active_trace(self) -> None:
         with temporary_workdir() as workdir:

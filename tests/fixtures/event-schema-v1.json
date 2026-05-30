@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bir.dev/schemas/event-v1.json",
+  "title": "Bir Trace Event v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "trace_id",
+    "parent_id",
+    "name",
+    "type",
+    "start_time",
+    "end_time",
+    "status",
+    "metadata",
+    "input",
+    "output",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_id": {
+      "type": ["string", "null"]
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "enum": ["trace", "span", "generation", "tool_call", "score"]
+    },
+    "start_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "end_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": ["success", "error"]
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "input": {},
+    "output": {},
+    "error": {
+      "type": ["string", "null"]
+    },
+    "value": {
+      "type": "number"
+    },
+    "model": {
+      "type": "string"
+    },
+    "usage": {
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "number"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "trace"
+          }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "parent_id": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": ["span", "generation", "tool_call", "score"]
+          }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "parent_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "score"
+          }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["value"]
+      }
+    }
+  ],
+  "additionalProperties": true
+}
