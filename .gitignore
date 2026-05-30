@@ -18,6 +18,7 @@ dist/
 # Node / web
 node_modules/
 .next/
+apps/web/.test-build/
 out/
 .turbo/
 npm-debug.log*
