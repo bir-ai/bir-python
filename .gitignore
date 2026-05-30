@@ -34,3 +34,4 @@ pnpm-debug.log*
 .env.*
 .DS_Store
 scripts/start-server.sh
+docs/IMPLEMENTATION_ROADMAP.md
