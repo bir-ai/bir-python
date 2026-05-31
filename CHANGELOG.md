@@ -23,6 +23,8 @@ Initial local MVP SDK release.
 - `send_events()` helper for posting local events to the Bir FastAPI ingestion server.
 - Opt-in input and output capture.
 - Best-effort redaction for common secret-like keys and text patterns.
+- `bir.evals` deterministic evaluators: `exact_match()`, `contains()`, `regex_match()`, and `json_valid()`.
+- Local JSONL dataset loading and experiment result writing through `Dataset` and `run_experiment()`.
 
 ### Notes
 

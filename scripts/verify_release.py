@@ -159,6 +159,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
         textwrap.dedent(
             """
             from bir import configure, generation, load_traces, observe, retrieval, score, span
+            from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
 
             configure(capture_inputs=True, capture_outputs=True)
 
@@ -197,6 +198,16 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
                 "total_cost": 0.000003,
             }
             assert generation_event.currency == "USD"
+
+            dataset = Dataset([DatasetExample(id="q1", input={"question": "hello"}, expected="ok")])
+            experiment = run_experiment(
+                "smoke",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match(), contains("o")],
+            )
+            assert experiment.status == "success"
+            assert experiment.aggregate_scores == {"contains": 1.0, "exact_match": 1.0}
             """
         ),
         encoding="utf-8",

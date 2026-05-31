@@ -32,7 +32,11 @@ The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
 wheel from the SDK package files and metadata, checks the wheel contents for
 obvious local/generated artifacts, installs the wheel into a fresh temporary
 virtual environment, and executes a smoke test that covers trace, span,
-retrieval, generation, usage, cost, and score events.
+retrieval, generation, usage, cost, score events, deterministic evaluators, and
+local experiment writing.
+
+CI runs the same release verification script, plus server tests and dashboard
+lint/typecheck/contract tests, on pushes and pull requests to `main`.
 
 From `packages/python-sdk`:
 

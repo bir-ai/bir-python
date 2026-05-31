@@ -126,6 +126,59 @@ with retrieval("vector_search", query=question) as result:
     )
 ```
 
+## Local Evals And Experiments
+
+Bir includes a small deterministic evaluation layer for local regression checks.
+It does not require a server or an LLM judge.
+
+```python
+from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
+
+
+dataset = Dataset(
+    [
+        DatasetExample(
+            id="q1",
+            input={"question": "What is Bir?"},
+            expected="An observability SDK",
+        )
+    ]
+)
+
+
+def answer_question(question: str) -> str:
+    return "Bir is an observability SDK."
+
+
+result = run_experiment(
+    "quickstart",
+    dataset=dataset,
+    task=answer_question,
+    evaluators=[contains(), exact_match("Bir is an observability SDK.")],
+)
+
+print(result.aggregate_scores)
+```
+
+Datasets can be stored as JSONL:
+
+```json
+{"id":"q1","input":{"question":"What is Bir?"},"expected":"An observability SDK"}
+```
+
+Load and run them locally:
+
+```python
+from bir.evals import Dataset, contains, run_experiment
+
+dataset = Dataset.from_jsonl("questions.jsonl")
+run_experiment("prompt-v1", dataset=dataset, task=answer_question, evaluators=[contains()])
+```
+
+Experiment results are written to `.bir/experiments/*.jsonl` by default, with
+one result row per example. Available deterministic evaluators are
+`exact_match()`, `contains()`, `regex_match()`, and `json_valid()`.
+
 ## Event Loading
 
 `load_events()` validates JSONL records against the current event schema and
