@@ -16,6 +16,7 @@ Initial local MVP SDK release.
 - Nested `span()` context manager.
 - `generation()` context manager with optional model, usage, and user-provided cost fields.
 - `tool_call()` context manager for external function or tool usage.
+- `retrieval()` context manager for RAG lookups using the existing tool call event contract.
 - `score()` helper for attaching evaluation scores to active traces.
 - Local JSONL trace storage at `.bir/traces.jsonl` by default.
 - `load_events()` and `load_traces()` helpers for reading local JSONL traces.

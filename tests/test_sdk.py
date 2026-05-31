@@ -12,7 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-from bir import configure, generation, load_events, load_traces, observe, score, send_events, span, tool_call
+from bir import configure, generation, load_events, load_traces, observe, retrieval, score, send_events, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -516,6 +516,88 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(tool_event["input"], {"expression": "2 + 2"})
             self.assertEqual(tool_event["output"], 4)
 
+    def test_retrieval_records_document_tool_call_shape(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> list[str]:
+                with retrieval("vector_search", query=question, metadata={"provider": "local"}) as result:
+                    result.add_document(
+                        id="doc-1",
+                        rank=1,
+                        score=0.82,
+                        source="docs",
+                        text="authorization: Bearer doc-secret",
+                        metadata={"token": "document-token"},
+                    )
+                    result.add_document(id="doc-2")
+                return ["doc-1", "doc-2"]
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(retrieval_event["type"], "tool_call")
+            self.assertEqual(retrieval_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(retrieval_event["parent_id"], trace_event["id"])
+            self.assertEqual(retrieval_event["metadata"], {"provider": "local", "kind": "retrieval"})
+            self.assertEqual(retrieval_event["input"], {"query": "hello"})
+            self.assertEqual(
+                retrieval_event["output"],
+                {
+                    "documents": [
+                        {
+                            "id": "doc-1",
+                            "rank": 1,
+                            "score": 0.82,
+                            "source": "docs",
+                            "text": "authorization: Bearer [redacted]",
+                            "metadata": {"token": "[redacted]"},
+                        },
+                        {"id": "doc-2"},
+                    ]
+                },
+            )
+            self.assertEqual(retrieval_event["status"], "success")
+
+    def test_retrieval_capture_can_be_enabled_per_call(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with retrieval(
+                    "vector_search",
+                    query={"text": "hello"},
+                    capture_input=True,
+                    capture_output=True,
+                ) as result:
+                    result.set_documents([{"id": "doc-1", "text": "local context"}])
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            self.assertEqual(retrieval_event["type"], "tool_call")
+            self.assertEqual(retrieval_event["metadata"], {"kind": "retrieval"})
+            self.assertEqual(retrieval_event["input"], {"query": {"text": "hello"}})
+            self.assertEqual(retrieval_event["output"], {"documents": [{"id": "doc-1", "text": "local context"}]})
+
+    def test_retrieval_uses_opt_in_capture_defaults(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with retrieval("vector_search", query="hello") as result:
+                    result.add_document(id="doc-1")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            self.assertIsNone(retrieval_event["input"])
+            self.assertIsNone(retrieval_event["output"])
+
     def test_tool_call_exception_is_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:
 
@@ -562,7 +644,23 @@ class SdkTests(unittest.TestCase):
             ["trace", "span", "tool_call", "generation", "score"],
         )
         generation_event = next(event for event in events if event.type == "generation")
+        tool_event = next(event for event in events if event.type == "tool_call")
         score_event = next(event for event in events if event.type == "score")
+        self.assertEqual(tool_event.metadata, {"kind": "retrieval"})
+        self.assertEqual(
+            tool_event.output,
+            {
+                "documents": [
+                    {
+                        "id": "doc-1",
+                        "rank": 1,
+                        "score": 0.82,
+                        "source": "docs",
+                        "text": "Bir records local traces with JSONL.",
+                    }
+                ]
+            },
+        )
         self.assertEqual(generation_event.parent_id, "trace-fixture-1")
         self.assertEqual(generation_event.model, "demo-model")
         self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})

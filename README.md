@@ -23,15 +23,15 @@ python -m pip install -e ".[dev]"
 ## Quickstart
 
 ```python
-from bir import generation, observe, score, span, tool_call
+from bir import generation, observe, retrieval, score, span
 
 
 @observe()
 def answer_question(question: str) -> str:
     with span("retrieve_context"):
-        with tool_call("search_docs") as tool:
+        with retrieval("search_docs", query=question) as result:
+            result.add_document(id="doc-1", text="local context")
             documents = ["local context"]
-            tool.set_output(documents)
 
     with generation("local.llm", model="demo-model") as gen:
         response = f"{documents[0]}: {question}"
@@ -105,6 +105,26 @@ require finite numeric values.
 
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.
+
+## Retrieval
+
+Use `retrieval()` to record RAG lookups with the existing `tool_call` event
+contract. It sets `metadata.kind` to `retrieval`, stores the query at
+`input.query` when input capture is enabled, and stores retrieved records at
+`output.documents` when output capture is enabled.
+
+```python
+from bir import retrieval
+
+with retrieval("vector_search", query=question) as result:
+    result.add_document(
+        id="doc-1",
+        rank=1,
+        score=0.82,
+        source="docs",
+        text="Bir records local traces with JSONL.",
+    )
+```
 
 ## Event Loading
 

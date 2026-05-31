@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from bir import configure, generation, load_traces, observe, score, send_events, span, tool_call
+from bir import configure, generation, load_traces, observe, retrieval, score, send_events, span
 
 DEFAULT_TRACE_PATH = Path(__file__).resolve().parent / ".bir" / "traces.jsonl"
 
@@ -24,11 +24,11 @@ DOCUMENTS = [
 
 
 def retrieve_context(question: str) -> list[dict[str, str]]:
-    with tool_call(
+    with retrieval(
         "search_docs",
-        input={"query": question, "authorization": "Bearer demo-secret"},
-        metadata={"kind": "retrieval"},
-    ) as tool:
+        query=question,
+        metadata={"provider": "local", "authorization": "Bearer demo-secret"},
+    ) as result:
         words = {word.strip(".,?!").lower() for word in question.split()}
         matches = [
             document
@@ -37,7 +37,7 @@ def retrieve_context(question: str) -> list[dict[str, str]]:
         ]
         if not matches:
             matches = DOCUMENTS[:1]
-        tool.set_output({"documents": matches})
+        result.set_documents(matches)
         return matches
 
 

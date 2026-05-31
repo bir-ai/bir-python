@@ -10,11 +10,10 @@ the full Bir MVP loop locally:
 4. send events to the FastAPI server
 5. view them in the dashboard
 
-The retrieval step is modeled with the current contract as a `tool_call` inside
-the `retrieve_context` span. It sets `metadata.kind` to `retrieval`, records the
-query in the tool input, and records matched documents in the tool output when
-capture is enabled. This is the documented RAG shape until a dedicated
-`retrieval()` SDK helper is added.
+The retrieval step uses `retrieval()` inside the `retrieve_context` span. The
+helper still emits the current `tool_call` contract, sets `metadata.kind` to
+`retrieval`, records the query in `input.query`, and records matched documents
+in `output.documents` when capture is enabled.
 
 ## Run The Demo
 

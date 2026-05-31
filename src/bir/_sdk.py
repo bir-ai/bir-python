@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Mapping, TypeVar, cast
+from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -354,6 +354,25 @@ def tool_call(
     )
 
 
+def retrieval(
+    name: str,
+    *,
+    query: Any,
+    metadata: Mapping[str, Any] | None = None,
+    capture_input: bool | None = None,
+    capture_output: bool | None = None,
+) -> _Retrieval:
+    """Create a retrieval tool call using Bir's documented RAG event shape."""
+
+    return _Retrieval(
+        name=name,
+        query=query,
+        metadata=metadata,
+        capture_input=capture_input,
+        capture_output=capture_output,
+    )
+
+
 def score(name: str, value: int | float) -> None:
     """Attach a score event to the current trace."""
 
@@ -630,6 +649,60 @@ class _ToolCall:
 
     def set_output(self, output: Any) -> None:
         self.output = output
+
+
+class _Retrieval(_ToolCall):
+    def __init__(
+        self,
+        *,
+        name: str,
+        query: Any,
+        metadata: Mapping[str, Any] | None,
+        capture_input: bool | None,
+        capture_output: bool | None,
+    ) -> None:
+        retrieval_metadata = dict(metadata or {})
+        retrieval_metadata["kind"] = "retrieval"
+        super().__init__(
+            name=name,
+            input={"query": query},
+            metadata=retrieval_metadata,
+            capture_input=capture_input,
+            capture_output=capture_output,
+        )
+        self.output = {"documents": []}
+
+    def __enter__(self) -> _Retrieval:
+        super().__enter__()
+        return self
+
+    def add_document(
+        self,
+        *,
+        id: str | None = None,
+        text: str | None = None,
+        rank: int | None = None,
+        score: int | float | None = None,
+        source: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        document: dict[str, Any] = {}
+        if id is not None:
+            document["id"] = id
+        if rank is not None:
+            document["rank"] = rank
+        if score is not None:
+            document["score"] = _validate_number(score, "retrieval document score")
+        if source is not None:
+            document["source"] = source
+        if text is not None:
+            document["text"] = text
+        if metadata is not None:
+            document["metadata"] = dict(metadata)
+        self.output["documents"].append(document)
+
+    def set_documents(self, documents: Iterable[Mapping[str, Any]]) -> None:
+        self.output = {"documents": [dict(document) for document in documents]}
 
 
 def _event(

@@ -9,6 +9,7 @@ from ._sdk import (
     load_events,
     load_traces,
     observe,
+    retrieval,
     score,
     send_events,
     span,
@@ -27,5 +28,6 @@ __all__ = [
     "span",
     "generation",
     "tool_call",
+    "retrieval",
     "score",
 ]
