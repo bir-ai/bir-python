@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import json
 import math
@@ -107,6 +108,44 @@ class LoadedTrace:
 class SendEventsResult:
     accepted: int
     event_ids: list[str]
+
+
+@dataclass(frozen=True)
+class PromptRecord:
+    name: str
+    version: str | None
+    template: str | None
+    variables: dict[str, Any]
+    rendered: str | None
+    metadata: dict[str, Any]
+    capture_template: bool
+    capture_variables: bool
+    capture_rendered: bool
+
+    def to_metadata(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"name": self.name}
+        if self.version is not None:
+            payload["version"] = self.version
+        if self.template is not None:
+            payload["template_sha256"] = hashlib.sha256(self.template.encode("utf-8")).hexdigest()
+            if self.capture_template:
+                payload["template"] = _safe_capture(self.template)
+        if self.capture_variables:
+            payload["variables"] = _safe_capture(self.variables)
+        if self.capture_rendered:
+            payload["rendered"] = _safe_capture(self.render())
+        if self.metadata:
+            payload["metadata"] = _safe_capture(self.metadata)
+        return payload
+
+    def render(self) -> str | None:
+        if self.rendered is not None:
+            return self.rendered
+        if self.template is None:
+            return None
+        if not self.variables:
+            return self.template
+        return self.template.format(**self.variables)
 
 
 _config = _Config()
@@ -314,12 +353,49 @@ def span(name: str) -> _Span:
     return _Span(name)
 
 
+def prompt(
+    name: str,
+    *,
+    version: str | None = None,
+    template: str | None = None,
+    variables: Mapping[str, Any] | None = None,
+    rendered: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    capture_template: bool = False,
+    capture_variables: bool = False,
+    capture_rendered: bool = False,
+) -> PromptRecord:
+    """Describe the prompt version used by a generation."""
+
+    if not name:
+        raise ValueError("bir prompt name must not be empty")
+    if version is not None and not version:
+        raise ValueError("bir prompt version must not be empty")
+    if template is not None and not isinstance(template, str):
+        raise TypeError("bir prompt template must be a string")
+    if rendered is not None and not isinstance(rendered, str):
+        raise TypeError("bir rendered prompt must be a string")
+
+    return PromptRecord(
+        name=name,
+        version=version,
+        template=template,
+        variables=dict(variables or {}),
+        rendered=rendered,
+        metadata=dict(metadata or {}),
+        capture_template=capture_template,
+        capture_variables=capture_variables,
+        capture_rendered=capture_rendered,
+    )
+
+
 def generation(
     name: str,
     *,
     model: str | None = None,
     input: Any = None,
     metadata: Mapping[str, Any] | None = None,
+    prompt: PromptRecord | None = None,
     capture_input: bool | None = None,
     capture_output: bool | None = None,
 ) -> _Generation:
@@ -330,6 +406,7 @@ def generation(
         model=model,
         input=input,
         metadata=metadata,
+        prompt_record=prompt,
         capture_input=capture_input,
         capture_output=capture_output,
     )
@@ -461,6 +538,7 @@ class _Generation:
         model: str | None,
         input: Any,
         metadata: Mapping[str, Any] | None,
+        prompt_record: PromptRecord | None,
         capture_input: bool | None,
         capture_output: bool | None,
     ) -> None:
@@ -468,6 +546,7 @@ class _Generation:
         self.model = model
         self.input = input
         self.metadata = metadata
+        self.prompt_record = prompt_record
         self.capture_input = capture_input
         self.capture_output = capture_output
         self.id: str | None = None
@@ -507,6 +586,9 @@ class _Generation:
 
         input_payload = _safe_capture(self.input) if _should_capture(self.capture_input, "inputs") else None
         output_payload = _safe_capture(self.output) if _should_capture(self.capture_output, "outputs") else None
+        metadata_payload = dict(self.metadata or {})
+        if self.prompt_record is not None:
+            metadata_payload["prompt"] = self.prompt_record.to_metadata()
         event = _event(
             event_id=self.id,
             trace_id=self.trace_id,
@@ -517,7 +599,7 @@ class _Generation:
             end_time=_now(),
             status="error" if exc is not None else "success",
             error=_safe_error(exc) if exc is not None else None,
-            metadata=_safe_capture(dict(self.metadata or {})),
+            metadata=_safe_capture(metadata_payload),
             input=input_payload,
             output=output_payload,
             model=self.model,
@@ -1042,14 +1124,15 @@ def _safe_error(exc: BaseException) -> str:
 def _redact_secret_text(value: str) -> str:
     redacted = value
     redacted = re.sub(
-        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;\)\]\}]+",
+        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?(?!\[redacted\])[^\s,;\)\]\}]+",
         _redact_labeled_secret_match,
         redacted,
     )
     redacted = re.sub(
         (
             r"(?i)\b(access[_-]?key|api[_-]?key|apikey|auth|client[_-]?secret|credential|credentials|password|"
-            r"private[_-]?key|secret|token)(\s*[:=]\s*)[^\s,;\)\]\}]+"
+            r"private[_-]?key|secret|token)(\s*[:=]\s*)(?!\[redacted\])(?!\{[A-Za-z_][A-Za-z0-9_]*\})"
+            r"[^\s,;\)\]\}]+"
         ),
         _redact_labeled_secret_match,
         redacted,

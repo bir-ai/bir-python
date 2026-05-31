@@ -158,7 +158,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
     smoke_test.write_text(
         textwrap.dedent(
             """
-            from bir import configure, generation, load_traces, observe, retrieval, score, span
+            from bir import configure, generation, load_traces, observe, prompt, retrieval, score, span
             from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
 
             configure(capture_inputs=True, capture_outputs=True)
@@ -168,7 +168,13 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
                 with span("retrieve_context"):
                     with retrieval("vector_search", query=question) as result:
                         result.add_document(id="doc-1", rank=1, score=0.82, text="local context")
-                with generation("local.llm", model="demo-model") as gen:
+                answer_prompt = prompt(
+                    "answer_question",
+                    version="v1",
+                    template="Answer {question}",
+                    variables={"question": question},
+                )
+                with generation("local.llm", model="demo-model", prompt=answer_prompt) as gen:
                     gen.set_output("ok")
                     gen.set_usage(input_tokens=1, output_tokens=2)
                     gen.set_cost(input_cost=0.000001, output_cost=0.000002)
@@ -190,6 +196,10 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
             }
 
             generation_event = next(event for event in events if event.type == "generation")
+            assert generation_event.metadata["prompt"]["name"] == "answer_question"
+            assert generation_event.metadata["prompt"]["version"] == "v1"
+            assert "template_sha256" in generation_event.metadata["prompt"]
+            assert "rendered" not in generation_event.metadata["prompt"]
             assert generation_event.model == "demo-model"
             assert generation_event.usage == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
             assert generation_event.cost == {

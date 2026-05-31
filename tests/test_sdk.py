@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import urllib.error
@@ -10,9 +11,10 @@ from contextlib import contextmanager
 from http.client import HTTPMessage
 from io import BytesIO
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
-from bir import configure, generation, load_events, load_traces, observe, retrieval, score, send_events, span, tool_call
+from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call
 from bir._sdk import _reset_config_for_tests
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -417,6 +419,76 @@ class SdkTests(unittest.TestCase):
             generation_event = next(event for event in events if event["type"] == "generation")
             self.assertEqual(generation_event["input"], {"prompt": "hello"})
             self.assertEqual(generation_event["output"], "world")
+
+    def test_generation_records_prompt_version_without_capturing_prompt_text_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                prompt_record = prompt(
+                    "answer_question",
+                    version="v1",
+                    template="Answer {question} with api_key={api_key}",
+                    variables={"question": question, "api_key": "sk-secret"},
+                )
+                with generation("local.llm", prompt=prompt_record) as gen:
+                    gen.set_output("ok")
+                return "ok"
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            self.assertIsInstance(metadata, dict)
+            prompt_metadata = cast(dict[str, Any], metadata["prompt"])
+            self.assertIsInstance(prompt_metadata, dict)
+            self.assertEqual(prompt_metadata["name"], "answer_question")
+            self.assertEqual(prompt_metadata["version"], "v1")
+            self.assertEqual(
+                prompt_metadata["template_sha256"],
+                hashlib.sha256("Answer {question} with api_key={api_key}".encode("utf-8")).hexdigest(),
+            )
+            self.assertNotIn("template", prompt_metadata)
+            self.assertNotIn("variables", prompt_metadata)
+            self.assertNotIn("rendered", prompt_metadata)
+            self.assertNotIn("sk-secret", json.dumps(generation_event))
+
+    def test_prompt_can_capture_template_variables_and_rendered_text_when_opted_in(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer(question: str) -> str:
+                prompt_record = prompt(
+                    "answer_question",
+                    version="v2",
+                    template="Answer {question} with token={token}",
+                    variables={"question": question, "token": "raw-token"},
+                    metadata={"owner": "evals", "secret": "prompt-secret"},
+                    capture_template=True,
+                    capture_variables=True,
+                    capture_rendered=True,
+                )
+                with generation("local.llm", prompt=prompt_record):
+                    pass
+                return "ok"
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            self.assertIsInstance(metadata, dict)
+            prompt_metadata = cast(dict[str, Any], metadata["prompt"])
+            self.assertIsInstance(prompt_metadata, dict)
+            self.assertEqual(prompt_metadata["template"], "Answer {question} with token={token}")
+            self.assertEqual(prompt_metadata["variables"], {"question": "hello", "token": "[redacted]"})
+            self.assertEqual(prompt_metadata["rendered"], "Answer hello with token=[redacted]")
+            self.assertEqual(prompt_metadata["metadata"], {"owner": "evals", "secret": "[redacted]"})
+
+    def test_prompt_rejects_empty_name(self) -> None:
+        with self.assertRaisesRegex(ValueError, "prompt name"):
+            prompt("")
 
     def test_generation_usage_rejects_non_finite_values(self) -> None:
         with temporary_workdir():

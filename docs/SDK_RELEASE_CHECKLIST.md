@@ -17,6 +17,9 @@ Bir SDK package.
   `metadata.kind = "retrieval"` and retrieved records under `output.documents`.
 - Confirm retrieval query/document capture follows the same opt-in capture and
   redaction behavior as other SDK events.
+- Confirm `prompt()` attaches prompt identity under generation
+  `metadata.prompt` without capturing template text, variables, or rendered
+  prompts unless explicitly configured.
 - Confirm no server is required for the first useful local tracing workflow.
 - Confirm `packages/python-sdk/CHANGELOG.md` has an entry for the release.
 
@@ -32,8 +35,8 @@ The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
 wheel from the SDK package files and metadata, checks the wheel contents for
 obvious local/generated artifacts, installs the wheel into a fresh temporary
 virtual environment, and executes a smoke test that covers trace, span,
-retrieval, generation, usage, cost, score events, deterministic evaluators, and
-local experiment writing.
+retrieval, prompt metadata, generation, usage, cost, score events,
+deterministic evaluators, and local experiment writing.
 
 CI runs the same release verification script, plus server tests and dashboard
 lint/typecheck/contract tests, on pushes and pull requests to `main`.

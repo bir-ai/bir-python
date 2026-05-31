@@ -126,6 +126,45 @@ with retrieval("vector_search", query=question) as result:
     )
 ```
 
+## Prompt Versions
+
+Use `prompt()` to attach prompt identity and version metadata to a generation.
+Prompt template text, variables, and rendered prompts are not captured unless
+you opt in.
+
+```python
+from bir import generation, prompt
+
+answer_prompt = prompt(
+    "answer_question",
+    version="v1",
+    template="Answer using this context: {context}",
+    variables={"context": "local context"},
+)
+
+with generation("local.llm", model="demo-model", prompt=answer_prompt) as gen:
+    gen.set_output("ok")
+```
+
+The generation event records `metadata.prompt.name`, `metadata.prompt.version`,
+and a `metadata.prompt.template_sha256` when a template is provided. To inspect
+the actual prompt payload locally, opt in explicitly:
+
+```python
+answer_prompt = prompt(
+    "answer_question",
+    version="v1",
+    template="Answer using this context: {context}",
+    variables={"context": "local context"},
+    capture_template=True,
+    capture_variables=True,
+    capture_rendered=True,
+)
+```
+
+Captured prompt fields use the same best-effort redaction as other captured
+payloads.
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.
