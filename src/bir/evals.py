@@ -42,6 +42,8 @@ class EvalResult:
             raise TypeError("eval result value must be an int or float")
         if isinstance(self.value, float) and not math.isfinite(self.value):
             raise ValueError("eval result value must be finite")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("eval result metadata must be an object")
         object.__setattr__(self, "value", float(self.value))
         object.__setattr__(self, "metadata", _safe_mapping(self.metadata))
 
@@ -57,6 +59,11 @@ class EvalResult:
 class DeterministicEvaluator:
     name: str
     _evaluate: Callable[[Any, Any], EvalResult]
+
+    def __post_init__(self) -> None:
+        _validate_evaluator_name(self.name)
+        if not callable(self._evaluate):
+            raise TypeError("deterministic evaluator evaluate function must be callable")
 
     def evaluate(self, output: Any, *, expected: Any = None) -> EvalResult:
         return self._evaluate(output, expected)
@@ -410,6 +417,11 @@ def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
     if not isinstance(captured, dict):
         return {}
     return captured
+
+
+def _validate_evaluator_name(name: str) -> None:
+    if not name:
+        raise ValueError("evaluator name must not be empty")
 
 
 def _json_line(payload: Mapping[str, Any]) -> str:

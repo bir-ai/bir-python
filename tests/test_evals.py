@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
 
-from bir.evals import Dataset, DatasetExample, contains, exact_match, json_valid, regex_match, run_experiment
+from bir.evals import (
+    Dataset,
+    DatasetExample,
+    DeterministicEvaluator,
+    EvalResult,
+    contains,
+    exact_match,
+    json_valid,
+    regex_match,
+    run_experiment,
+)
 
 
 class EvalTests(unittest.TestCase):
@@ -16,6 +27,48 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(regex_match(r"Paris").evaluate("The answer is Paris.").value, 1.0)
         self.assertEqual(json_valid().evaluate('{"answer":"Paris"}').value, 1.0)
         self.assertEqual(json_valid().evaluate("{not-json").value, 0.0)
+
+    def test_eval_result_rejects_invalid_values(self) -> None:
+        with self.assertRaisesRegex(TypeError, "int or float"):
+            EvalResult(name="score", value=True)
+        with self.assertRaisesRegex(TypeError, "int or float"):
+            EvalResult(name="score", value="1.0")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "finite"):
+            EvalResult(name="score", value=math.nan)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            EvalResult(name="score", value=math.inf)
+
+    def test_eval_result_metadata_is_redacted_and_json_safe(self) -> None:
+        result = EvalResult(
+            name="score",
+            value=1,
+            metadata={"api_key": "sk-secret", "non_json": object()},
+        )
+
+        self.assertEqual(result.value, 1.0)
+        self.assertEqual(result.metadata["api_key"], "[redacted]")
+        self.assertIsInstance(result.metadata["non_json"], str)
+        json.dumps(result.to_dict(), allow_nan=False)
+
+    def test_eval_result_rejects_invalid_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "metadata must be an object"):
+            EvalResult(name="score", value=1.0, metadata=["not", "an", "object"])  # type: ignore[arg-type]
+
+    def test_evaluator_config_rejects_invalid_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            DeterministicEvaluator(name="", _evaluate=lambda output, expected: EvalResult("score", 1.0))
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            exact_match(name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            contains("Paris", name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            regex_match(r"Paris", name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            json_valid(name="")
+
+    def test_deterministic_evaluator_requires_callable(self) -> None:
+        with self.assertRaisesRegex(TypeError, "must be callable"):
+            DeterministicEvaluator(name="score", _evaluate=None)  # type: ignore[arg-type]
 
     def test_dataset_jsonl_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
