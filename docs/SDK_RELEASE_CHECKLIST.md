@@ -1,9 +1,14 @@
-# Python SDK Release Checklist
+# Python SDK Release Candidate Checklist
 
-Use this checklist before publishing `packages/python-sdk` as the first usable
-Bir SDK package.
+Use this checklist to keep `packages/python-sdk` release-candidate quality while
+development continues. Passing this checklist does not mean the project should
+be published. Publishing is intentionally deferred until the user explicitly
+asks for it.
 
-## Release Readiness
+Agents should treat this document as a quality gate and regression checklist,
+not as a release plan.
+
+## Candidate Readiness
 
 - Confirm the public API is still intentionally small: `observe`, `span`,
   `generation`, `tool_call`, `retrieval`, `score`, `configure`, `load_events`,
@@ -21,7 +26,8 @@ Bir SDK package.
   `metadata.prompt` without capturing template text, variables, or rendered
   prompts unless explicitly configured.
 - Confirm no server is required for the first useful local tracing workflow.
-- Confirm `packages/python-sdk/CHANGELOG.md` has an entry for the release.
+- Confirm `packages/python-sdk/CHANGELOG.md` accurately describes unreleased
+  changes.
 
 ## Local Verification
 
@@ -66,8 +72,9 @@ npm run typecheck
 ```
 
 The release verification script does not require `build`, `twine`, or network
-access. If build tooling is available in the environment, the optional package
-index checks are:
+access. Do not run package-index checks or publishing commands unless the user
+explicitly asks for a release. If publishing work is explicitly requested later,
+the optional package index checks are:
 
 ```bash
 cd packages/python-sdk
@@ -76,7 +83,7 @@ python -m twine check dist/*
 ```
 
 If the release verification script cannot be used, manually build and install
-the package in a fresh virtual environment before publishing:
+the package in a fresh virtual environment before considering a release:
 
 ```bash
 python -m venv /tmp/bir-sdk-smoke
@@ -130,7 +137,8 @@ PY
 
 ## Publish Gate
 
-Do not publish if any of these are true:
+Do not publish unless the user explicitly asks for publishing work. Even when
+publishing is requested, do not publish if any of these are true:
 
 - SDK tests or pyright fail.
 - Input/output capture defaults changed to enabled.
@@ -138,3 +146,4 @@ Do not publish if any of these are true:
 - Retrieval tests are failing or no longer assert `output.documents`.
 - SDK-generated events are no longer accepted by the server contract tests.
 - The release includes unrelated product features or infrastructure changes.
+- Remote CI has not passed on the release branch or commit.
