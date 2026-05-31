@@ -60,6 +60,7 @@ def draft_answer(question: str, documents: list[dict[str, str]]) -> str:
             input_tokens=sum(len(message["content"].split()) for message in messages) + len(context.split()),
             output_tokens=len(answer.split()),
         )
+        gen.set_cost(input_cost=0.000012, output_cost=0.000048)
         return answer
 
 

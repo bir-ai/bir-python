@@ -70,6 +70,15 @@
       "additionalProperties": {
         "type": "number"
       }
+    },
+    "cost": {
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "currency": {
+      "type": ["string", "null"]
     }
   },
   "allOf": [

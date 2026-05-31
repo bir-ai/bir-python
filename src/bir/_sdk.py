@@ -80,6 +80,8 @@ class TraceEvent:
     value: int | float | None = None
     model: str | None = None
     usage: dict[str, int | float] | None = None
+    cost: dict[str, int | float] | None = None
+    currency: str | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -455,6 +457,8 @@ class _Generation:
         self.start_time: str | None = None
         self.output: Any = None
         self.usage: dict[str, int | float] | None = None
+        self.cost: dict[str, int | float] | None = None
+        self.currency: str | None = None
         self._parent_token: Token[str | None] | None = None
 
     def __enter__(self) -> _Generation:
@@ -499,6 +503,8 @@ class _Generation:
             output=output_payload,
             model=self.model,
             usage=self.usage,
+            cost=self.cost,
+            currency=self.currency,
         )
         try:
             _write_event(event)
@@ -528,6 +534,27 @@ class _Generation:
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
         self.usage = usage
+
+    def set_cost(
+        self,
+        *,
+        input_cost: int | float | None = None,
+        output_cost: int | float | None = None,
+        total_cost: int | float | None = None,
+        currency: str = "USD",
+    ) -> None:
+        cost: dict[str, int | float] = {}
+        if input_cost is not None:
+            cost["input_cost"] = _validate_number(input_cost, "input_cost")
+        if output_cost is not None:
+            cost["output_cost"] = _validate_number(output_cost, "output_cost")
+        if total_cost is not None:
+            cost["total_cost"] = _validate_number(total_cost, "total_cost")
+        if total_cost is None and input_cost is not None and output_cost is not None:
+            cost["total_cost"] = cost["input_cost"] + cost["output_cost"]
+        validated_currency = _validate_currency(currency)
+        self.cost = cost
+        self.currency = validated_currency
 
 
 class _ToolCall:
@@ -622,6 +649,8 @@ def _event(
     value: int | float | None = None,
     model: str | None = None,
     usage: Mapping[str, int | float] | None = None,
+    cost: Mapping[str, int | float] | None = None,
+    currency: str | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
@@ -644,6 +673,10 @@ def _event(
         event["model"] = model
     if usage is not None:
         event["usage"] = dict(usage)
+    if cost is not None:
+        event["cost"] = dict(cost)
+    if currency is not None:
+        event["currency"] = currency
     return event
 
 
@@ -764,12 +797,25 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
             for key, value in usage.items():
                 usage_key = _expect_string(key, "usage key", trace_path, line_number)
                 event_usage[usage_key] = _validate_number(value, f"usage.{key}")
+    event_cost = None
+    if "cost" in payload:
+        cost = payload["cost"]
+        if cost is not None:
+            if not isinstance(cost, Mapping):
+                raise ValueError(f"Trace file {trace_path} line {line_number} field 'cost' must be an object")
+            event_cost = {}
+            for key, value in cost.items():
+                cost_key = _expect_string(key, "cost key", trace_path, line_number)
+                event_cost[cost_key] = _validate_number(value, f"cost.{key}")
+    event_currency = None
+    if payload.get("currency") is not None:
+        event_currency = _expect_string(payload["currency"], "currency", trace_path, line_number)
     _validate_json_value(metadata, "metadata", trace_path, line_number)
     _validate_json_value(payload["input"], "input", trace_path, line_number)
     _validate_json_value(payload["output"], "output", trace_path, line_number)
     for key, value in payload.items():
         _expect_string(key, "event key", trace_path, line_number)
-        if key not in required_fields and key not in {"value", "model", "usage"}:
+        if key not in required_fields and key not in {"value", "model", "usage", "cost", "currency"}:
             _validate_json_value(value, key, trace_path, line_number)
     raw = {str(key): value for key, value in payload.items()}
 
@@ -790,6 +836,8 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
         value=event_value,
         model=event_model,
         usage=event_usage,
+        cost=event_cost,
+        currency=event_currency,
     )
 
 
@@ -955,6 +1003,14 @@ def _validate_number(value: Any, field: str) -> int | float:
         raise TypeError(f"bir {field} must be an int or float")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"bir {field} must be finite")
+    return value
+
+
+def _validate_currency(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("bir currency must be a string")
+    if not value:
+        raise ValueError("bir currency must not be empty")
     return value
 
 

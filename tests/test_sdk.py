@@ -372,6 +372,7 @@ class SdkTests(unittest.TestCase):
                 ) as gen:
                     gen.set_output({"message": response, "token": "response-token"})
                     gen.set_usage(input_tokens=5, output_tokens=7)
+                    gen.set_cost(input_cost=0.000005, output_cost=0.000014)
                 return response
 
             answer("hi")
@@ -390,6 +391,11 @@ class SdkTests(unittest.TestCase):
                 generation_event["usage"],
                 {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
             )
+            self.assertEqual(
+                generation_event["cost"],
+                {"input_cost": 0.000005, "output_cost": 0.000014, "total_cost": 0.000019},
+            )
+            self.assertEqual(generation_event["currency"], "USD")
             self.assertEqual(generation_event["status"], "success")
 
     def test_generation_capture_can_be_enabled_per_call(self) -> None:
@@ -421,6 +427,28 @@ class SdkTests(unittest.TestCase):
                     gen.set_usage(input_tokens=float("inf"))
 
             with self.assertRaisesRegex(ValueError, "input_tokens must be finite"):
+                answer()
+
+    def test_generation_cost_rejects_non_finite_values(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_cost(input_cost=float("inf"))
+
+            with self.assertRaisesRegex(ValueError, "input_cost must be finite"):
+                answer()
+
+    def test_generation_cost_rejects_invalid_currency(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_cost(total_cost=0.01, currency="")
+
+            with self.assertRaisesRegex(ValueError, "currency must not be empty"):
                 answer()
 
     def test_generation_exception_is_captured_and_reraised(self) -> None:
@@ -538,7 +566,17 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(generation_event.parent_id, "trace-fixture-1")
         self.assertEqual(generation_event.model, "demo-model")
         self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})
+        self.assertEqual(
+            generation_event.cost,
+            {"input_cost": 0.000012, "output_cost": 0.000048, "total_cost": 0.00006},
+        )
+        self.assertEqual(generation_event.currency, "USD")
         self.assertEqual(generation_event.raw["usage"], {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36})
+        self.assertEqual(
+            generation_event.raw["cost"],
+            {"input_cost": 0.000012, "output_cost": 0.000048, "total_cost": 0.00006},
+        )
+        self.assertEqual(generation_event.raw["currency"], "USD")
         self.assertEqual(score_event.parent_id, "generation-fixture-1")
         self.assertEqual(score_event.value, 0.82)
         self.assertEqual(score_event.raw["value"], 0.82)
@@ -626,6 +664,45 @@ class SdkTests(unittest.TestCase):
             bool_usage_path.write_text(json.dumps(event_with_bool_usage) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(TypeError, "usage.input_tokens"):
                 load_events(bool_usage_path)
+
+            invalid_cost_path = workdir / "invalid-cost.jsonl"
+            event_with_invalid_cost = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                cost={"input_cost": float("inf")},
+            )
+            invalid_cost_path.write_text(
+                json.dumps(event_with_invalid_cost, allow_nan=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "cost.input_cost"):
+                load_events(invalid_cost_path)
+
+            bool_cost_path = workdir / "bool-cost.jsonl"
+            event_with_bool_cost = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                cost={"input_cost": True},
+            )
+            bool_cost_path.write_text(json.dumps(event_with_bool_cost) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(TypeError, "cost.input_cost"):
+                load_events(bool_cost_path)
+
+            invalid_currency_path = workdir / "invalid-currency.jsonl"
+            event_with_invalid_currency = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                currency=123,
+            )
+            invalid_currency_path.write_text(json.dumps(event_with_invalid_currency) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "currency"):
+                load_events(invalid_currency_path)
 
             bool_score_path = workdir / "bool-score.jsonl"
             event_with_bool_score = dict(

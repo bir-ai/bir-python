@@ -17,6 +17,7 @@ def answer_question(question: str) -> str:
         response = f"{documents[0]}: {question}"
         gen.set_output(response)
         gen.set_usage(input_tokens=12, output_tokens=24)
+        gen.set_cost(input_cost=0.000012, output_cost=0.000048)
 
     score("helpfulness", 0.82)
     return response
@@ -69,8 +70,11 @@ configure(capture_inputs=True, capture_outputs=True)
 
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
-values are truncated. `score()` and generation token usage require finite numeric
-values.
+values are truncated. `score()`, generation token usage, and generation cost
+require finite numeric values.
+
+Generation cost is user-provided. Bir records explicit cost values and defaults
+the currency to `USD`; it does not calculate provider pricing automatically.
 
 `load_events()` validates JSONL records against the current event schema and
 raises `ValueError` for malformed rows, unsupported event types, invalid
