@@ -72,6 +72,9 @@ class DatasetExample:
     def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("dataset example id must not be empty")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("dataset example metadata must be an object")
+        object.__setattr__(self, "metadata", {str(key): value for key, value in self.metadata.items()})
 
     def to_dict(self, *, redact: bool = True) -> dict[str, Any]:
         input_value = _safe_capture(self.input) if redact else self.input
@@ -88,6 +91,17 @@ class DatasetExample:
 @dataclass(frozen=True)
 class Dataset:
     examples: list[DatasetExample]
+
+    def __post_init__(self) -> None:
+        seen_ids: set[str] = set()
+        duplicate_ids: set[str] = set()
+        for example in self.examples:
+            if example.id in seen_ids:
+                duplicate_ids.add(example.id)
+            seen_ids.add(example.id)
+        if duplicate_ids:
+            formatted_ids = ", ".join(sorted(duplicate_ids))
+            raise ValueError(f"dataset contains duplicate example IDs: {formatted_ids}")
 
     @classmethod
     def from_jsonl(cls, path: str | Path) -> Dataset:

@@ -49,6 +49,42 @@ class EvalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "field 'id'"):
                 Dataset.from_jsonl(dataset_path)
 
+    def test_dataset_rejects_duplicate_example_ids(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate example IDs.*q1"):
+            Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "one"}),
+                    DatasetExample(id="q1", input={"question": "two"}),
+                ]
+            )
+
+    def test_dataset_jsonl_rejects_duplicate_example_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "dataset.jsonl"
+            dataset_path.write_text(
+                "\n".join(
+                    [
+                        '{"id":"q1","input":{"question":"one"}}',
+                        '{"id":"q1","input":{"question":"two"}}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "duplicate example IDs.*q1"):
+                Dataset.from_jsonl(dataset_path)
+
+    def test_empty_dataset_is_valid(self) -> None:
+        dataset = Dataset([])
+
+        self.assertEqual(len(dataset), 0)
+        self.assertEqual(list(dataset), [])
+
+    def test_dataset_example_rejects_invalid_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "metadata must be an object"):
+            DatasetExample(id="q1", input={"question": "hello"}, metadata=["not", "an", "object"])  # type: ignore[arg-type]
+
     def test_run_experiment_writes_jsonl_results(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "experiment.jsonl"
