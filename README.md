@@ -2,8 +2,28 @@
 
 Minimal local tracing SDK for Python LLM applications.
 
+Bir records traces, spans, generations, tool calls, and scores to local JSONL
+without requiring a server. Start locally, then send events to the Bir FastAPI
+server when you want to inspect them in the dashboard.
+
+## Installation
+
+After the first package release:
+
+```bash
+python -m pip install bir
+```
+
+For local development from this repository:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+## Quickstart
+
 ```python
-from bir import generation, load_traces, observe, score, send_events, span, tool_call
+from bir import generation, observe, score, span, tool_call
 
 
 @observe()
@@ -29,18 +49,26 @@ Trace, span, tool call, generation, and score events are written as JSONL to:
 .bir/traces.jsonl
 ```
 
+## Read Local Traces
+
 You can also read local traces back from the same file:
 
 ```python
+from bir import load_traces
+
 for trace in load_traces():
     print(trace.name, trace.status, trace.duration_ms)
     for event in trace.events:
         print(event.type, event.name)
 ```
 
+## Send Events To The Server
+
 To send local events to a running Bir server:
 
 ```python
+from bir import send_events
+
 result = send_events("http://127.0.0.1:8000")
 print(result.accepted)
 ```
@@ -52,6 +80,8 @@ events after sending. Re-sending the same file is safe against the Bir server
 because duplicate event IDs are treated as already ingested.
 Complete traces are sent root-first so the server receives the trace event before
 its spans, tool calls, generations, and scores.
+
+## Privacy And Capture
 
 Input and output capture is disabled by default. Enable it globally with `configure()`
 or for a single function with `@observe(capture_inputs=True, capture_outputs=True)`.
@@ -76,6 +106,8 @@ require finite numeric values.
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.
 
+## Event Loading
+
 `load_events()` validates JSONL records against the current event schema and
 raises `ValueError` for malformed rows, unsupported event types, invalid
 timestamps, or unsupported schema versions.
@@ -88,8 +120,10 @@ configure(trace_path="tmp/bir-traces.jsonl")
 
 ## Development
 
+Run the SDK unit tests from this directory:
+
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests
+PYTHONPATH=src ../../.venv/bin/python -m unittest discover -s tests
 ```
 
 Or install the package with test dependencies and run pytest:
@@ -98,3 +132,11 @@ Or install the package with test dependencies and run pytest:
 python3 -m pip install -e ".[dev]"
 pytest
 ```
+
+Run repository type checking from the repository root:
+
+```bash
+./.venv/bin/pyright
+```
+
+Release planning lives in `CHANGELOG.md` and `../../docs/SDK_RELEASE_CHECKLIST.md`.
