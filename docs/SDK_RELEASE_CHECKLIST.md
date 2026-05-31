@@ -22,6 +22,18 @@ Bir SDK package.
 
 ## Local Verification
 
+Run the repeatable release verification script from the repository root:
+
+```bash
+./.venv/bin/python packages/python-sdk/scripts/verify_release.py
+```
+
+The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
+wheel from the SDK package files and metadata, checks the wheel contents for
+obvious local/generated artifacts, installs the wheel into a fresh temporary
+virtual environment, and executes a smoke test that covers trace, span,
+retrieval, generation, usage, cost, and score events.
+
 From `packages/python-sdk`:
 
 ```bash
@@ -46,7 +58,9 @@ npm run lint
 npm run typecheck
 ```
 
-When build tooling is available in the environment:
+The release verification script does not require `build`, `twine`, or network
+access. If build tooling is available in the environment, the optional package
+index checks are:
 
 ```bash
 cd packages/python-sdk
@@ -54,7 +68,8 @@ python -m build
 python -m twine check dist/*
 ```
 
-Use a fresh virtual environment for an install smoke test before publishing:
+If the release verification script cannot be used, manually build and install
+the package in a fresh virtual environment before publishing:
 
 ```bash
 python -m venv /tmp/bir-sdk-smoke
