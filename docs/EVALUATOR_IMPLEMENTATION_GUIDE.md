@@ -23,6 +23,10 @@ Implemented SDK pieces:
 - `Dataset.to_jsonl()`
 - `run_experiment()`
 - JSONL experiment result writing
+- JSON experiment summary writing
+- `load_experiment()`
+- `load_experiment_summary()`
+- `list_experiments()`
 - aggregate score calculation
 
 Current tests live in `packages/python-sdk/tests/test_evals.py`.
@@ -385,10 +389,13 @@ Tests:
 
 ### Phase 6: Persist Experiment Summaries
 
+Status: implemented in the SDK. Keep this section as the contract for future
+server and dashboard work.
+
 Goal: make dashboard and CLI inspection easier without scanning every row for
 basic information.
 
-Add a summary artifact next to result JSONL:
+Bir writes a summary artifact next to result JSONL:
 
 ```text
 .bir/experiments/
@@ -415,7 +422,7 @@ Rules:
 - Keep summary JSON-compatible.
 - Redact metadata.
 - Do not break existing JSONL result writing.
-- Add loaders:
+- Loaders:
 
 ```python
 load_experiment(path: str | Path) -> ExperimentResult
@@ -710,13 +717,10 @@ An evaluator slice is complete when:
 
 The next agents should prefer these small tasks:
 
-1. Harden current evaluator core with duplicate dataset ID and invalid metadata
-   tests.
-2. Add `latency_under()` with an `EvaluationContext` if needed.
-3. Add `field_equals()` for structured JSON/dict outputs.
-4. Add `custom_evaluator()` for simple user-defined checks.
-5. Add experiment summary JSON writing and loading.
-6. Add FastAPI experiment list/detail endpoints.
-7. Add dashboard experiment list/detail views.
+1. Add `latency_under()` with an `EvaluationContext` if needed.
+2. Add `field_equals()` for structured JSON/dict outputs.
+3. Add `custom_evaluator()` for simple user-defined checks.
+4. Add FastAPI experiment list/detail endpoints using SDK summaries.
+5. Add dashboard experiment list/detail views.
 
 Each task should stay commit-sized and should not start publishing work.

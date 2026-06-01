@@ -208,15 +208,20 @@ Datasets can be stored as JSONL:
 Load and run them locally:
 
 ```python
-from bir.evals import Dataset, contains, run_experiment
+from bir.evals import Dataset, contains, list_experiments, load_experiment, run_experiment
 
 dataset = Dataset.from_jsonl("questions.jsonl")
-run_experiment("prompt-v1", dataset=dataset, task=answer_question, evaluators=[contains()])
+result = run_experiment("prompt-v1", dataset=dataset, task=answer_question, evaluators=[contains()])
+loaded = load_experiment(result.path)
+summaries = list_experiments()
 ```
 
 Experiment results are written to `.bir/experiments/*.jsonl` by default, with
-one result row per example. Available deterministic evaluators are
-`exact_match()`, `contains()`, `regex_match()`, and `json_valid()`.
+one result row per example. Bir also writes a sibling `.summary.json` file with
+the experiment id, status, example count, error count, aggregate scores, and
+result path so local runs can be listed without scanning every result row.
+Available deterministic evaluators are `exact_match()`, `contains()`,
+`regex_match()`, and `json_valid()`.
 
 ## Event Loading
 

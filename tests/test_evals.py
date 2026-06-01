@@ -14,6 +14,9 @@ from bir.evals import (
     contains,
     exact_match,
     json_valid,
+    list_experiments,
+    load_experiment,
+    load_experiment_summary,
     regex_match,
     run_experiment,
 )
@@ -169,6 +172,97 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(records[0]["example_id"], "q1")
             self.assertEqual(records[0]["scores"][0]["name"], "exact_match")
             self.assertEqual(records[0]["scores"][0]["value"], 1.0)
+
+    def test_run_experiment_writes_summary_and_loads_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO"),
+                    DatasetExample(id="q2", input={"question": "bye"}, expected="BYE"),
+                ]
+            )
+
+            def answer(question: str) -> str:
+                return question.upper()
+
+            result = run_experiment(
+                "uppercase",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match()],
+                path=experiment_path,
+            )
+
+            summary_path = experiment_path.with_suffix(".summary.json")
+            summary = load_experiment_summary(summary_path)
+            self.assertEqual(summary.schema_version, "1.0")
+            self.assertEqual(summary.experiment_id, result.id)
+            self.assertEqual(summary.name, "uppercase")
+            self.assertEqual(summary.status, "success")
+            self.assertEqual(summary.example_count, 2)
+            self.assertEqual(summary.error_count, 0)
+            self.assertEqual(summary.aggregate_scores, {"exact_match": 1.0})
+            self.assertEqual(summary.result_path, str(experiment_path))
+
+            loaded = load_experiment(experiment_path)
+            self.assertEqual(loaded.id, result.id)
+            self.assertEqual(loaded.name, result.name)
+            self.assertEqual(loaded.status, "success")
+            self.assertEqual(loaded.aggregate_scores, {"exact_match": 1.0})
+            self.assertEqual([row.example_id for row in loaded.results], ["q1", "q2"])
+
+            listed = list_experiments(directory)
+            self.assertEqual([item.experiment_id for item in listed], [result.id])
+
+    def test_load_experiment_supports_empty_experiment_with_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "empty.jsonl"
+
+            def answer(question: str) -> str:
+                return question
+
+            result = run_experiment(
+                "empty",
+                dataset=Dataset([]),
+                task=answer,
+                evaluators=[exact_match()],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores, {})
+            loaded = load_experiment(experiment_path)
+            self.assertEqual(loaded.id, result.id)
+            self.assertEqual(loaded.name, "empty")
+            self.assertEqual(loaded.results, [])
+            self.assertEqual(load_experiment_summary(experiment_path.with_suffix(".summary.json")).example_count, 0)
+
+    def test_run_experiment_writes_error_summary_before_reraising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "failure.jsonl"
+            dataset = Dataset([DatasetExample(id="q1", input={"token": "raw-token"})])
+
+            def fail(token: str) -> str:
+                raise RuntimeError(f"provider failed token={token}")
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                run_experiment(
+                    "failure",
+                    dataset=dataset,
+                    task=fail,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                )
+
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.status, "error")
+            self.assertEqual(summary.example_count, 1)
+            self.assertEqual(summary.error_count, 1)
+
+            loaded = load_experiment(experiment_path)
+            self.assertEqual(loaded.status, "error")
+            self.assertEqual(loaded.results[0].error, "provider failed token=[redacted]")
 
     def test_run_experiment_records_errors_when_configured_to_continue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
