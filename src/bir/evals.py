@@ -27,6 +27,8 @@ __all__ = [
     "contains",
     "cost_under",
     "exact_match",
+    "field_contains",
+    "field_equals",
     "json_valid",
     "latency_under",
     "list_experiments",
@@ -300,6 +302,13 @@ class ExperimentSummary:
         }
 
 
+@dataclass(frozen=True)
+class _ResolvedField:
+    exists: bool
+    value: Any = None
+    reason: str | None = None
+
+
 def exact_match(expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "exact_match") -> DeterministicEvaluator:
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
         target = _expected_value(expected, example_expected, name)
@@ -360,6 +369,58 @@ def json_valid(*, name: str = "json_valid") -> DeterministicEvaluator:
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 
 
+def field_equals(path: str, expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "field_equals") -> DeterministicEvaluator:
+    field_path = _parse_field_path(path)
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        resolved = _resolve_field_path(output, field_path)
+        target = _expected_value(expected, example_expected, name)
+        metadata: dict[str, Any] = {
+            "path": path,
+            "expected": target,
+        }
+        if not resolved.exists:
+            metadata["reason"] = resolved.reason
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        metadata["actual"] = resolved.value
+        return EvalResult(name=name, value=1.0 if resolved.value == target else 0.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
+def field_contains(
+    path: str,
+    expected: str | object = _USE_EXAMPLE_EXPECTED,
+    *,
+    case_sensitive: bool = True,
+    name: str = "field_contains",
+) -> DeterministicEvaluator:
+    field_path = _parse_field_path(path)
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        resolved = _resolve_field_path(output, field_path)
+        target = _expected_value(expected, example_expected, name)
+        if not isinstance(target, str):
+            raise TypeError("field_contains expected value must be a string")
+        metadata: dict[str, Any] = {
+            "path": path,
+            "expected": target,
+        }
+        if not resolved.exists:
+            metadata["reason"] = resolved.reason
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        if not isinstance(resolved.value, str):
+            metadata["reason"] = "non_string"
+            metadata["actual"] = resolved.value
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        haystack = resolved.value if case_sensitive else resolved.value.lower()
+        needle = target if case_sensitive else target.lower()
+        metadata["actual"] = resolved.value
+        return EvalResult(name=name, value=1.0 if needle in haystack else 0.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
 def latency_under(max_ms: float, *, name: str = "latency_under") -> DeterministicEvaluator:
     max_duration = _validate_non_negative_number(max_ms, "max_ms")
 
@@ -414,6 +475,7 @@ def numeric_between(
     min_value: float | None = None,
     max_value: float | None = None,
     *,
+    field: str | None = None,
     name: str = "numeric_between",
 ) -> DeterministicEvaluator:
     lower_bound = None if min_value is None else _validate_finite_number(min_value, "min_value")
@@ -422,6 +484,7 @@ def numeric_between(
         raise ValueError("numeric_between requires min_value or max_value")
     if lower_bound is not None and upper_bound is not None and lower_bound > upper_bound:
         raise ValueError("numeric_between min_value must be less than or equal to max_value")
+    field_path = None if field is None else _parse_field_path(field)
 
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
         del example_expected
@@ -429,15 +492,23 @@ def numeric_between(
             "min_value": lower_bound,
             "max_value": upper_bound,
         }
-        if isinstance(output, bool) or not isinstance(output, (int, float)):
+        value = output
+        if field_path is not None:
+            metadata["path"] = field
+            resolved = _resolve_field_path(output, field_path)
+            if not resolved.exists:
+                metadata["reason"] = resolved.reason
+                return EvalResult(name=name, value=0.0, metadata=metadata)
+            value = resolved.value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             metadata["reason"] = "non_numeric"
-            metadata["actual"] = output
+            metadata["actual"] = value
             return EvalResult(name=name, value=0.0, metadata=metadata)
-        if isinstance(output, float) and not math.isfinite(output):
+        if isinstance(value, float) and not math.isfinite(value):
             metadata["reason"] = "non_finite"
-            metadata["actual"] = output
+            metadata["actual"] = value
             return EvalResult(name=name, value=0.0, metadata=metadata)
-        actual = float(output)
+        actual = float(value)
         metadata["actual"] = actual
         if lower_bound is not None and actual < lower_bound:
             return EvalResult(name=name, value=0.0, metadata=metadata)
@@ -830,6 +901,65 @@ def _extract_cost_value(output: Any, field: str) -> Any:
     if isinstance(cost, Mapping) and field in cost:
         return cost[field]
     return None
+
+
+def _parse_field_path(path: str) -> list[str | int]:
+    if not isinstance(path, str) or not path:
+        raise ValueError("field path must not be empty")
+
+    parts: list[str | int] = []
+    index = 0
+    while index < len(path):
+        if path[index] in ".[":
+            raise ValueError(f"invalid field path {path!r}")
+
+        name_start = index
+        while index < len(path) and path[index] not in ".[":
+            if path[index] == "]":
+                raise ValueError(f"invalid field path {path!r}")
+            index += 1
+        name = path[name_start:index]
+        if not name:
+            raise ValueError(f"invalid field path {path!r}")
+        parts.append(name)
+
+        while index < len(path) and path[index] == "[":
+            index += 1
+            item_start = index
+            while index < len(path) and path[index].isdigit():
+                index += 1
+            if item_start == index or index >= len(path) or path[index] != "]":
+                raise ValueError(f"invalid field path {path!r}")
+            parts.append(int(path[item_start:index]))
+            index += 1
+
+        if index == len(path):
+            break
+        if path[index] != ".":
+            raise ValueError(f"invalid field path {path!r}")
+        index += 1
+        if index == len(path):
+            raise ValueError(f"invalid field path {path!r}")
+
+    return parts
+
+
+def _resolve_field_path(output: Any, field_path: list[str | int]) -> _ResolvedField:
+    current = output
+    for part in field_path:
+        if isinstance(part, str):
+            if not isinstance(current, Mapping):
+                return _ResolvedField(exists=False, reason="non_object")
+            if part not in current:
+                return _ResolvedField(exists=False, reason="missing_path")
+            current = current[part]
+            continue
+        if not isinstance(current, list):
+            return _ResolvedField(exists=False, reason="non_list")
+        if part >= len(current):
+            return _ResolvedField(exists=False, reason="index_out_of_range")
+        current = current[part]
+    return _ResolvedField(exists=True, value=current)
 
 
 def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:

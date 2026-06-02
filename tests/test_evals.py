@@ -15,6 +15,8 @@ from bir.evals import (
     contains,
     cost_under,
     exact_match,
+    field_contains,
+    field_equals,
     json_valid,
     latency_under,
     list_experiments,
@@ -36,6 +38,14 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(json_valid().evaluate("{not-json").value, 0.0)
         self.assertEqual(numeric_between(min_value=0.0, max_value=1.0).evaluate(0.5).value, 1.0)
         self.assertEqual(numeric_between(min_value=0.0, max_value=1.0).evaluate(2.0).value, 0.0)
+        structured_output = {
+            "answer": "Paris is the capital of France.",
+            "confidence": 0.86,
+            "items": [{"name": "Paris"}],
+        }
+        self.assertEqual(field_equals("items[0].name", "Paris").evaluate(structured_output).value, 1.0)
+        self.assertEqual(field_contains("answer", "capital").evaluate(structured_output).value, 1.0)
+        self.assertEqual(numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0)
 
     def test_context_evaluators_return_numeric_scores(self) -> None:
         context = EvaluationContext(
@@ -90,6 +100,10 @@ class EvalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             json_valid(name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
+            field_equals("answer", "ok", name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            field_contains("answer", "ok", name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
             latency_under(10, name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             cost_under(0.01, name="")
@@ -113,6 +127,60 @@ class EvalTests(unittest.TestCase):
             numeric_between(min_value=2.0, max_value=1.0)
         with self.assertRaisesRegex(ValueError, "min_value must be an int or float"):
             numeric_between(min_value=True)  # type: ignore[arg-type]
+
+    def test_field_evaluators_reject_invalid_paths(self) -> None:
+        for path in ("", ".answer", "answer.", "items[]", "items[-1]", "items[abc]", "items[0"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "field path"):
+                    field_equals(path, "ok")
+
+        with self.assertRaisesRegex(ValueError, "field path"):
+            field_contains("items..name", "ok")
+        with self.assertRaisesRegex(ValueError, "field path"):
+            numeric_between(max_value=1.0, field="[0]")
+
+    def test_field_evaluators_report_missing_and_mismatched_values(self) -> None:
+        output = {
+            "answer": "Paris is the capital of France.",
+            "items": [{"name": "Paris"}],
+            "scores": [{"value": 0.72}],
+            "metadata": {"api_key": "sk-secret"},
+        }
+
+        self.assertEqual(field_equals("items[0].name", "Paris").evaluate(output).value, 1.0)
+        self.assertEqual(field_equals("items[0].name", "Lyon").evaluate(output).value, 0.0)
+        self.assertEqual(field_contains("answer", "paris", case_sensitive=False).evaluate(output).value, 1.0)
+        self.assertEqual(numeric_between(min_value=0.7, max_value=0.8, field="scores[0].value").evaluate(output).value, 1.0)
+
+        missing_result = field_equals("items[1].name", "Paris").evaluate(output)
+        self.assertEqual(missing_result.value, 0.0)
+        self.assertEqual(missing_result.metadata["reason"], "index_out_of_range")
+
+        non_string_result = field_contains("scores[0].value", "0.72").evaluate(output)
+        self.assertEqual(non_string_result.value, 0.0)
+        self.assertEqual(non_string_result.metadata["reason"], "non_string")
+
+        redacted_result = field_equals("metadata.api_key", "sk-secret").evaluate(output)
+        self.assertEqual(redacted_result.metadata["actual"], "[redacted]")
+        self.assertEqual(redacted_result.metadata["expected"], "[redacted]")
+
+    def test_field_evaluators_can_use_example_expected_values(self) -> None:
+        output = {"answer": "Paris"}
+
+        self.assertEqual(field_equals("answer").evaluate(output, expected="Paris").value, 1.0)
+        self.assertEqual(field_contains("answer").evaluate(output, expected="ari").value, 1.0)
+
+    def test_numeric_between_field_reports_missing_and_non_numeric_values(self) -> None:
+        output = {"scores": [{"value": "api_key=sk-secret"}]}
+
+        missing_result = numeric_between(max_value=1.0, field="scores[1].value").evaluate(output)
+        non_numeric_result = numeric_between(max_value=1.0, field="scores[0].value").evaluate(output)
+
+        self.assertEqual(missing_result.value, 0.0)
+        self.assertEqual(missing_result.metadata["reason"], "index_out_of_range")
+        self.assertEqual(non_numeric_result.value, 0.0)
+        self.assertEqual(non_numeric_result.metadata["reason"], "non_numeric")
+        self.assertEqual(non_numeric_result.metadata["actual"], "api_key=[redacted]")
 
     def test_context_evaluator_requires_context(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires an evaluation context"):
@@ -277,6 +345,47 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(result.aggregate_scores["cost_under"], 0.5)
             self.assertEqual(result.results[0].scores[1].metadata["actual"], 0.02)
             self.assertEqual(result.results[1].scores[1].metadata["actual"], 0.2)
+
+    def test_run_experiment_supports_structured_output_evaluators(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "capital"}, expected="Paris"),
+                    DatasetExample(id="q2", input={"question": "country"}, expected="France"),
+                ]
+            )
+
+            def answer(question: str) -> dict[str, object]:
+                if question == "capital":
+                    return {
+                        "answer": "Paris is the capital of France.",
+                        "confidence": 0.91,
+                        "citations": [{"id": "doc-1"}],
+                    }
+                return {
+                    "answer": "France is in Europe.",
+                    "confidence": 0.62,
+                    "citations": [],
+                }
+
+            result = run_experiment(
+                "structured",
+                dataset=dataset,
+                task=answer,
+                evaluators=[
+                    field_contains("answer"),
+                    field_equals("citations[0].id", "doc-1"),
+                    numeric_between(min_value=0.7, max_value=1.0, field="confidence"),
+                ],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["field_contains"], 1.0)
+            self.assertEqual(result.aggregate_scores["field_equals"], 0.5)
+            self.assertEqual(result.aggregate_scores["numeric_between"], 0.5)
+            self.assertEqual(result.results[1].scores[1].metadata["reason"], "index_out_of_range")
 
     def test_run_experiment_redacts_threshold_failure_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

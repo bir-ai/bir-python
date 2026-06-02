@@ -32,6 +32,9 @@ Implemented SDK pieces:
 - `latency_under()`
 - `cost_under()`
 - `numeric_between()`
+- `field_equals()`
+- `field_contains()`
+- `numeric_between(..., field="path")`
 
 Current tests live in `packages/python-sdk/tests/test_evals.py`.
 
@@ -235,7 +238,13 @@ Add these evaluators:
 ```python
 latency_under(max_ms: float, *, name: str = "latency_under")
 cost_under(max_cost: float, *, field: str = "total_cost", name: str = "cost_under")
-numeric_between(min_value: float | None = None, max_value: float | None = None, *, name: str = "numeric_between")
+numeric_between(
+    min_value: float | None = None,
+    max_value: float | None = None,
+    *,
+    field: str | None = None,
+    name: str = "numeric_between",
+)
 ```
 
 Design notes:
@@ -277,6 +286,9 @@ Tests:
 
 ### Phase 3: Add Structured Output Evaluators
 
+Status: field path evaluators are implemented in the SDK. `json_schema()`
+remains deferred until a minimal validator scope is worth adding.
+
 Goal: make evals useful for JSON/tool-output workflows.
 
 Add evaluators:
@@ -285,6 +297,7 @@ Add evaluators:
 json_schema(schema: Mapping[str, Any], *, name: str = "json_schema")
 field_equals(path: str, expected: Any, *, name: str = "field_equals")
 field_contains(path: str, expected: str, *, case_sensitive: bool = True, name: str = "field_contains")
+numeric_between(min_value: float | None = None, max_value: float | None = None, *, field: str | None = None, name: str = "numeric_between")
 ```
 
 Implementation guidance:
