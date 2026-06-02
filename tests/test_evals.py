@@ -10,13 +10,17 @@ from bir.evals import (
     Dataset,
     DatasetExample,
     DeterministicEvaluator,
+    EvaluationContext,
     EvalResult,
     contains,
+    cost_under,
     exact_match,
     json_valid,
+    latency_under,
     list_experiments,
     load_experiment,
     load_experiment_summary,
+    numeric_between,
     regex_match,
     run_experiment,
 )
@@ -30,6 +34,23 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(regex_match(r"Paris").evaluate("The answer is Paris.").value, 1.0)
         self.assertEqual(json_valid().evaluate('{"answer":"Paris"}').value, 1.0)
         self.assertEqual(json_valid().evaluate("{not-json").value, 0.0)
+        self.assertEqual(numeric_between(min_value=0.0, max_value=1.0).evaluate(0.5).value, 1.0)
+        self.assertEqual(numeric_between(min_value=0.0, max_value=1.0).evaluate(2.0).value, 0.0)
+
+    def test_context_evaluators_return_numeric_scores(self) -> None:
+        context = EvaluationContext(
+            example=DatasetExample(id="q1", input={"question": "hello"}),
+            output={"cost": {"total_cost": 0.02}},
+            duration_ms=12.0,
+        )
+
+        latency_result = latency_under(20).evaluate(context.output, context=context)
+        cost_result = cost_under(0.05).evaluate(context.output, context=context)
+
+        self.assertEqual(latency_result.value, 1.0)
+        self.assertEqual(latency_result.metadata["duration_ms"], 12.0)
+        self.assertEqual(cost_result.value, 1.0)
+        self.assertEqual(cost_result.metadata["actual"], 0.02)
 
     def test_eval_result_rejects_invalid_values(self) -> None:
         with self.assertRaisesRegex(TypeError, "int or float"):
@@ -68,6 +89,57 @@ class EvalTests(unittest.TestCase):
             regex_match(r"Paris", name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             json_valid(name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            latency_under(10, name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            cost_under(0.01, name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            numeric_between(max_value=1.0, name="")
+
+    def test_threshold_evaluators_reject_invalid_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_ms must be non-negative"):
+            latency_under(-1)
+        with self.assertRaisesRegex(ValueError, "max_ms must be an int or float"):
+            latency_under(True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "max_cost must be non-negative"):
+            cost_under(-0.01)
+        with self.assertRaisesRegex(ValueError, "max_cost must be an int or float"):
+            cost_under(True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "cost field must not be empty"):
+            cost_under(0.01, field="")
+        with self.assertRaisesRegex(ValueError, "numeric_between requires"):
+            numeric_between()
+        with self.assertRaisesRegex(ValueError, "min_value must be less than or equal to max_value"):
+            numeric_between(min_value=2.0, max_value=1.0)
+        with self.assertRaisesRegex(ValueError, "min_value must be an int or float"):
+            numeric_between(min_value=True)  # type: ignore[arg-type]
+
+    def test_context_evaluator_requires_context(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires an evaluation context"):
+            latency_under(10).evaluate("ok")
+
+    def test_evaluation_context_rejects_invalid_duration_and_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duration_ms must be finite"):
+            EvaluationContext(example=None, output="ok", duration_ms=math.inf)
+        with self.assertRaisesRegex(ValueError, "metadata must be an object"):
+            EvaluationContext(example=None, output="ok", duration_ms=1.0, metadata=["bad"])  # type: ignore[arg-type]
+
+    def test_cost_under_handles_missing_and_non_numeric_values(self) -> None:
+        missing_context = EvaluationContext(example=None, output={"answer": "ok"}, duration_ms=1.0)
+        non_numeric_context = EvaluationContext(
+            example=None,
+            output={"cost": {"total_cost": "api_key=sk-secret"}},
+            duration_ms=1.0,
+        )
+
+        missing_result = cost_under(0.01).evaluate(missing_context.output, context=missing_context)
+        non_numeric_result = cost_under(0.01).evaluate(non_numeric_context.output, context=non_numeric_context)
+
+        self.assertEqual(missing_result.value, 0.0)
+        self.assertEqual(missing_result.metadata["reason"], "missing")
+        self.assertEqual(non_numeric_result.value, 0.0)
+        self.assertEqual(non_numeric_result.metadata["reason"], "non_numeric")
+        self.assertEqual(non_numeric_result.metadata["actual"], "api_key=[redacted]")
 
     def test_deterministic_evaluator_requires_callable(self) -> None:
         with self.assertRaisesRegex(TypeError, "must be callable"):
@@ -172,6 +244,59 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(records[0]["example_id"], "q1")
             self.assertEqual(records[0]["scores"][0]["name"], "exact_match")
             self.assertEqual(records[0]["scores"][0]["value"], 1.0)
+
+    def test_run_experiment_supports_threshold_evaluators(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"cost": 0.02}, expected=0.02),
+                    DatasetExample(id="q2", input={"cost": 0.20}, expected=0.20),
+                ]
+            )
+
+            def answer(cost: float) -> dict[str, object]:
+                return {
+                    "value": cost,
+                    "cost": {"total_cost": cost},
+                }
+
+            result = run_experiment(
+                "thresholds",
+                dataset=dataset,
+                task=answer,
+                evaluators=[
+                    latency_under(1000),
+                    cost_under(0.05),
+                ],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["latency_under"], 1.0)
+            self.assertEqual(result.aggregate_scores["cost_under"], 0.5)
+            self.assertEqual(result.results[0].scores[1].metadata["actual"], 0.02)
+            self.assertEqual(result.results[1].scores[1].metadata["actual"], 0.2)
+
+    def test_run_experiment_redacts_threshold_failure_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset([DatasetExample(id="q1", input={"cost": "api_key=sk-secret"})])
+
+            def answer(cost: str) -> dict[str, object]:
+                return {"cost": {"total_cost": cost}}
+
+            result = run_experiment(
+                "redacted-threshold",
+                dataset=dataset,
+                task=answer,
+                evaluators=[cost_under(0.05)],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.results[0].scores[0].metadata["actual"], "api_key=[redacted]")
+            raw_store = experiment_path.read_text(encoding="utf-8")
+            self.assertNotIn("sk-secret", raw_store)
 
     def test_run_experiment_writes_summary_and_loads_results(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

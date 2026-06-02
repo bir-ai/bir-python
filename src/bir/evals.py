@@ -19,16 +19,20 @@ __all__ = [
     "Dataset",
     "DatasetExample",
     "DeterministicEvaluator",
+    "EvaluationContext",
     "EvalResult",
     "ExperimentExampleResult",
     "ExperimentResult",
     "ExperimentSummary",
     "contains",
+    "cost_under",
     "exact_match",
     "json_valid",
+    "latency_under",
     "list_experiments",
     "load_experiment",
     "load_experiment_summary",
+    "numeric_between",
     "regex_match",
     "run_experiment",
 ]
@@ -63,15 +67,40 @@ class EvalResult:
 @dataclass(frozen=True)
 class DeterministicEvaluator:
     name: str
-    _evaluate: Callable[[Any, Any], EvalResult]
+    _evaluate: Callable[..., EvalResult]
+    _uses_context: bool = False
 
     def __post_init__(self) -> None:
         _validate_evaluator_name(self.name)
         if not callable(self._evaluate):
             raise TypeError("deterministic evaluator evaluate function must be callable")
 
-    def evaluate(self, output: Any, *, expected: Any = None) -> EvalResult:
+    def evaluate(
+        self,
+        output: Any,
+        *,
+        expected: Any = None,
+        context: EvaluationContext | None = None,
+    ) -> EvalResult:
+        if self._uses_context:
+            if context is None:
+                raise ValueError(f"{self.name} requires an evaluation context")
+            return self._evaluate(context)
         return self._evaluate(output, expected)
+
+
+@dataclass(frozen=True)
+class EvaluationContext:
+    example: DatasetExample | None
+    output: Any
+    duration_ms: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "duration_ms", _validate_finite_number(self.duration_ms, "duration_ms"))
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("evaluation context metadata must be an object")
+        object.__setattr__(self, "metadata", _safe_mapping(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -331,6 +360,94 @@ def json_valid(*, name: str = "json_valid") -> DeterministicEvaluator:
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 
 
+def latency_under(max_ms: float, *, name: str = "latency_under") -> DeterministicEvaluator:
+    max_duration = _validate_non_negative_number(max_ms, "max_ms")
+
+    def evaluate(context: EvaluationContext) -> EvalResult:
+        return EvalResult(
+            name=name,
+            value=1.0 if context.duration_ms <= max_duration else 0.0,
+            metadata={
+                "duration_ms": context.duration_ms,
+                "max_ms": max_duration,
+            },
+        )
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate, _uses_context=True)
+
+
+def cost_under(
+    max_cost: float,
+    *,
+    field: str = "total_cost",
+    name: str = "cost_under",
+) -> DeterministicEvaluator:
+    max_cost_value = _validate_non_negative_number(max_cost, "max_cost")
+    if not field:
+        raise ValueError("cost field must not be empty")
+
+    def evaluate(context: EvaluationContext) -> EvalResult:
+        value = _extract_cost_value(context.output, field)
+        metadata: dict[str, Any] = {
+            "field": field,
+            "max_cost": max_cost_value,
+        }
+        if value is None:
+            metadata["reason"] = "missing"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            metadata["reason"] = "non_numeric"
+            metadata["actual"] = value
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        if isinstance(value, float) and not math.isfinite(value):
+            metadata["reason"] = "non_finite"
+            metadata["actual"] = value
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        actual = float(value)
+        metadata["actual"] = actual
+        return EvalResult(name=name, value=1.0 if actual <= max_cost_value else 0.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate, _uses_context=True)
+
+
+def numeric_between(
+    min_value: float | None = None,
+    max_value: float | None = None,
+    *,
+    name: str = "numeric_between",
+) -> DeterministicEvaluator:
+    lower_bound = None if min_value is None else _validate_finite_number(min_value, "min_value")
+    upper_bound = None if max_value is None else _validate_finite_number(max_value, "max_value")
+    if lower_bound is None and upper_bound is None:
+        raise ValueError("numeric_between requires min_value or max_value")
+    if lower_bound is not None and upper_bound is not None and lower_bound > upper_bound:
+        raise ValueError("numeric_between min_value must be less than or equal to max_value")
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        del example_expected
+        metadata: dict[str, Any] = {
+            "min_value": lower_bound,
+            "max_value": upper_bound,
+        }
+        if isinstance(output, bool) or not isinstance(output, (int, float)):
+            metadata["reason"] = "non_numeric"
+            metadata["actual"] = output
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        if isinstance(output, float) and not math.isfinite(output):
+            metadata["reason"] = "non_finite"
+            metadata["actual"] = output
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        actual = float(output)
+        metadata["actual"] = actual
+        if lower_bound is not None and actual < lower_bound:
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        if upper_bound is not None and actual > upper_bound:
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        return EvalResult(name=name, value=1.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
 def run_experiment(
     name: str,
     *,
@@ -478,7 +595,14 @@ def _run_example(
 ) -> ExperimentExampleResult:
     start_time = _now()
     output = _call_task(task, example.input)
-    scores = [evaluator.evaluate(output, expected=example.expected) for evaluator in evaluators]
+    task_end_time = _now()
+    context = EvaluationContext(
+        example=example,
+        output=output,
+        duration_ms=_duration_ms(start_time, task_end_time),
+        metadata=example.metadata,
+    )
+    scores = [evaluator.evaluate(output, expected=example.expected, context=context) for evaluator in evaluators]
     end_time = _now()
     return ExperimentExampleResult(
         id=str(uuid4()),
@@ -697,11 +821,29 @@ def _expected_value(configured_expected: Any, example_expected: Any, evaluator_n
     return configured_expected
 
 
+def _extract_cost_value(output: Any, field: str) -> Any:
+    if not isinstance(output, Mapping):
+        return None
+    if field in output:
+        return output[field]
+    cost = output.get("cost")
+    if isinstance(cost, Mapping) and field in cost:
+        return cost[field]
+    return None
+
+
 def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
     captured = _safe_capture({str(key): item for key, item in value.items()})
     if not isinstance(captured, dict):
         return {}
     return captured
+
+
+def _validate_non_negative_number(value: Any, field: str) -> float:
+    numeric_value = _validate_finite_number(value, field)
+    if numeric_value < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return numeric_value
 
 
 def _validate_finite_number(value: Any, field: str) -> float:
@@ -719,6 +861,12 @@ def _validate_evaluator_name(name: str) -> None:
 
 def _json_line(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+
+
+def _duration_ms(start_time: str, end_time: str) -> float:
+    start = datetime.fromisoformat(start_time)
+    end = datetime.fromisoformat(end_time)
+    return (end - start).total_seconds() * 1000
 
 
 def _now() -> str:

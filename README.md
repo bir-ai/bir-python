@@ -171,7 +171,7 @@ Bir includes a small deterministic evaluation layer for local regression checks.
 It does not require a server or an LLM judge.
 
 ```python
-from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
+from bir.evals import Dataset, DatasetExample, contains, exact_match, latency_under, run_experiment
 
 
 dataset = Dataset(
@@ -193,7 +193,11 @@ result = run_experiment(
     "quickstart",
     dataset=dataset,
     task=answer_question,
-    evaluators=[contains(), exact_match("Bir is an observability SDK.")],
+    evaluators=[
+        contains(),
+        exact_match("Bir is an observability SDK."),
+        latency_under(1000),
+    ],
 )
 
 print(result.aggregate_scores)
@@ -221,7 +225,26 @@ one result row per example. Bir also writes a sibling `.summary.json` file with
 the experiment id, status, example count, error count, aggregate scores, and
 result path so local runs can be listed without scanning every result row.
 Available deterministic evaluators are `exact_match()`, `contains()`,
-`regex_match()`, and `json_valid()`.
+`regex_match()`, `json_valid()`, `latency_under()`, `cost_under()`, and
+`numeric_between()`.
+
+Use threshold evaluators for local gates:
+
+```python
+from bir.evals import cost_under, latency_under, numeric_between
+
+evaluators = [
+    latency_under(1000),
+    cost_under(0.05),
+    numeric_between(min_value=0.0, max_value=1.0),
+]
+```
+
+`latency_under()` uses measured task duration from `run_experiment()`.
+`cost_under()` checks explicit cost fields returned by your task, either
+`{"total_cost": 0.01}` or `{"cost": {"total_cost": 0.01}}`. Bir records only the
+cost values you provide and does not calculate provider pricing.
+`numeric_between()` checks numeric task outputs.
 
 ## Event Loading
 

@@ -28,6 +28,10 @@ Implemented SDK pieces:
 - `load_experiment_summary()`
 - `list_experiments()`
 - aggregate score calculation
+- `EvaluationContext`
+- `latency_under()`
+- `cost_under()`
+- `numeric_between()`
 
 Current tests live in `packages/python-sdk/tests/test_evals.py`.
 
@@ -221,6 +225,8 @@ cd ../..
 ```
 
 ### Phase 2: Add Threshold Evaluators
+
+Status: implemented in the SDK.
 
 Goal: support common operational gates without needing dashboard work.
 
