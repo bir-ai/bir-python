@@ -14,6 +14,7 @@ from bir.evals import (
     EvalResult,
     contains,
     cost_under,
+    custom_evaluator,
     exact_match,
     field_contains,
     field_equals,
@@ -46,6 +47,7 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(field_equals("items[0].name", "Paris").evaluate(structured_output).value, 1.0)
         self.assertEqual(field_contains("answer", "capital").evaluate(structured_output).value, 1.0)
         self.assertEqual(numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0)
+        self.assertEqual(custom_evaluator("has_paris", lambda output, expected: "Paris" in str(output)).evaluate("Paris").value, 1.0)
 
     def test_context_evaluators_return_numeric_scores(self) -> None:
         context = EvaluationContext(
@@ -109,6 +111,67 @@ class EvalTests(unittest.TestCase):
             cost_under(0.01, name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             numeric_between(max_value=1.0, name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            custom_evaluator("", lambda output, expected: 1.0)
+
+    def test_custom_evaluator_supports_numeric_bool_and_eval_result_returns(self) -> None:
+        numeric = custom_evaluator("numeric_score", lambda output, expected: 0.5)
+        boolean = custom_evaluator("has_expected", lambda output, expected: expected in output)
+        rich = custom_evaluator(
+            "rich_score",
+            lambda output, expected: EvalResult(
+                name="rich_score",
+                value=1.0,
+                metadata={"expected": expected, "api_key": "sk-secret"},
+            ),
+        )
+
+        self.assertEqual(numeric.evaluate("ok").value, 0.5)
+        self.assertEqual(boolean.evaluate("Paris, France", expected="Paris").value, 1.0)
+        self.assertEqual(boolean.evaluate("Lyon, France", expected="Paris").value, 0.0)
+        rich_result = rich.evaluate("Paris", expected="Paris")
+        self.assertEqual(rich_result.value, 1.0)
+        self.assertEqual(rich_result.metadata["api_key"], "[redacted]")
+
+    def test_custom_evaluator_supports_context(self) -> None:
+        evaluator = custom_evaluator(
+            "fast_enough",
+            lambda context: EvalResult(
+                name="fast_enough",
+                value=1.0 if context.duration_ms < 20 else 0.0,
+                metadata={"example_id": context.example.id if context.example else None},
+            ),
+            uses_context=True,
+        )
+        context = EvaluationContext(
+            example=DatasetExample(id="q1", input={"question": "hello"}),
+            output="ok",
+            duration_ms=12.0,
+        )
+
+        result = evaluator.evaluate(context.output, context=context)
+
+        self.assertEqual(result.value, 1.0)
+        self.assertEqual(result.metadata["example_id"], "q1")
+
+    def test_custom_evaluator_rejects_invalid_configuration_and_returns(self) -> None:
+        with self.assertRaisesRegex(TypeError, "must be callable"):
+            custom_evaluator("bad", None)  # type: ignore[arg-type]
+
+        invalid_return = custom_evaluator("invalid_return", lambda output, expected: {"score": 1.0})  # type: ignore[return-value]
+        with self.assertRaisesRegex(TypeError, "custom evaluator must return"):
+            invalid_return.evaluate("ok")
+
+        non_finite = custom_evaluator("non_finite", lambda output, expected: math.inf)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            non_finite.evaluate("ok")
+
+    def test_custom_evaluator_exceptions_surface(self) -> None:
+        def fail(output: object, expected: object) -> float:
+            raise RuntimeError("custom evaluator failed token=raw-token")
+
+        with self.assertRaisesRegex(RuntimeError, "custom evaluator failed"):
+            custom_evaluator("failure", fail).evaluate("ok")
 
     def test_threshold_evaluators_reject_invalid_configuration(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_ms must be non-negative"):
@@ -386,6 +449,72 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(result.aggregate_scores["field_equals"], 0.5)
             self.assertEqual(result.aggregate_scores["numeric_between"], 0.5)
             self.assertEqual(result.results[1].scores[1].metadata["reason"], "index_out_of_range")
+
+    def test_run_experiment_supports_custom_evaluators(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "capital"}, expected="Paris"),
+                    DatasetExample(id="q2", input={"question": "country"}, expected="France"),
+                ]
+            )
+
+            def answer(question: str) -> str:
+                return "Paris is the capital of France." if question == "capital" else "France is in Europe."
+
+            result = run_experiment(
+                "custom",
+                dataset=dataset,
+                task=answer,
+                evaluators=[
+                    custom_evaluator("mentions_expected", lambda output, expected: expected in output),
+                    custom_evaluator(
+                        "custom_metadata",
+                        lambda output, expected: EvalResult(
+                            name="custom_metadata",
+                            value=1.0,
+                            metadata={"expected": expected, "api_key": "sk-secret"},
+                        ),
+                    ),
+                ],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["mentions_expected"], 1.0)
+            self.assertEqual(result.aggregate_scores["custom_metadata"], 1.0)
+            self.assertEqual(result.results[0].scores[1].metadata["api_key"], "[redacted]")
+            self.assertNotIn("sk-secret", experiment_path.read_text(encoding="utf-8"))
+
+    def test_run_experiment_supports_context_custom_evaluator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset([DatasetExample(id="q1", input={"question": "hello"})])
+
+            def answer(question: str) -> str:
+                return question.upper()
+
+            result = run_experiment(
+                "custom-context",
+                dataset=dataset,
+                task=answer,
+                evaluators=[
+                    custom_evaluator(
+                        "has_example",
+                        lambda context: EvalResult(
+                            name="has_example",
+                            value=1.0 if context.example is not None else 0.0,
+                            metadata={"duration_ms": context.duration_ms},
+                        ),
+                        uses_context=True,
+                    )
+                ],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.results[0].scores[0].value, 1.0)
+            self.assertIn("duration_ms", result.results[0].scores[0].metadata)
 
     def test_run_experiment_redacts_threshold_failure_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

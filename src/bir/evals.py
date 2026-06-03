@@ -26,6 +26,7 @@ __all__ = [
     "ExperimentSummary",
     "contains",
     "cost_under",
+    "custom_evaluator",
     "exact_match",
     "field_contains",
     "field_equals",
@@ -367,6 +368,29 @@ def json_valid(*, name: str = "json_valid") -> DeterministicEvaluator:
         return EvalResult(name=name, value=1.0)
 
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
+def custom_evaluator(
+    name: str,
+    evaluate: Callable[..., EvalResult | int | float | bool],
+    *,
+    uses_context: bool = False,
+) -> DeterministicEvaluator:
+    _validate_evaluator_name(name)
+    if not callable(evaluate):
+        raise TypeError("custom evaluator function must be callable")
+
+    if uses_context:
+
+        def evaluate_with_context(context: EvaluationContext) -> EvalResult:
+            return _coerce_eval_result(name, evaluate(context))
+
+        return DeterministicEvaluator(name=name, _evaluate=evaluate_with_context, _uses_context=True)
+
+    def evaluate_output(output: Any, example_expected: Any) -> EvalResult:
+        return _coerce_eval_result(name, evaluate(output, example_expected))
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate_output)
 
 
 def field_equals(path: str, expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "field_equals") -> DeterministicEvaluator:
@@ -890,6 +914,16 @@ def _expected_value(configured_expected: Any, example_expected: Any, evaluator_n
             raise ValueError(f"{evaluator_name} requires an expected value")
         return example_expected
     return configured_expected
+
+
+def _coerce_eval_result(evaluator_name: str, value: EvalResult | int | float | bool) -> EvalResult:
+    if isinstance(value, EvalResult):
+        return value
+    if isinstance(value, bool):
+        return EvalResult(name=evaluator_name, value=1.0 if value else 0.0)
+    if isinstance(value, (int, float)):
+        return EvalResult(name=evaluator_name, value=value)
+    raise TypeError("custom evaluator must return EvalResult, bool, int, or float")
 
 
 def _extract_cost_value(output: Any, field: str) -> Any:

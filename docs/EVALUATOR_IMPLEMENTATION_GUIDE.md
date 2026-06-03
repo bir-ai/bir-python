@@ -35,6 +35,7 @@ Implemented SDK pieces:
 - `field_equals()`
 - `field_contains()`
 - `numeric_between(..., field="path")`
+- `custom_evaluator()`
 
 Current tests live in `packages/python-sdk/tests/test_evals.py`.
 
@@ -323,6 +324,8 @@ Tests:
 
 ### Phase 4: Add Custom Evaluator Support
 
+Status: implemented in the SDK.
+
 Goal: let users write small local evaluators without subclassing internals.
 
 Target API:
@@ -342,6 +345,7 @@ Better API if `EvaluationContext` exists:
 has_citation = custom_evaluator(
     "has_citation",
     lambda ctx: 1.0 if "[1]" in str(ctx.output) else 0.0,
+    uses_context=True,
 )
 ```
 
