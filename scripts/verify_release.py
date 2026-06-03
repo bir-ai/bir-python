@@ -108,7 +108,7 @@ def metadata(version: str) -> str:
             f"Version: {version}",
             f"Summary: {description}",
             f"Requires-Python: {requires_python}",
-            "License: Apache-2.0",
+            "License: FSL-1.1-ALv2",
             "Description-Content-Type: text/markdown",
         ]
     )
