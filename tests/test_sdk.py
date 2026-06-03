@@ -490,6 +490,20 @@ class SdkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prompt name"):
             prompt("")
 
+    def test_sdk_rejects_empty_event_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "observe name"):
+            observe(name="")
+        with self.assertRaisesRegex(ValueError, "span name"):
+            span("")
+        with self.assertRaisesRegex(ValueError, "generation name"):
+            generation("")
+        with self.assertRaisesRegex(ValueError, "tool_call name"):
+            tool_call("")
+        with self.assertRaisesRegex(ValueError, "retrieval name"):
+            retrieval("", query="hello")
+        with self.assertRaisesRegex(ValueError, "score name"):
+            score("", 1.0)
+
     def test_generation_usage_rejects_non_finite_values(self) -> None:
         with temporary_workdir():
 
@@ -501,6 +515,17 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "input_tokens must be finite"):
                 answer()
 
+    def test_generation_usage_rejects_negative_values(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_usage(input_tokens=-1)
+
+            with self.assertRaisesRegex(ValueError, "input_tokens must be non-negative"):
+                answer()
+
     def test_generation_cost_rejects_non_finite_values(self) -> None:
         with temporary_workdir():
 
@@ -510,6 +535,17 @@ class SdkTests(unittest.TestCase):
                     gen.set_cost(input_cost=float("inf"))
 
             with self.assertRaisesRegex(ValueError, "input_cost must be finite"):
+                answer()
+
+    def test_generation_cost_rejects_negative_values(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_cost(total_cost=-0.01)
+
+            with self.assertRaisesRegex(ValueError, "total_cost must be non-negative"):
                 answer()
 
     def test_generation_cost_rejects_invalid_currency(self) -> None:
@@ -669,6 +705,38 @@ class SdkTests(unittest.TestCase):
             retrieval_event = next(event for event in events if event["name"] == "vector_search")
             self.assertIsNone(retrieval_event["input"])
             self.assertIsNone(retrieval_event["output"])
+
+    def test_retrieval_rejects_invalid_document_numeric_fields(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def negative_rank() -> None:
+                with retrieval("vector_search", query="hello") as result:
+                    result.add_document(id="doc-1", rank=-1)
+
+            @observe()
+            def bool_rank() -> None:
+                with retrieval("vector_search", query="hello") as result:
+                    result.add_document(id="doc-1", rank=True)  # type: ignore[arg-type]
+
+            @observe()
+            def negative_score() -> None:
+                with retrieval("vector_search", query="hello") as result:
+                    result.add_document(id="doc-1", score=-0.1)
+
+            @observe()
+            def set_documents_invalid_score() -> None:
+                with retrieval("vector_search", query="hello") as result:
+                    result.set_documents([{"id": "doc-1", "score": -0.1}])
+
+            with self.assertRaisesRegex(ValueError, "retrieval document rank must be non-negative"):
+                negative_rank()
+            with self.assertRaisesRegex(TypeError, "retrieval document rank must be an int"):
+                bool_rank()
+            with self.assertRaisesRegex(ValueError, "retrieval document score must be non-negative"):
+                negative_score()
+            with self.assertRaisesRegex(ValueError, "retrieval document score must be non-negative"):
+                set_documents_invalid_score()
 
     def test_tool_call_exception_is_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:
@@ -835,6 +903,18 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "usage.input_tokens"):
                 load_events(bool_usage_path)
 
+            negative_usage_path = workdir / "negative-usage.jsonl"
+            event_with_negative_usage = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                usage={"input_tokens": -1},
+            )
+            negative_usage_path.write_text(json.dumps(event_with_negative_usage) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "usage.input_tokens.*non-negative"):
+                load_events(negative_usage_path)
+
             invalid_cost_path = workdir / "invalid-cost.jsonl"
             event_with_invalid_cost = dict(
                 valid_event,
@@ -861,6 +941,18 @@ class SdkTests(unittest.TestCase):
             bool_cost_path.write_text(json.dumps(event_with_bool_cost) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(TypeError, "cost.input_cost"):
                 load_events(bool_cost_path)
+
+            negative_cost_path = workdir / "negative-cost.jsonl"
+            event_with_negative_cost = dict(
+                valid_event,
+                id="generation-1",
+                type="generation",
+                parent_id="trace-1",
+                cost={"input_cost": -0.01},
+            )
+            negative_cost_path.write_text(json.dumps(event_with_negative_cost) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cost.input_cost.*non-negative"):
+                load_events(negative_cost_path)
 
             invalid_currency_path = workdir / "invalid-currency.jsonl"
             event_with_invalid_currency = dict(

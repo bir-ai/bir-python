@@ -100,8 +100,8 @@ configure(capture_inputs=True, capture_outputs=True)
 
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
-values are truncated. `score()`, generation token usage, and generation cost
-require finite numeric values.
+values are truncated. `score()` requires a finite numeric value. Generation token
+usage and generation cost require non-negative finite numeric values.
 
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.
@@ -112,6 +112,8 @@ Use `retrieval()` to record RAG lookups with the existing `tool_call` event
 contract. It sets `metadata.kind` to `retrieval`, stores the query at
 `input.query` when input capture is enabled, and stores retrieved records at
 `output.documents` when output capture is enabled.
+Document `rank` values must be non-negative integers, and document `score`
+values must be non-negative finite numbers.
 
 ```python
 from bir import retrieval

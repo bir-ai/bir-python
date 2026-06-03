@@ -268,6 +268,9 @@ def observe(
 ) -> Callable[[F], F]:
     """Decorate a sync function and record one trace event for each call."""
 
+    if name is not None:
+        _validate_event_name(name, "observe name")
+
     def decorator(func: F) -> F:
         if inspect.iscoroutinefunction(func):
             raise TypeError("bir.observe supports sync functions only")
@@ -350,6 +353,7 @@ def observe(
 def span(name: str) -> _Span:
     """Create a nested span inside the current trace."""
 
+    _validate_event_name(name, "span name")
     return _Span(name)
 
 
@@ -401,6 +405,7 @@ def generation(
 ) -> _Generation:
     """Create a generation event for an LLM call inside the current trace."""
 
+    _validate_event_name(name, "generation name")
     return _Generation(
         name=name,
         model=model,
@@ -422,6 +427,7 @@ def tool_call(
 ) -> _ToolCall:
     """Create a tool call event inside the current trace."""
 
+    _validate_event_name(name, "tool_call name")
     return _ToolCall(
         name=name,
         input=input,
@@ -441,6 +447,7 @@ def retrieval(
 ) -> _Retrieval:
     """Create a retrieval tool call using Bir's documented RAG event shape."""
 
+    _validate_event_name(name, "retrieval name")
     return _Retrieval(
         name=name,
         query=query,
@@ -453,6 +460,7 @@ def retrieval(
 def score(name: str, value: int | float) -> None:
     """Attach a score event to the current trace."""
 
+    _validate_event_name(name, "score name")
     trace_id = _current_trace_id.get()
     parent_id = _current_parent_id.get()
     if trace_id is None or parent_id is None:
@@ -627,11 +635,11 @@ class _Generation:
     ) -> None:
         usage: dict[str, int | float] = {}
         if input_tokens is not None:
-            usage["input_tokens"] = _validate_number(input_tokens, "input_tokens")
+            usage["input_tokens"] = _validate_non_negative_number(input_tokens, "input_tokens")
         if output_tokens is not None:
-            usage["output_tokens"] = _validate_number(output_tokens, "output_tokens")
+            usage["output_tokens"] = _validate_non_negative_number(output_tokens, "output_tokens")
         if total_tokens is not None:
-            usage["total_tokens"] = _validate_number(total_tokens, "total_tokens")
+            usage["total_tokens"] = _validate_non_negative_number(total_tokens, "total_tokens")
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
         self.usage = usage
@@ -646,11 +654,11 @@ class _Generation:
     ) -> None:
         cost: dict[str, int | float] = {}
         if input_cost is not None:
-            cost["input_cost"] = _validate_number(input_cost, "input_cost")
+            cost["input_cost"] = _validate_non_negative_number(input_cost, "input_cost")
         if output_cost is not None:
-            cost["output_cost"] = _validate_number(output_cost, "output_cost")
+            cost["output_cost"] = _validate_non_negative_number(output_cost, "output_cost")
         if total_cost is not None:
-            cost["total_cost"] = _validate_number(total_cost, "total_cost")
+            cost["total_cost"] = _validate_non_negative_number(total_cost, "total_cost")
         if total_cost is None and input_cost is not None and output_cost is not None:
             cost["total_cost"] = cost["input_cost"] + cost["output_cost"]
         validated_currency = _validate_currency(currency)
@@ -772,9 +780,9 @@ class _Retrieval(_ToolCall):
         if id is not None:
             document["id"] = id
         if rank is not None:
-            document["rank"] = rank
+            document["rank"] = _validate_non_negative_int(rank, "retrieval document rank")
         if score is not None:
-            document["score"] = _validate_number(score, "retrieval document score")
+            document["score"] = _validate_non_negative_number(score, "retrieval document score")
         if source is not None:
             document["source"] = source
         if text is not None:
@@ -784,7 +792,7 @@ class _Retrieval(_ToolCall):
         self.output["documents"].append(document)
 
     def set_documents(self, documents: Iterable[Mapping[str, Any]]) -> None:
-        self.output = {"documents": [dict(document) for document in documents]}
+        self.output = {"documents": [_retrieval_document_from_mapping(document) for document in documents]}
 
 
 def _event(
@@ -951,7 +959,7 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
             event_usage = {}
             for key, value in usage.items():
                 usage_key = _expect_string(key, "usage key", trace_path, line_number)
-                event_usage[usage_key] = _validate_number(value, f"usage.{key}")
+                event_usage[usage_key] = _validate_non_negative_number(value, f"usage.{key}")
     event_cost = None
     if "cost" in payload:
         cost = payload["cost"]
@@ -961,7 +969,7 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
             event_cost = {}
             for key, value in cost.items():
                 cost_key = _expect_string(key, "cost key", trace_path, line_number)
-                event_cost[cost_key] = _validate_number(value, f"cost.{key}")
+                event_cost[cost_key] = _validate_non_negative_number(value, f"cost.{cost_key}")
     event_currency = None
     if payload.get("currency") is not None:
         event_currency = _expect_string(payload["currency"], "currency", trace_path, line_number)
@@ -1154,12 +1162,44 @@ def _redact_bearer_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_REDACTED}"
 
 
+def _validate_event_name(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"bir {field} must be a string")
+    if not value:
+        raise ValueError(f"bir {field} must not be empty")
+    return value
+
+
 def _validate_number(value: Any, field: str) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"bir {field} must be an int or float")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"bir {field} must be finite")
     return value
+
+
+def _validate_non_negative_number(value: Any, field: str) -> int | float:
+    numeric_value = _validate_number(value, field)
+    if numeric_value < 0:
+        raise ValueError(f"bir {field} must be non-negative")
+    return numeric_value
+
+
+def _validate_non_negative_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"bir {field} must be an int")
+    if value < 0:
+        raise ValueError(f"bir {field} must be non-negative")
+    return value
+
+
+def _retrieval_document_from_mapping(document: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(document)
+    if "rank" in normalized and normalized["rank"] is not None:
+        normalized["rank"] = _validate_non_negative_int(normalized["rank"], "retrieval document rank")
+    if "score" in normalized and normalized["score"] is not None:
+        normalized["score"] = _validate_non_negative_number(normalized["score"], "retrieval document score")
+    return normalized
 
 
 def _validate_currency(value: Any) -> str:
