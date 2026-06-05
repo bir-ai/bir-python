@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+import urllib.error
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from bir import configure, load_events
 from bir._sdk import _reset_config_for_tests
@@ -28,6 +31,7 @@ from bir.evals import (
     numeric_between,
     regex_match,
     run_experiment,
+    send_experiment,
 )
 
 
@@ -766,6 +770,128 @@ class EvalTests(unittest.TestCase):
             record = json.loads(raw_store)
             self.assertEqual(record["input"], {"token": "[redacted]"})
             self.assertEqual(record["status"], "error")
+
+    def test_send_experiment_posts_summary_and_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset([DatasetExample(id="q1", input={"api_key": "sk-secret"}, expected="HELLO")])
+
+            def answer(api_key: str) -> str:
+                return f"HELLO {api_key}"
+
+            result = run_experiment(
+                "uppercase",
+                dataset=dataset,
+                task=answer,
+                evaluators=[contains("HELLO")],
+                path=experiment_path,
+            )
+
+            with patch("urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')) as urlopen:
+                send_result = send_experiment(experiment_path, "http://127.0.0.1:8000/")
+
+            self.assertEqual(send_result.accepted, 1)
+            self.assertEqual(send_result.experiment_id, "experiment-1")
+            request = urlopen.call_args.args[0]
+            self.assertEqual(request_url(request), "http://127.0.0.1:8000/v1/experiments")
+            payload = posted_request_body(request)
+            self.assertEqual(payload["summary"]["experiment_id"], result.id)
+            self.assertEqual(payload["results"][0]["example_id"], "q1")
+            self.assertNotIn("sk-secret", json.dumps(payload))
+
+    def test_send_experiment_parses_duplicate_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+
+            def answer(question: str) -> str:
+                return question
+
+            run_experiment(
+                "duplicate",
+                dataset=Dataset([DatasetExample(id="q1", input={"question": "hello"})]),
+                task=answer,
+                evaluators=[json_valid()],
+                path=experiment_path,
+            )
+
+            with patch("urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":0,"id":"experiment-1"}')):
+                send_result = send_experiment(experiment_path)
+
+            self.assertEqual(send_result.accepted, 0)
+            self.assertEqual(send_result.experiment_id, "experiment-1")
+
+    def test_send_experiment_rejects_missing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing_path = Path(directory) / "missing.jsonl"
+            with self.assertRaisesRegex(ValueError, "result file"):
+                send_experiment(missing_path)
+
+            experiment_path = Path(directory) / "experiment.jsonl"
+            experiment_path.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "summary file"):
+                send_experiment(experiment_path)
+
+    def test_send_experiment_surfaces_http_and_network_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+
+            def answer(question: str) -> str:
+                return question
+
+            run_experiment(
+                "errors",
+                dataset=Dataset([DatasetExample(id="q1", input={"question": "hello"})]),
+                task=answer,
+                evaluators=[contains("hello")],
+                path=experiment_path,
+            )
+
+            http_error = urllib.error.HTTPError(
+                "http://127.0.0.1:8000/v1/experiments",
+                500,
+                "Server Error",
+                {},
+                BytesIO(b'{"detail":"failed"}'),
+            )
+            with patch("urllib.request.urlopen", side_effect=http_error):
+                with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
+                    send_experiment(experiment_path)
+
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+                with self.assertRaisesRegex(RuntimeError, "could not send experiment"):
+                    send_experiment(experiment_path)
+
+class FakeHttpResponse:
+    status = 201
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> FakeHttpResponse:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def posted_request_body(request: object) -> dict[str, object]:
+    data = getattr(request, "data")
+    if not isinstance(data, bytes):
+        raise TypeError("expected request data to be bytes")
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("expected request body to be a JSON object")
+    return payload
+
+
+def request_url(request: object) -> str:
+    url = getattr(request, "full_url")
+    if not isinstance(url, str):
+        raise TypeError("expected request to have a full_url")
+    return url
 
 
 if __name__ == "__main__":

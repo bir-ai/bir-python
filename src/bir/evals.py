@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -24,6 +26,7 @@ __all__ = [
     "ExperimentExampleResult",
     "ExperimentResult",
     "ExperimentSummary",
+    "SendExperimentResult",
     "contains",
     "cost_under",
     "custom_evaluator",
@@ -38,6 +41,7 @@ __all__ = [
     "numeric_between",
     "regex_match",
     "run_experiment",
+    "send_experiment",
 ]
 
 
@@ -305,6 +309,12 @@ class ExperimentSummary:
             "aggregate_scores": self.aggregate_scores,
             "result_path": self.result_path,
         }
+
+
+@dataclass(frozen=True)
+class SendExperimentResult:
+    accepted: int
+    experiment_id: str
 
 
 @dataclass(frozen=True)
@@ -700,6 +710,27 @@ def list_experiments(directory: str | Path = Path(".bir") / "experiments") -> li
     return sorted(summaries, key=lambda summary: (summary.start_time, summary.experiment_id), reverse=True)
 
 
+def send_experiment(
+    path: str | Path,
+    server_url: str = "http://127.0.0.1:8000",
+    *,
+    timeout: float = 10.0,
+) -> SendExperimentResult:
+    experiment_path = Path(path)
+    if not experiment_path.exists():
+        raise ValueError(f"Experiment result file {experiment_path} does not exist")
+    summary_path = _summary_path(experiment_path)
+    if not summary_path.exists():
+        raise ValueError(f"Experiment summary file {summary_path} does not exist")
+    experiment = load_experiment(experiment_path)
+    summary = load_experiment_summary(summary_path)
+    payload = {
+        "summary": summary.to_dict(),
+        "results": [result.to_dict() for result in experiment.results],
+    }
+    return _post_experiment(_experiments_endpoint(server_url), payload, timeout=timeout)
+
+
 def _run_example(
     example: DatasetExample,
     task: Callable[..., Any],
@@ -958,6 +989,52 @@ def _required_summary_int(payload: Mapping[Any, Any], field_name: str, path: Pat
 def _default_experiment_path(name: str, experiment_id: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip("-") or "experiment"
     return Path(".bir") / "experiments" / f"{safe_name}-{experiment_id}.jsonl"
+
+
+def _experiments_endpoint(server_url: str) -> str:
+    normalized_url = server_url.rstrip("/")
+    if not normalized_url:
+        raise ValueError("bir experiment server_url must not be empty")
+    return f"{normalized_url}/v1/experiments"
+
+
+def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: float) -> SendExperimentResult:
+    payload = json.dumps(experiment, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"bir server rejected experiment with HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"bir could not send experiment to {endpoint}: {exc.reason}") from exc
+
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"bir server rejected experiment with HTTP {status}: {body}")
+    return _send_experiment_result_from_response(body)
+
+
+def _send_experiment_result_from_response(body: str) -> SendExperimentResult:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("bir server returned invalid experiment response JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("bir server returned invalid experiment response")
+    accepted = payload.get("accepted")
+    experiment_id = payload.get("id")
+    if isinstance(accepted, bool) or not isinstance(accepted, int):
+        raise RuntimeError("bir server experiment response field 'accepted' must be an integer")
+    if not isinstance(experiment_id, str) or not experiment_id:
+        raise RuntimeError("bir server experiment response field 'id' must be a non-empty string")
+    return SendExperimentResult(accepted=accepted, experiment_id=experiment_id)
 
 
 def _expected_value(configured_expected: Any, example_expected: Any, evaluator_name: str) -> Any:
