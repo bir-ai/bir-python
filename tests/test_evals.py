@@ -5,8 +5,10 @@ import math
 import tempfile
 import urllib.error
 import unittest
+from http.client import HTTPMessage
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from bir import configure, load_events
@@ -850,7 +852,7 @@ class EvalTests(unittest.TestCase):
                 "http://127.0.0.1:8000/v1/experiments",
                 500,
                 "Server Error",
-                {},
+                HTTPMessage(),
                 BytesIO(b'{"detail":"failed"}'),
             )
             with patch("urllib.request.urlopen", side_effect=http_error):
@@ -877,7 +879,7 @@ class FakeHttpResponse:
         return self.body
 
 
-def posted_request_body(request: object) -> dict[str, object]:
+def posted_request_body(request: object) -> dict[str, Any]:
     data = getattr(request, "data")
     if not isinstance(data, bytes):
         raise TypeError("expected request data to be bytes")

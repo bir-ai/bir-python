@@ -214,7 +214,7 @@ Datasets can be stored as JSONL:
 Load and run them locally:
 
 ```python
-from bir.evals import Dataset, contains, list_experiments, load_experiment, run_experiment
+from bir.evals import Dataset, contains, list_experiments, load_experiment, run_experiment, send_experiment
 
 dataset = Dataset.from_jsonl("questions.jsonl")
 result = run_experiment("prompt-v1", dataset=dataset, task=answer_question, evaluators=[contains()])
@@ -230,6 +230,29 @@ Available deterministic evaluators are `exact_match()`, `contains()`,
 `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`,
 `latency_under()`, `cost_under()`, `numeric_between()`, and
 `custom_evaluator()`.
+
+Upload a completed experiment to a running Bir server so the dashboard can show
+the experiment list and per-example result detail:
+
+```python
+send_experiment(result.path, "http://127.0.0.1:8000")
+```
+
+To connect local experiment rows back to traces, opt in when running the
+experiment:
+
+```python
+result = run_experiment(
+    "prompt-v1",
+    dataset=dataset,
+    task=answer_question,
+    evaluators=[contains()],
+    record_traces=True,
+)
+```
+
+`record_traces=True` writes one trace per dataset example and records evaluator
+outputs as score events on that trace.
 
 Use threshold evaluators for local gates:
 
