@@ -4,13 +4,13 @@ import json
 import math
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
-from ._sdk import _safe_capture, _safe_error
+from ._sdk import _record_score_event, _record_trace_event, _safe_capture, _safe_error
 
 _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
@@ -193,6 +193,7 @@ class ExperimentExampleResult:
     end_time: str
     status: str
     error: str | None
+    trace_id: str | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -201,7 +202,7 @@ class ExperimentExampleResult:
         return (end - start).total_seconds() * 1000
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "example_id": self.example_id,
             "input": self.input,
@@ -214,6 +215,9 @@ class ExperimentExampleResult:
             "status": self.status,
             "error": self.error,
         }
+        if self.trace_id is not None:
+            payload["trace_id"] = self.trace_id
+        return payload
 
 
 @dataclass(frozen=True)
@@ -551,6 +555,7 @@ def run_experiment(
     evaluators: Iterable[DeterministicEvaluator],
     path: str | Path | None = None,
     raise_on_error: bool = True,
+    record_traces: bool = False,
 ) -> ExperimentResult:
     if not name:
         raise ValueError("experiment name must not be empty")
@@ -569,6 +574,12 @@ def run_experiment(
                 result = _run_example(example, task, evaluator_list)
             except Exception as exc:
                 result = _error_example_result(example, exc)
+                if record_traces:
+                    result = _record_experiment_trace(
+                        experiment_id=experiment_id,
+                        experiment_name=name,
+                        result=result,
+                    )
                 results.append(result)
                 _write_experiment_result(experiment_file, experiment_id, name, result)
                 if raise_on_error:
@@ -584,6 +595,12 @@ def run_experiment(
                     _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
                     raise
                 continue
+            if record_traces:
+                result = _record_experiment_trace(
+                    experiment_id=experiment_id,
+                    experiment_name=name,
+                    result=result,
+                )
             results.append(result)
             _write_experiment_result(experiment_file, experiment_id, name, result)
 
@@ -729,6 +746,37 @@ def _error_example_result(example: DatasetExample, exc: Exception) -> Experiment
     )
 
 
+def _record_experiment_trace(
+    *,
+    experiment_id: str,
+    experiment_name: str,
+    result: ExperimentExampleResult,
+) -> ExperimentExampleResult:
+    trace_id = _record_trace_event(
+        name=f"experiment.{experiment_name}.{result.example_id}",
+        start_time=result.start_time,
+        end_time=result.end_time,
+        status=result.status,
+        error=result.error,
+        metadata={
+            "kind": "experiment",
+            "experiment_id": experiment_id,
+            "experiment_name": experiment_name,
+            "example_id": result.example_id,
+        },
+    )
+    for score in result.scores:
+        _record_score_event(
+            trace_id=trace_id,
+            parent_id=trace_id,
+            name=score.name,
+            value=score.value,
+            metadata=score.metadata,
+            timestamp=result.end_time,
+        )
+    return replace(result, trace_id=trace_id)
+
+
 def _call_task(task: Callable[..., Any], input_value: Any) -> Any:
     if isinstance(input_value, Mapping):
         return task(**input_value)
@@ -829,6 +877,9 @@ def _experiment_example_result_from_payload(
     error = payload.get("error")
     if error is not None and not isinstance(error, str):
         raise ValueError(f"Experiment {experiment_path} line {line_number} field 'error' must be a string or null")
+    trace_id = payload.get("trace_id")
+    if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):
+        raise ValueError(f"Experiment {experiment_path} line {line_number} field 'trace_id' must be a non-empty string or null")
     for field_name in ("input", "expected", "output"):
         if field_name not in payload:
             raise ValueError(f"Experiment {experiment_path} line {line_number} is missing required field '{field_name}'")
@@ -843,6 +894,7 @@ def _experiment_example_result_from_payload(
         end_time=_required_string(payload, "end_time", experiment_path, line_number),
         status=status,
         error=_safe_error(RuntimeError(error)) if error is not None else None,
+        trace_id=trace_id,
     )
 
 

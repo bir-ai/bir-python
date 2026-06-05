@@ -484,6 +484,63 @@ def score(name: str, value: int | float) -> None:
     )
 
 
+def _record_trace_event(
+    *,
+    name: str,
+    start_time: str,
+    end_time: str,
+    status: str,
+    metadata: Mapping[str, Any] | None = None,
+    error: str | None = None,
+) -> str:
+    _validate_event_name(name, "trace name")
+    trace_id = _new_id()
+    _write_event(
+        _event(
+            event_id=trace_id,
+            trace_id=trace_id,
+            parent_id=None,
+            name=name,
+            event_type="trace",
+            start_time=start_time,
+            end_time=end_time,
+            status=status,
+            error=_redact_secret_text(error) if error is not None else None,
+            metadata=_safe_capture(dict(metadata or {})),
+        )
+    )
+    return trace_id
+
+
+def _record_score_event(
+    *,
+    trace_id: str,
+    parent_id: str,
+    name: str,
+    value: int | float,
+    metadata: Mapping[str, Any] | None = None,
+    timestamp: str | None = None,
+) -> None:
+    _validate_event_name(name, "score name")
+    score_value = _validate_number(value, "score value")
+    score_time = timestamp or _now()
+    _write_event(
+        _event(
+            event_id=_new_id(),
+            trace_id=trace_id,
+            parent_id=parent_id,
+            name=name,
+            event_type="score",
+            start_time=score_time,
+            end_time=score_time,
+            status="success",
+            error=None,
+            metadata=_safe_capture(dict(metadata or {})),
+            value=score_value,
+        )
+    )
+
+
 class _Span:
     def __init__(self, name: str) -> None:
         self.name = name

@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bir import configure, load_events
+from bir._sdk import _reset_config_for_tests
 from bir.evals import (
     Dataset,
     DatasetExample,
@@ -30,6 +32,9 @@ from bir.evals import (
 
 
 class EvalTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
     def test_deterministic_evaluators_return_numeric_scores(self) -> None:
         self.assertEqual(exact_match("Paris").evaluate("Paris").value, 1.0)
         self.assertEqual(exact_match("Paris").evaluate("Lyon").value, 0.0)
@@ -347,6 +352,8 @@ class EvalTests(unittest.TestCase):
     def test_run_experiment_writes_jsonl_results(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "experiment.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
             dataset = Dataset(
                 [
                     DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO"),
@@ -373,8 +380,115 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(len(records), 2)
             self.assertEqual(records[0]["experiment_name"], "uppercase")
             self.assertEqual(records[0]["example_id"], "q1")
+            self.assertNotIn("trace_id", records[0])
             self.assertEqual(records[0]["scores"][0]["name"], "exact_match")
             self.assertEqual(records[0]["scores"][0]["value"], 1.0)
+            self.assertFalse(trace_path.exists())
+
+    def test_run_experiment_record_traces_writes_linked_trace_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
+            dataset = Dataset([DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO")])
+
+            def answer(question: str) -> str:
+                return question.upper()
+
+            result = run_experiment(
+                "uppercase",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match(), contains("H", case_sensitive=True)],
+                path=experiment_path,
+                record_traces=True,
+            )
+
+            trace_id = result.results[0].trace_id
+            self.assertIsNotNone(trace_id)
+            records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(records[0]["trace_id"], trace_id)
+
+            events = load_events(trace_path)
+            trace_event = next(event for event in events if event.type == "trace")
+            score_events = [event for event in events if event.type == "score"]
+            self.assertEqual(trace_event.id, trace_id)
+            self.assertEqual(trace_event.name, "experiment.uppercase.q1")
+            self.assertEqual(trace_event.metadata["kind"], "experiment")
+            self.assertEqual(trace_event.metadata["experiment_id"], result.id)
+            self.assertEqual(trace_event.metadata["experiment_name"], "uppercase")
+            self.assertEqual(trace_event.metadata["example_id"], "q1")
+            self.assertIsNone(trace_event.input)
+            self.assertIsNone(trace_event.output)
+            self.assertEqual({event.name for event in score_events}, {"exact_match", "contains"})
+            for score_event in score_events:
+                self.assertEqual(score_event.trace_id, trace_id)
+                self.assertEqual(score_event.parent_id, trace_id)
+
+    def test_run_experiment_record_traces_redacts_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
+            dataset = Dataset([DatasetExample(id="q1", input={"api_key": "sk-secret"}, expected="ok")])
+
+            def answer(api_key: str) -> dict[str, str]:
+                return {"answer": "ok", "api_key": api_key}
+
+            result = run_experiment(
+                "secrets",
+                dataset=dataset,
+                task=answer,
+                evaluators=[
+                    custom_evaluator(
+                        "secret_metadata",
+                        lambda output, expected: EvalResult(
+                            name="secret_metadata",
+                            value=1.0,
+                            metadata={"api_key": "sk-secret"},
+                        ),
+                    )
+                ],
+                path=experiment_path,
+                record_traces=True,
+            )
+
+            self.assertEqual(result.results[0].input, {"api_key": "[redacted]"})
+            self.assertEqual(result.results[0].output, {"answer": "ok", "api_key": "[redacted]"})
+            self.assertNotIn("sk-secret", experiment_path.read_text(encoding="utf-8"))
+            self.assertNotIn("sk-secret", trace_path.read_text(encoding="utf-8"))
+            score_event = next(event for event in load_events(trace_path) if event.type == "score")
+            self.assertEqual(score_event.metadata["api_key"], "[redacted]")
+
+    def test_load_experiment_supports_rows_without_trace_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "legacy.jsonl"
+            experiment_path.write_text(
+                json.dumps(
+                    {
+                        "experiment_id": "experiment-1",
+                        "experiment_name": "legacy",
+                        "id": "result-1",
+                        "example_id": "q1",
+                        "input": {"question": "hello"},
+                        "expected": "HELLO",
+                        "output": "HELLO",
+                        "scores": [{"name": "exact_match", "value": 1.0, "metadata": {}}],
+                        "start_time": "2026-01-01T00:00:00+00:00",
+                        "end_time": "2026-01-01T00:00:01+00:00",
+                        "duration_ms": 1000.0,
+                        "status": "success",
+                        "error": None,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            loaded = load_experiment(experiment_path)
+
+            self.assertIsNone(loaded.results[0].trace_id)
 
     def test_run_experiment_supports_threshold_evaluators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
