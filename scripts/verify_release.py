@@ -1,3 +1,5 @@
+"""Run local packaging quality checks for the Bir Python SDK."""
+
 from __future__ import annotations
 
 import os
@@ -19,6 +21,8 @@ REPO_ROOT = PACKAGE_ROOT.parents[1]
 
 
 def main() -> int:
+    """Run the full SDK verification workflow."""
+
     version = package_version()
     with tempfile.TemporaryDirectory(prefix="bir-sdk-release-") as temp_dir_text:
         temp_dir = Path(temp_dir_text)
@@ -40,6 +44,8 @@ def main() -> int:
 
 
 def run_sdk_tests() -> None:
+    """Run the SDK unit test suite with src on PYTHONPATH."""
+
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     run(
@@ -51,6 +57,8 @@ def run_sdk_tests() -> None:
 
 
 def run_pyright() -> None:
+    """Run pyright from the repo virtual environment or PATH."""
+
     pyright = REPO_ROOT / ".venv" / "bin" / "pyright"
     if not pyright.exists():
         resolved = shutil.which("pyright")
@@ -61,6 +69,8 @@ def run_pyright() -> None:
 
 
 def build_wheel(wheelhouse: Path, version: str) -> Path:
+    """Build a minimal pure-Python wheel into the given wheelhouse."""
+
     print("==> wheel build", flush=True)
     wheel = wheelhouse / f"bir-{version}-py3-none-any.whl"
     dist_info = f"bir-{version}.dist-info"
@@ -97,6 +107,8 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
 
 
 def metadata(version: str) -> str:
+    """Render wheel metadata from pyproject.toml and the package README."""
+
     pyproject = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     readme = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
     description = required_string(pyproject, "description")
@@ -116,6 +128,8 @@ def metadata(version: str) -> str:
 
 
 def inspect_wheel(wheel: Path) -> None:
+    """Validate that the wheel contains expected files and excludes local artifacts."""
+
     forbidden_parts = {
         ".bir",
         ".env",
@@ -143,6 +157,8 @@ def inspect_wheel(wheel: Path) -> None:
 
 
 def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> None:
+    """Install the wheel into a fresh venv and run a basic SDK smoke test."""
+
     venv.EnvBuilder(with_pip=True).create(smoke_env)
     smoke_python = smoke_env / "bin" / "python"
     install_env = os.environ.copy()
@@ -226,11 +242,15 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
 
 
 def package_version() -> str:
+    """Read the SDK package version from pyproject.toml."""
+
     pyproject = PACKAGE_ROOT / "pyproject.toml"
     return required_string(pyproject.read_text(encoding="utf-8"), "version")
 
 
 def required_string(text: str, key: str) -> str:
+    """Extract a required quoted string from TOML-like text."""
+
     match = re.search(rf'^{re.escape(key)}\s*=\s*"([^"]+)"', text, re.MULTILINE)
     if match is None:
         raise RuntimeError(f"could not find {key} in pyproject.toml")
@@ -244,6 +264,8 @@ def run(
     label: str,
     env: dict[str, str] | None = None,
 ) -> None:
+    """Run a labeled subprocess command and fail on non-zero exit."""
+
     print(f"==> {label}", flush=True)
     subprocess.run(command, cwd=cwd, env=env, check=True)
 

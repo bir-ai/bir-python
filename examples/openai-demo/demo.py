@@ -1,3 +1,5 @@
+"""OpenAI-style local tracing demo for the Bir SDK."""
+
 from __future__ import annotations
 
 import argparse
@@ -24,6 +26,8 @@ DOCUMENTS = [
 
 
 def retrieve_context(question: str) -> list[dict[str, str]]:
+    """Return matching local documents while recording a retrieval event."""
+
     with retrieval(
         "search_docs",
         query=question,
@@ -42,6 +46,8 @@ def retrieve_context(question: str) -> list[dict[str, str]]:
 
 
 def draft_answer(question: str, documents: list[dict[str, str]]) -> str:
+    """Draft a simulated LLM answer while recording a generation event."""
+
     context = " ".join(document["text"] for document in documents)
     messages = [
         {"role": "system", "content": "Answer using the provided context."},
@@ -66,6 +72,8 @@ def draft_answer(question: str, documents: list[dict[str, str]]) -> str:
 
 @observe(name="answer_question", capture_inputs=True, capture_outputs=True)
 def answer_question(question: str) -> str:
+    """Answer a question with retrieval, generation, spans, and an eval score."""
+
     with span("retrieve_context"):
         documents = retrieve_context(question)
 
@@ -77,6 +85,8 @@ def answer_question(question: str) -> str:
 
 
 def main() -> None:
+    """Run the demo from the command line."""
+
     parser = argparse.ArgumentParser(description="Record a local Bir trace for an OpenAI-style LLM workflow.")
     parser.add_argument(
         "--question",

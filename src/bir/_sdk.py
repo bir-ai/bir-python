@@ -1,3 +1,5 @@
+"""Core tracing primitives and local JSONL persistence for the Bir SDK."""
+
 from __future__ import annotations
 
 import functools
@@ -65,6 +67,8 @@ class _Config:
 
 @dataclass(frozen=True)
 class TraceEvent:
+    """A single trace, span, generation, tool call, or score loaded from storage."""
+
     id: str
     trace_id: str
     parent_id: str | None
@@ -86,11 +90,15 @@ class TraceEvent:
 
     @property
     def duration_ms(self) -> float:
+        """Return the event duration in milliseconds."""
+
         return _duration_ms(self.start_time, self.end_time)
 
 
 @dataclass(frozen=True)
 class LoadedTrace:
+    """A trace root event with all events that share its trace ID."""
+
     id: str
     name: str
     start_time: str
@@ -101,17 +109,23 @@ class LoadedTrace:
 
     @property
     def duration_ms(self) -> float:
+        """Return the root trace duration in milliseconds."""
+
         return self.root.duration_ms
 
 
 @dataclass(frozen=True)
 class SendEventsResult:
+    """Result returned after sending local events to a Bir server."""
+
     accepted: int
     event_ids: list[str]
 
 
 @dataclass(frozen=True)
 class PromptRecord:
+    """Prompt metadata attached to a generation event."""
+
     name: str
     version: str | None
     template: str | None
@@ -123,6 +137,8 @@ class PromptRecord:
     capture_rendered: bool
 
     def to_metadata(self) -> dict[str, Any]:
+        """Return the redacted metadata representation stored on a generation event."""
+
         payload: dict[str, Any] = {"name": self.name}
         if self.version is not None:
             payload["version"] = self.version
@@ -139,6 +155,8 @@ class PromptRecord:
         return payload
 
     def render(self) -> str | None:
+        """Render the prompt template with variables when no explicit rendered value exists."""
+
         if self.rendered is not None:
             return self.rendered
         if self.template is None:

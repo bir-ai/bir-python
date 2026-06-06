@@ -1,3 +1,5 @@
+"""Deterministic evaluation, dataset, and experiment helpers for Bir."""
+
 from __future__ import annotations
 
 import json
@@ -47,6 +49,8 @@ __all__ = [
 
 @dataclass(frozen=True)
 class EvalResult:
+    """A numeric evaluator score with optional JSON-safe metadata."""
+
     name: str
     value: float
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -64,6 +68,8 @@ class EvalResult:
         object.__setattr__(self, "metadata", _safe_mapping(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the score."""
+
         return {
             "name": self.name,
             "value": self.value,
@@ -73,6 +79,8 @@ class EvalResult:
 
 @dataclass(frozen=True)
 class DeterministicEvaluator:
+    """Callable evaluator wrapper used by experiment runs."""
+
     name: str
     _evaluate: Callable[..., EvalResult]
     _uses_context: bool = False
@@ -89,6 +97,8 @@ class DeterministicEvaluator:
         expected: Any = None,
         context: EvaluationContext | None = None,
     ) -> EvalResult:
+        """Evaluate a task output and return an EvalResult."""
+
         if self._uses_context:
             if context is None:
                 raise ValueError(f"{self.name} requires an evaluation context")
@@ -98,6 +108,8 @@ class DeterministicEvaluator:
 
 @dataclass(frozen=True)
 class EvaluationContext:
+    """Runtime context passed to evaluators that need experiment metadata."""
+
     example: DatasetExample | None
     output: Any
     duration_ms: float
@@ -112,6 +124,8 @@ class EvaluationContext:
 
 @dataclass(frozen=True)
 class DatasetExample:
+    """One input, expected output, and metadata row in an evaluation dataset."""
+
     id: str
     input: Any
     expected: Any = None
@@ -125,6 +139,8 @@ class DatasetExample:
         object.__setattr__(self, "metadata", {str(key): value for key, value in self.metadata.items()})
 
     def to_dict(self, *, redact: bool = True) -> dict[str, Any]:
+        """Return a JSON-serializable dataset row, redacted by default."""
+
         input_value = _safe_capture(self.input) if redact else self.input
         expected_value = _safe_capture(self.expected) if redact else self.expected
         metadata = _safe_mapping(self.metadata) if redact else dict(self.metadata)
@@ -138,6 +154,8 @@ class DatasetExample:
 
 @dataclass(frozen=True)
 class Dataset:
+    """A collection of uniquely identified examples for experiment runs."""
+
     examples: list[DatasetExample]
 
     def __post_init__(self) -> None:
@@ -153,6 +171,8 @@ class Dataset:
 
     @classmethod
     def from_jsonl(cls, path: str | Path) -> Dataset:
+        """Load dataset examples from a JSONL file."""
+
         dataset_path = Path(path)
         examples: list[DatasetExample] = []
 
@@ -172,6 +192,8 @@ class Dataset:
         return cls(examples)
 
     def to_jsonl(self, path: str | Path) -> None:
+        """Write dataset examples to a JSONL file."""
+
         dataset_path = Path(path)
         dataset_path.parent.mkdir(parents=True, exist_ok=True)
         with dataset_path.open("w", encoding="utf-8") as dataset_file:
@@ -179,14 +201,20 @@ class Dataset:
                 dataset_file.write(_json_line(example.to_dict()))
 
     def __iter__(self) -> Iterator[DatasetExample]:
+        """Iterate over dataset examples."""
+
         return iter(self.examples)
 
     def __len__(self) -> int:
+        """Return the number of examples in the dataset."""
+
         return len(self.examples)
 
 
 @dataclass(frozen=True)
 class ExperimentExampleResult:
+    """The task output and evaluator scores for one dataset example."""
+
     id: str
     example_id: str
     input: Any
@@ -201,11 +229,15 @@ class ExperimentExampleResult:
 
     @property
     def duration_ms(self) -> float:
+        """Return the example runtime in milliseconds."""
+
         start = datetime.fromisoformat(self.start_time)
         end = datetime.fromisoformat(self.end_time)
         return (end - start).total_seconds() * 1000
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable experiment result row."""
+
         payload = {
             "id": self.id,
             "example_id": self.example_id,
@@ -226,6 +258,8 @@ class ExperimentExampleResult:
 
 @dataclass(frozen=True)
 class ExperimentResult:
+    """All example results and aggregate scores for one experiment run."""
+
     id: str
     name: str
     start_time: str
@@ -236,6 +270,8 @@ class ExperimentResult:
 
     @property
     def aggregate_scores(self) -> dict[str, float]:
+        """Return the mean score for each evaluator name."""
+
         totals: dict[str, float] = {}
         counts: dict[str, int] = {}
         for result in self.results:
@@ -245,6 +281,8 @@ class ExperimentResult:
         return {name: totals[name] / counts[name] for name in sorted(totals)}
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable experiment payload."""
+
         return {
             "id": self.id,
             "name": self.name,
@@ -259,6 +297,8 @@ class ExperimentResult:
 
 @dataclass(frozen=True)
 class ExperimentSummary:
+    """Compact metadata persisted next to an experiment result file."""
+
     schema_version: str
     experiment_id: str
     name: str
@@ -297,6 +337,8 @@ class ExperimentSummary:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable experiment summary."""
+
         return {
             "schema_version": self.schema_version,
             "experiment_id": self.experiment_id,
@@ -313,6 +355,8 @@ class ExperimentSummary:
 
 @dataclass(frozen=True)
 class SendExperimentResult:
+    """Result returned after sending an experiment to a Bir server."""
+
     accepted: int
     experiment_id: str
 
@@ -325,6 +369,8 @@ class _ResolvedField:
 
 
 def exact_match(expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "exact_match") -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when output equals the expected value."""
+
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
         target = _expected_value(expected, example_expected, name)
         return EvalResult(
@@ -342,6 +388,8 @@ def contains(
     case_sensitive: bool = True,
     name: str = "contains",
 ) -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when output text contains a string."""
+
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
         target = _expected_value(expected, example_expected, name)
         if not isinstance(target, str):
@@ -355,6 +403,8 @@ def contains(
 
 
 def regex_match(pattern: str, *, flags: int = 0, name: str = "regex_match") -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when output text matches a regex."""
+
     compiled = re.compile(pattern, flags)
 
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
@@ -370,6 +420,8 @@ def regex_match(pattern: str, *, flags: int = 0, name: str = "regex_match") -> D
 
 
 def json_valid(*, name: str = "json_valid") -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 for JSON-compatible output."""
+
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
         del example_expected
         try:
@@ -390,6 +442,8 @@ def custom_evaluator(
     *,
     uses_context: bool = False,
 ) -> DeterministicEvaluator:
+    """Wrap a user-provided callable as a deterministic evaluator."""
+
     _validate_evaluator_name(name)
     if not callable(evaluate):
         raise TypeError("custom evaluator function must be callable")
@@ -408,6 +462,8 @@ def custom_evaluator(
 
 
 def field_equals(path: str, expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "field_equals") -> DeterministicEvaluator:
+    """Create an evaluator that compares a nested output field to an expected value."""
+
     field_path = _parse_field_path(path)
 
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
@@ -433,6 +489,8 @@ def field_contains(
     case_sensitive: bool = True,
     name: str = "field_contains",
 ) -> DeterministicEvaluator:
+    """Create an evaluator that checks whether a nested string field contains text."""
+
     field_path = _parse_field_path(path)
 
     def evaluate(output: Any, example_expected: Any) -> EvalResult:
@@ -460,6 +518,8 @@ def field_contains(
 
 
 def latency_under(max_ms: float, *, name: str = "latency_under") -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when task latency is under a threshold."""
+
     max_duration = _validate_non_negative_number(max_ms, "max_ms")
 
     def evaluate(context: EvaluationContext) -> EvalResult:
@@ -481,6 +541,8 @@ def cost_under(
     field: str = "total_cost",
     name: str = "cost_under",
 ) -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when a reported cost is under a threshold."""
+
     max_cost_value = _validate_non_negative_number(max_cost, "max_cost")
     if not field:
         raise ValueError("cost field must not be empty")
@@ -516,6 +578,8 @@ def numeric_between(
     field: str | None = None,
     name: str = "numeric_between",
 ) -> DeterministicEvaluator:
+    """Create an evaluator that checks a numeric output or field against bounds."""
+
     lower_bound = None if min_value is None else _validate_finite_number(min_value, "min_value")
     upper_bound = None if max_value is None else _validate_finite_number(max_value, "max_value")
     if lower_bound is None and upper_bound is None:
@@ -567,6 +631,8 @@ def run_experiment(
     raise_on_error: bool = True,
     record_traces: bool = False,
 ) -> ExperimentResult:
+    """Run a task over a dataset and persist per-example evaluator results."""
+
     if not name:
         raise ValueError("experiment name must not be empty")
 
@@ -644,6 +710,8 @@ def run_experiment(
 
 
 def load_experiment(path: str | Path) -> ExperimentResult:
+    """Load an experiment result JSONL file."""
+
     experiment_path = Path(path)
     results: list[ExperimentExampleResult] = []
     experiment_id: str | None = None
@@ -704,6 +772,8 @@ def load_experiment(path: str | Path) -> ExperimentResult:
 
 
 def load_experiment_summary(path: str | Path) -> ExperimentSummary:
+    """Load an experiment summary JSON file."""
+
     summary_path = Path(path)
     try:
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -715,6 +785,8 @@ def load_experiment_summary(path: str | Path) -> ExperimentSummary:
 
 
 def list_experiments(directory: str | Path = Path(".bir") / "experiments") -> list[ExperimentSummary]:
+    """List experiment summaries in newest-first order."""
+
     experiment_directory = Path(directory)
     if not experiment_directory.exists():
         return []
@@ -732,6 +804,8 @@ def send_experiment(
     *,
     timeout: float = 10.0,
 ) -> SendExperimentResult:
+    """Send a persisted experiment and its summary to a Bir server."""
+
     experiment_path = Path(path)
     if not experiment_path.exists():
         raise ValueError(f"Experiment result file {experiment_path} does not exist")
