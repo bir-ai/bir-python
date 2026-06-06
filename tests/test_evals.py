@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from bir import configure, load_events
+from bir import configure, generation, load_events, load_traces, retrieval, span
 from bir._sdk import _reset_config_for_tests
 from bir.evals import (
     Dataset,
@@ -395,11 +395,18 @@ class EvalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "experiment.jsonl"
             trace_path = Path(directory) / "traces.jsonl"
-            configure(trace_path=trace_path)
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
             dataset = Dataset([DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO")])
 
             def answer(question: str) -> str:
-                return question.upper()
+                with span("retrieve_context"):
+                    with retrieval("search_docs", query=question) as result:
+                        result.add_document(id="doc-1", text="local context")
+                with generation("local.llm", model="demo", input={"question": question}) as gen:
+                    output = question.upper()
+                    gen.set_output(output)
+                    gen.set_usage(input_tokens=1, output_tokens=1)
+                    return output
 
             result = run_experiment(
                 "uppercase",
@@ -415,8 +422,9 @@ class EvalTests(unittest.TestCase):
             records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(records[0]["trace_id"], trace_id)
 
-            events = load_events(trace_path)
-            trace_event = next(event for event in events if event.type == "trace")
+            trace = load_traces(trace_path)[0]
+            events = trace.events
+            trace_event = trace.root
             score_events = [event for event in events if event.type == "score"]
             self.assertEqual(trace_event.id, trace_id)
             self.assertEqual(trace_event.name, "experiment.uppercase.q1")
@@ -426,10 +434,67 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(trace_event.metadata["example_id"], "q1")
             self.assertIsNone(trace_event.input)
             self.assertIsNone(trace_event.output)
+            self.assertEqual(
+                [(event.type, event.name) for event in events[:4]],
+                [
+                    ("trace", "experiment.uppercase.q1"),
+                    ("span", "retrieve_context"),
+                    ("tool_call", "search_docs"),
+                    ("generation", "local.llm"),
+                ],
+            )
+            self.assertEqual([event.type for event in events[4:]], ["score", "score"])
+            self.assertEqual({event.name for event in events[4:]}, {"exact_match", "contains"})
+            self.assertEqual(events[1].parent_id, trace_id)
+            self.assertEqual(events[2].parent_id, events[1].id)
+            self.assertEqual(events[2].input, {"query": "hello"})
+            self.assertEqual(events[2].output, {"documents": [{"id": "doc-1", "text": "local context"}]})
+            self.assertEqual(events[3].parent_id, trace_id)
+            self.assertEqual(events[3].model, "demo")
+            self.assertEqual(events[3].input, {"question": "hello"})
+            self.assertEqual(events[3].output, "HELLO")
             self.assertEqual({event.name for event in score_events}, {"exact_match", "contains"})
             for score_event in score_events:
                 self.assertEqual(score_event.trace_id, trace_id)
                 self.assertEqual(score_event.parent_id, trace_id)
+
+    def test_run_experiment_record_traces_writes_error_trace_when_task_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
+            dataset = Dataset([DatasetExample(id="q1", input={"token": "raw-token"})])
+
+            def fail(token: str) -> str:
+                with span("failing_step"):
+                    raise RuntimeError(f"provider failed token={token}")
+
+            result = run_experiment(
+                "failure",
+                dataset=dataset,
+                task=fail,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                raise_on_error=False,
+                record_traces=True,
+            )
+
+            trace_id = result.results[0].trace_id
+            self.assertIsNotNone(trace_id)
+            self.assertEqual(result.status, "error")
+            self.assertEqual(result.results[0].error, "provider failed token=[redacted]")
+
+            trace = load_traces(trace_path)[0]
+            self.assertEqual(trace.id, trace_id)
+            self.assertEqual(trace.status, "error")
+            self.assertEqual(trace.root.error, "provider failed token=[redacted]")
+            self.assertEqual([(event.type, event.name, event.status) for event in trace.events], [
+                ("trace", "experiment.failure.q1", "error"),
+                ("span", "failing_step", "error"),
+            ])
+            self.assertEqual(trace.events[1].parent_id, trace_id)
+            self.assertNotIn("raw-token", experiment_path.read_text(encoding="utf-8"))
+            self.assertNotIn("raw-token", trace_path.read_text(encoding="utf-8"))
 
     def test_run_experiment_record_traces_redacts_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
-from ._sdk import _record_score_event, _record_trace_event, _safe_capture, _safe_error
+from ._sdk import _record_score_event, _safe_capture, _safe_error, _trace_context
 
 _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
@@ -580,16 +580,38 @@ def run_experiment(
 
     with output_path.open("w", encoding="utf-8") as experiment_file:
         for example in examples:
+            if record_traces:
+                result, error = _run_traced_example(
+                    experiment_id=experiment_id,
+                    experiment_name=name,
+                    example=example,
+                    task=task,
+                    evaluators=evaluator_list,
+                )
+                if error is not None:
+                    results.append(result)
+                    _write_experiment_result(experiment_file, experiment_id, name, result)
+                    if raise_on_error:
+                        end_time = _now()
+                        experiment_result = _experiment_result(
+                            experiment_id=experiment_id,
+                            name=name,
+                            start_time=start_time,
+                            end_time=end_time,
+                            results=results,
+                            path=output_path,
+                        )
+                        _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
+                        raise error
+                    continue
+                results.append(result)
+                _write_experiment_result(experiment_file, experiment_id, name, result)
+                continue
+
             try:
                 result = _run_example(example, task, evaluator_list)
             except Exception as exc:
                 result = _error_example_result(example, exc)
-                if record_traces:
-                    result = _record_experiment_trace(
-                        experiment_id=experiment_id,
-                        experiment_name=name,
-                        result=result,
-                    )
                 results.append(result)
                 _write_experiment_result(experiment_file, experiment_id, name, result)
                 if raise_on_error:
@@ -605,12 +627,6 @@ def run_experiment(
                     _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
                     raise
                 continue
-            if record_traces:
-                result = _record_experiment_trace(
-                    experiment_id=experiment_id,
-                    experiment_name=name,
-                    result=result,
-                )
             results.append(result)
             _write_experiment_result(experiment_file, experiment_id, name, result)
 
@@ -777,25 +793,39 @@ def _error_example_result(example: DatasetExample, exc: Exception) -> Experiment
     )
 
 
-def _record_experiment_trace(
+def _run_traced_example(
     *,
     experiment_id: str,
     experiment_name: str,
-    result: ExperimentExampleResult,
-) -> ExperimentExampleResult:
-    trace_id = _record_trace_event(
-        name=f"experiment.{experiment_name}.{result.example_id}",
-        start_time=result.start_time,
-        end_time=result.end_time,
-        status=result.status,
-        error=result.error,
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+) -> tuple[ExperimentExampleResult, Exception | None]:
+    trace = _trace_context(
+        name=f"experiment.{experiment_name}.{example.id}",
         metadata={
             "kind": "experiment",
             "experiment_id": experiment_id,
             "experiment_name": experiment_name,
-            "example_id": result.example_id,
+            "example_id": example.id,
         },
     )
+    trace.__enter__()
+    if trace.id is None:
+        raise RuntimeError("bir experiment trace context did not provide a trace id")
+
+    try:
+        result = _run_example(example, task, evaluators)
+        _record_experiment_scores(trace.id, result)
+    except Exception as exc:
+        trace.__exit__(type(exc), exc, exc.__traceback__)
+        return replace(_error_example_result(example, exc), trace_id=trace.id), exc
+
+    trace.__exit__(None, None, None)
+    return replace(result, trace_id=trace.id), None
+
+
+def _record_experiment_scores(trace_id: str, result: ExperimentExampleResult) -> None:
     for score in result.scores:
         _record_score_event(
             trace_id=trace_id,
@@ -805,7 +835,6 @@ def _record_experiment_trace(
             metadata=score.metadata,
             timestamp=result.end_time,
         )
-    return replace(result, trace_id=trace_id)
 
 
 def _call_task(task: Callable[..., Any], input_value: Any) -> Any:

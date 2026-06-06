@@ -512,6 +512,14 @@ def _record_trace_event(
     return trace_id
 
 
+def _trace_context(
+    *,
+    name: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> _TraceContext:
+    return _TraceContext(name=name, metadata=metadata)
+
+
 def _record_score_event(
     *,
     trace_id: str,
@@ -539,6 +547,70 @@ def _record_score_event(
             value=score_value,
         )
     )
+
+
+class _TraceContext:
+    def __init__(self, *, name: str, metadata: Mapping[str, Any] | None) -> None:
+        _validate_event_name(name, "trace name")
+        self.name = name
+        self.metadata = metadata
+        self.id: str | None = None
+        self.start_time: str | None = None
+        self._trace_token: Token[str | None] | None = None
+        self._parent_token: Token[str | None] | None = None
+        self._capture_inputs_token: Token[bool | None] | None = None
+        self._capture_outputs_token: Token[bool | None] | None = None
+
+    def __enter__(self) -> _TraceContext:
+        self.id = _new_id()
+        self.start_time = _now()
+        self._trace_token = _current_trace_id.set(self.id)
+        self._parent_token = _current_parent_id.set(self.id)
+        self._capture_inputs_token = _current_capture_inputs.set(_config.capture_inputs)
+        self._capture_outputs_token = _current_capture_outputs.set(_config.capture_outputs)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        del exc_type, traceback
+        self._reset()
+
+        if self.id is None or self.start_time is None:
+            raise RuntimeError("bir trace context exited before it was entered")
+
+        event = _event(
+            event_id=self.id,
+            trace_id=self.id,
+            parent_id=None,
+            name=self.name,
+            event_type="trace",
+            start_time=self.start_time,
+            end_time=_now(),
+            status="error" if exc is not None else "success",
+            error=_safe_error(exc) if exc is not None else None,
+            metadata=_safe_capture(dict(self.metadata or {})),
+        )
+        try:
+            _write_event(event)
+        except Exception as storage_error:
+            if exc is not None:
+                raise exc from storage_error
+            raise
+        return False
+
+    def _reset(self) -> None:
+        if self._capture_outputs_token is not None:
+            _current_capture_outputs.reset(self._capture_outputs_token)
+        if self._capture_inputs_token is not None:
+            _current_capture_inputs.reset(self._capture_inputs_token)
+        if self._parent_token is not None:
+            _current_parent_id.reset(self._parent_token)
+        if self._trace_token is not None:
+            _current_trace_id.reset(self._trace_token)
 
 
 class _Span:
