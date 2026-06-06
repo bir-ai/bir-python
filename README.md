@@ -165,7 +165,9 @@ answer_prompt = prompt(
 ```
 
 Captured prompt fields use the same best-effort redaction as other captured
-payloads.
+payloads. After sending traces to the local server, the dashboard shows prompt
+metadata on generation details without requiring you to inspect the raw event
+JSON.
 
 ## Local Evals And Experiments
 
