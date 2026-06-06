@@ -402,11 +402,11 @@ class EvalTests(unittest.TestCase):
                 with span("retrieve_context"):
                     with retrieval("search_docs", query=question) as result:
                         result.add_document(id="doc-1", text="local context")
+                output = question.upper()
                 with generation("local.llm", model="demo", input={"question": question}) as gen:
-                    output = question.upper()
                     gen.set_output(output)
                     gen.set_usage(input_tokens=1, output_tokens=1)
-                    return output
+                return output
 
             result = run_experiment(
                 "uppercase",
@@ -465,7 +465,7 @@ class EvalTests(unittest.TestCase):
             configure(trace_path=trace_path)
             dataset = Dataset([DatasetExample(id="q1", input={"token": "raw-token"})])
 
-            def fail(token: str) -> str:
+            def fail(token: str) -> None:
                 with span("failing_step"):
                     raise RuntimeError(f"provider failed token={token}")
 
