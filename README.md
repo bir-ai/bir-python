@@ -169,6 +169,28 @@ payloads. After sending traces to the local server, the dashboard shows prompt
 metadata on generation details without requiring you to inspect the raw event
 JSON.
 
+## LangChain Callback
+
+Use `BirCallbackHandler` to record LangChain callback events as Bir traces
+without adding LangChain as a Bir dependency:
+
+```python
+from bir import configure
+from bir.integrations.langchain import BirCallbackHandler
+
+configure(capture_inputs=True, capture_outputs=True)
+
+result = chain.invoke(
+    {"question": "What is Bir?"},
+    config={"callbacks": [BirCallbackHandler()]},
+)
+```
+
+Root chains become trace events, nested chains become spans, LLM/chat model
+callbacks become generation events, retrievers become retrieval tool calls, and
+tools become tool call events. Direct model calls without an active chain create
+a small implicit trace root.
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.
