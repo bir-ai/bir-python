@@ -63,6 +63,8 @@ class _Config:
     trace_path: Path = _DEFAULT_TRACE_PATH
     capture_inputs: bool = False
     capture_outputs: bool = False
+    service_name: str | None = None
+    environment: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,8 +176,14 @@ def configure(
     trace_path: str | Path | None = None,
     capture_inputs: bool | None = None,
     capture_outputs: bool | None = None,
+    service_name: str | None = None,
+    environment: str | None = None,
 ) -> None:
-    """Configure local SDK behavior."""
+    """Configure local SDK behavior.
+
+    ``service_name`` and ``environment`` are recorded on trace root events
+    under ``metadata.service`` so traces can be filtered by deployment later.
+    """
 
     global _config
 
@@ -186,6 +194,10 @@ def configure(
         updates["capture_inputs"] = capture_inputs
     if capture_outputs is not None:
         updates["capture_outputs"] = capture_outputs
+    if service_name is not None:
+        updates["service_name"] = _validate_event_name(service_name, "service_name")
+    if environment is not None:
+        updates["environment"] = _validate_event_name(environment, "environment")
 
     _config = replace(_config, **updates)
 
@@ -968,6 +980,11 @@ def _event(
     cost: Mapping[str, int | float] | None = None,
     currency: str | None = None,
 ) -> dict[str, Any]:
+    event_metadata = dict(metadata or {})
+    if event_type == "trace":
+        service_metadata = _service_metadata()
+        if service_metadata is not None:
+            event_metadata.setdefault("service", service_metadata)
     event: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
         "id": event_id,
@@ -978,7 +995,7 @@ def _event(
         "start_time": start_time,
         "end_time": end_time,
         "status": status,
-        "metadata": dict(metadata or {}),
+        "metadata": event_metadata,
         "input": input,
         "output": output,
         "error": error,
@@ -994,6 +1011,15 @@ def _event(
     if currency is not None:
         event["currency"] = currency
     return event
+
+
+def _service_metadata() -> dict[str, str] | None:
+    payload: dict[str, str] = {}
+    if _config.service_name is not None:
+        payload["name"] = _config.service_name
+    if _config.environment is not None:
+        payload["environment"] = _config.environment
+    return payload or None
 
 
 def _write_event(event: dict[str, Any]) -> None:

@@ -15,7 +15,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call
-from bir._sdk import _reset_config_for_tests
+from bir._sdk import _reset_config_for_tests, _trace_context
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
@@ -1419,6 +1419,75 @@ class SdkTests(unittest.TestCase):
             self.assertTrue(trace_path.exists())
             events = read_events(trace_path)
             self.assertEqual(events[0]["name"], "answer")
+
+    def test_configure_attaches_service_metadata_to_trace_root_events(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(service_name="rag-api", environment="production")
+
+            @observe()
+            def answer() -> str:
+                with span("retrieve_context"):
+                    pass
+                with generation("local.llm", model="demo") as gen:
+                    gen.set_output("ok")
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(
+                root["metadata"],
+                {"service": {"name": "rag-api", "environment": "production"}},
+            )
+            for event in events:
+                if event["type"] != "trace":
+                    self.assertNotIn("service", cast(dict[str, Any], event["metadata"]))
+
+    def test_configure_service_metadata_supports_partial_fields(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(environment="staging")
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(events[0]["metadata"], {"service": {"environment": "staging"}})
+
+    def test_trace_events_omit_service_metadata_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(events[0]["metadata"], {})
+
+    def test_trace_context_keeps_explicit_service_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(service_name="rag-api")
+
+            with _trace_context(name="manual", metadata={"service": {"name": "override"}}):
+                pass
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(events[0]["metadata"], {"service": {"name": "override"}})
+
+    def test_configure_rejects_invalid_service_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "service_name"):
+            configure(service_name="")
+        with self.assertRaisesRegex(ValueError, "environment"):
+            configure(environment="")
+        with self.assertRaisesRegex(TypeError, "service_name"):
+            configure(service_name=cast(Any, 123))
+        with self.assertRaisesRegex(TypeError, "environment"):
+            configure(environment=cast(Any, 123))
 
     def test_storage_errors_are_not_swallowed(self) -> None:
         with temporary_workdir() as workdir:

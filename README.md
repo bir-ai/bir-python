@@ -106,6 +106,19 @@ usage and generation cost require non-negative finite numeric values.
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.
 
+## Service Metadata
+
+Use `configure()` to tag traces with the service and environment that produced
+them. Both values are optional, must be non-empty strings, and are recorded on
+trace root events under `metadata.service` so traces from different deployments
+can be told apart later.
+
+```python
+from bir import configure
+
+configure(service_name="rag-api", environment="production")
+```
+
 ## Retrieval
 
 Use `retrieval()` to record RAG lookups with the existing `tool_call` event
