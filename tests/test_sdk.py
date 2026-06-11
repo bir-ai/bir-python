@@ -64,6 +64,31 @@ def posted_request_body(request: object) -> dict[str, object]:
     return payload
 
 
+def posted_request_batch(request: object) -> list[dict[str, object]]:
+    data = getattr(request, "data")
+    if not isinstance(data, bytes):
+        raise TypeError("expected request data to be bytes")
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, list):
+        raise TypeError("expected request body to be a JSON list")
+    return payload
+
+
+def batch_response_accepting(events: list[dict[str, object]]) -> FakeHttpResponse:
+    body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+    return FakeHttpResponse(body.encode("utf-8"))
+
+
+def http_error(request: object, code: int, body: bytes = b"{}") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url=request_url(request),
+        code=code,
+        msg="error",
+        hdrs=HTTPMessage(),
+        fp=BytesIO(body),
+    )
+
+
 def request_url(request: object) -> str:
     url = getattr(request, "full_url")
     if not isinstance(url, str):
@@ -1107,7 +1132,7 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(len(traces), 1)
             self.assertEqual(traces[0].name, "answer")
 
-    def test_send_events_posts_local_events_to_server(self) -> None:
+    def test_send_events_posts_local_events_in_one_batch(self) -> None:
         with temporary_workdir():
 
             @observe(capture_inputs=True)
@@ -1116,27 +1141,29 @@ class SdkTests(unittest.TestCase):
                 return question.upper()
 
             answer("hello")
-            posted_events: list[dict[str, object]] = []
+            posted_batches: list[list[dict[str, object]]] = []
             posted_urls: list[str] = []
 
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 self.assertEqual(timeout, 10.0)
                 posted_urls.append(request_url(request))
-                posted_events.append(posted_request_body(request))
-                return FakeHttpResponse()
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
 
             with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 2)
             self.assertEqual(len(result.event_ids), 2)
-            self.assertEqual(posted_urls, ["http://server.test/v1/events", "http://server.test/v1/events"])
+            self.assertEqual(posted_urls, ["http://server.test/v1/events/batch"])
+            posted_events = posted_batches[0]
             posted_types = [event["type"] for event in posted_events]
             self.assertEqual(posted_types, ["trace", "score"])
             trace_event = next(event for event in posted_events if event["type"] == "trace")
             self.assertEqual(trace_event["input"], {"question": "hello"})
 
-    def test_send_events_posts_complete_traces_root_first(self) -> None:
+    def test_send_events_batches_complete_traces_root_first(self) -> None:
         with temporary_workdir():
 
             @observe(capture_inputs=True, capture_outputs=True)
@@ -1151,23 +1178,71 @@ class SdkTests(unittest.TestCase):
                 return "ok"
 
             answer("hello")
-            posted_events: list[dict[str, object]] = []
+            posted_batches: list[list[dict[str, object]]] = []
 
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
-                posted_events.append(posted_request_body(request))
-                return FakeHttpResponse()
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
 
             with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 5)
+            posted_events = posted_batches[0]
             self.assertEqual(
                 [event["type"] for event in posted_events],
                 ["trace", "span", "tool_call", "generation", "score"],
             )
             self.assertEqual(result.event_ids, [event["id"] for event in posted_events])
 
-    def test_send_events_raises_when_server_rejects_event(self) -> None:
+    def test_send_events_falls_back_to_per_event_posts_when_batch_missing(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer(question: str) -> str:
+                score("helpfulness", 0.9)
+                return question.upper()
+
+            answer("hello")
+            posted_urls: list[str] = []
+            posted_events: list[dict[str, object]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                posted_urls.append(request_url(request))
+                if request_url(request).endswith("/v1/events/batch"):
+                    raise http_error(request, 404, b'{"detail":"Not Found"}')
+                posted_events.append(posted_request_body(request))
+                return FakeHttpResponse()
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 2)
+            self.assertEqual(
+                posted_urls,
+                [
+                    "http://server.test/v1/events/batch",
+                    "http://server.test/v1/events",
+                    "http://server.test/v1/events",
+                ],
+            )
+            self.assertEqual([event["type"] for event in posted_events], ["trace", "score"])
+            self.assertEqual(result.event_ids, [event["id"] for event in posted_events])
+
+    def test_send_events_makes_no_requests_when_there_are_no_events(self) -> None:
+        with temporary_workdir():
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                raise AssertionError("send_events must not post when there are no events")
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 0)
+            self.assertEqual(result.event_ids, [])
+
+    def test_send_events_raises_when_server_rejects_batch(self) -> None:
         with temporary_workdir():
 
             @observe()
@@ -1175,24 +1250,18 @@ class SdkTests(unittest.TestCase):
                 return "ok"
 
             answer()
-            posted_events: list[dict[str, object]] = []
+            posted_urls: list[str] = []
 
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
-                posted_events.append(posted_request_body(request))
-                raise urllib.error.HTTPError(
-                    url=request_url(request),
-                    code=422,
-                    msg="Unprocessable Entity",
-                    hdrs=HTTPMessage(),
-                    fp=BytesIO(b'{"detail":"rejected"}'),
-                )
+                posted_urls.append(request_url(request))
+                raise http_error(request, 422, b'{"detail":"rejected"}')
 
             with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
                     send_events("http://server.test")
-            self.assertEqual(len(posted_events), 1)
+            self.assertEqual(posted_urls, ["http://server.test/v1/events/batch"])
 
-    def test_send_events_uses_server_accepted_count(self) -> None:
+    def test_send_events_raises_on_invalid_batch_response(self) -> None:
         with temporary_workdir():
 
             @observe()
@@ -1202,6 +1271,42 @@ class SdkTests(unittest.TestCase):
             answer()
 
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return FakeHttpResponse(b'{"accepted":1}')
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with self.assertRaisesRegex(RuntimeError, "invalid batch response"):
+                    send_events("http://server.test")
+
+    def test_send_events_uses_server_accepted_batch_result(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return FakeHttpResponse(b'{"accepted":0,"event_ids":[]}')
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 0)
+            self.assertEqual(result.event_ids, [])
+
+    def test_send_events_fallback_uses_server_accepted_count(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                if request_url(request).endswith("/v1/events/batch"):
+                    raise http_error(request, 404, b'{"detail":"Not Found"}')
                 return FakeHttpResponse(b'{"accepted":0,"id":"already-seen"}')
 
             with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):

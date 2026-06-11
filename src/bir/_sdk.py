@@ -250,10 +250,16 @@ def send_events(
     """Send local JSONL trace events to a Bir ingestion server."""
 
     events = _events_for_sending(path)
+    endpoint = _events_endpoint(server_url)
+    if not events:
+        return SendEventsResult(accepted=0, event_ids=[])
+
+    batch_result = _post_event_batch(f"{endpoint}/batch", [event.raw for event in events], timeout=timeout)
+    if batch_result is not None:
+        return batch_result
+
     accepted = 0
     event_ids: list[str] = []
-    endpoint = _events_endpoint(server_url)
-
     for event in events:
         event_accepted = _post_event(endpoint, event.raw, timeout=timeout)
         accepted += event_accepted
@@ -1002,6 +1008,54 @@ def _events_endpoint(server_url: str) -> str:
     if not normalized_url:
         raise ValueError("bir server_url must not be empty")
     return f"{normalized_url}/v1/events"
+
+
+def _post_event_batch(
+    endpoint: str,
+    events: list[dict[str, Any]],
+    *,
+    timeout: float,
+) -> SendEventsResult | None:
+    """Post all events in one request; return None when the server has no batch endpoint."""
+
+    payload = json.dumps(events, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"bir server rejected event batch with HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"bir could not send events to {endpoint}: {exc.reason}") from exc
+
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {body}")
+    return _batch_result_from_response(body)
+
+
+def _batch_result_from_response(body: str) -> SendEventsResult:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"bir server returned an invalid batch response: {body}") from exc
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+    accepted = payload.get("accepted")
+    event_ids = payload.get("event_ids")
+    if isinstance(accepted, bool) or not isinstance(accepted, int):
+        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+    if not isinstance(event_ids, list) or not all(isinstance(event_id, str) for event_id in event_ids):
+        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+    return SendEventsResult(accepted=accepted, event_ids=list(event_ids))
 
 
 def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> int:
