@@ -26,6 +26,7 @@ Initial local MVP SDK release.
 - Opt-in input and output capture.
 - Best-effort redaction for common secret-like keys and text patterns.
 - `bir.evals` deterministic evaluators: `exact_match()`, `contains()`, `regex_match()`, and `json_valid()`.
+- `bir.evals.answer_context_overlap()` deterministic RAG faithfulness heuristic that scores answer/context word overlap.
 - Local JSONL dataset loading and experiment result writing through `Dataset` and `run_experiment()`.
 
 ### Notes

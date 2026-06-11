@@ -19,6 +19,7 @@ from bir.evals import (
     DeterministicEvaluator,
     EvaluationContext,
     EvalResult,
+    answer_context_overlap,
     contains,
     cost_under,
     custom_evaluator,
@@ -59,6 +60,79 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(field_contains("answer", "capital").evaluate(structured_output).value, 1.0)
         self.assertEqual(numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0)
         self.assertEqual(custom_evaluator("has_paris", lambda output, expected: "Paris" in str(output)).evaluate("Paris").value, 1.0)
+
+    def test_answer_context_overlap_scores_supported_answers(self) -> None:
+        supported = answer_context_overlap(0.8).evaluate(
+            {
+                "answer": "Bir records local traces.",
+                "contexts": ["Bir records local traces with JSONL files."],
+            }
+        )
+        self.assertEqual(supported.value, 1.0)
+        self.assertEqual(supported.metadata["overlap_ratio"], 1.0)
+        self.assertEqual(supported.metadata["answer_word_count"], 4)
+        self.assertEqual(supported.metadata["supported_word_count"], 4)
+        self.assertNotIn("unsupported_words", supported.metadata)
+
+        unsupported = answer_context_overlap(0.8).evaluate(
+            {
+                "answer": "Bir deploys Kubernetes clusters automatically.",
+                "contexts": ["Bir records local traces with JSONL files."],
+            }
+        )
+        self.assertEqual(unsupported.value, 0.0)
+        self.assertEqual(unsupported.metadata["overlap_ratio"], 0.2)
+        self.assertEqual(
+            unsupported.metadata["unsupported_words"],
+            ["automatically", "clusters", "deploys", "kubernetes"],
+        )
+
+    def test_answer_context_overlap_is_case_insensitive(self) -> None:
+        result = answer_context_overlap(1.0).evaluate(
+            {
+                "answer": "PARIS is the CAPITAL.",
+                "contexts": ["paris is the capital of France."],
+            }
+        )
+        self.assertEqual(result.value, 1.0)
+
+    def test_answer_context_overlap_reports_missing_and_empty_inputs(self) -> None:
+        evaluator = answer_context_overlap(0.5)
+
+        plain_string = evaluator.evaluate("just an answer")
+        self.assertEqual(plain_string.value, 0.0)
+        self.assertEqual(plain_string.metadata["reason"], "non_object_output")
+
+        missing_answer = evaluator.evaluate({"contexts": ["doc text"]})
+        self.assertEqual(missing_answer.value, 0.0)
+        self.assertEqual(missing_answer.metadata["reason"], "missing_answer")
+
+        missing_contexts = evaluator.evaluate({"answer": "confident claim"})
+        self.assertEqual(missing_contexts.value, 0.0)
+        self.assertEqual(missing_contexts.metadata["reason"], "missing_contexts")
+
+        non_string_contexts = evaluator.evaluate({"answer": "claim", "contexts": ["doc", 1]})
+        self.assertEqual(non_string_contexts.value, 0.0)
+        self.assertEqual(non_string_contexts.metadata["reason"], "missing_contexts")
+
+        empty_contexts = evaluator.evaluate({"answer": "confident claim", "contexts": []})
+        self.assertEqual(empty_contexts.value, 0.0)
+        self.assertEqual(empty_contexts.metadata["reason"], "empty_contexts")
+        self.assertEqual(empty_contexts.metadata["overlap_ratio"], 0.0)
+
+        empty_answer = evaluator.evaluate({"answer": "", "contexts": ["doc text"]})
+        self.assertEqual(empty_answer.value, 1.0)
+        self.assertEqual(empty_answer.metadata["reason"], "empty_answer")
+
+    def test_answer_context_overlap_rejects_invalid_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            answer_context_overlap(-0.1)
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            answer_context_overlap(1.5)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            answer_context_overlap(math.nan)
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            answer_context_overlap(0.5, name="")
 
     def test_context_evaluators_return_numeric_scores(self) -> None:
         context = EvaluationContext(

@@ -18,6 +18,8 @@ from ._sdk import _record_score_event, _safe_capture, _safe_error, _trace_contex
 
 _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
+_UNSUPPORTED_WORD_LIMIT = 20
+_WORD_TOKEN_PATTERN = re.compile(r"\w+")
 
 __all__ = [
     "Dataset",
@@ -29,6 +31,7 @@ __all__ = [
     "ExperimentResult",
     "ExperimentSummary",
     "SendExperimentResult",
+    "answer_context_overlap",
     "contains",
     "cost_under",
     "custom_evaluator",
@@ -617,6 +620,68 @@ def numeric_between(
         if upper_bound is not None and actual > upper_bound:
             return EvalResult(name=name, value=0.0, metadata=metadata)
         return EvalResult(name=name, value=1.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
+def answer_context_overlap(min_ratio: float, *, name: str = "answer_context_overlap") -> DeterministicEvaluator:
+    """Create an evaluator that checks how much of an answer is supported by retrieved context.
+
+    The overlap ratio is the fraction of answer word tokens that also appear in
+    the retrieved context texts. It is a deterministic heuristic for spotting
+    unsupported answers, not proof of faithfulness: paraphrased but faithful
+    answers can score low, and unfaithful answers that reuse context words can
+    score high.
+
+    The task output must be a mapping with an ``answer`` string and a
+    ``contexts`` list of retrieved text strings:
+
+    ``{"answer": "...", "contexts": ["doc text", "other doc text"]}``
+    """
+
+    min_ratio_value = _validate_finite_number(min_ratio, "min_ratio")
+    if min_ratio_value < 0 or min_ratio_value > 1:
+        raise ValueError("min_ratio must be between 0 and 1")
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        del example_expected
+        metadata: dict[str, Any] = {"min_ratio": min_ratio_value}
+        if not isinstance(output, Mapping):
+            metadata["reason"] = "non_object_output"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        answer = output.get("answer")
+        if not isinstance(answer, str):
+            metadata["reason"] = "missing_answer"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        contexts = output.get("contexts")
+        if not isinstance(contexts, list) or any(not isinstance(item, str) for item in contexts):
+            metadata["reason"] = "missing_contexts"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+
+        answer_words = _word_tokens(answer)
+        if not answer_words:
+            metadata["reason"] = "empty_answer"
+            metadata["overlap_ratio"] = 1.0
+            return EvalResult(name=name, value=1.0, metadata=metadata)
+
+        context_words: set[str] = set()
+        for context_text in contexts:
+            context_words.update(_word_tokens(context_text))
+        if not context_words:
+            metadata["reason"] = "empty_contexts"
+            metadata["overlap_ratio"] = 0.0
+            metadata["answer_word_count"] = len(answer_words)
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+
+        supported_words = answer_words & context_words
+        overlap_ratio = len(supported_words) / len(answer_words)
+        metadata["overlap_ratio"] = overlap_ratio
+        metadata["answer_word_count"] = len(answer_words)
+        metadata["supported_word_count"] = len(supported_words)
+        unsupported_words = sorted(answer_words - context_words)
+        if unsupported_words:
+            metadata["unsupported_words"] = unsupported_words[:_UNSUPPORTED_WORD_LIMIT]
+        return EvalResult(name=name, value=1.0 if overlap_ratio >= min_ratio_value else 0.0, metadata=metadata)
 
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 
@@ -1253,6 +1318,10 @@ def _validate_finite_number(value: Any, field: str) -> float:
 def _validate_evaluator_name(name: str) -> None:
     if not name:
         raise ValueError("evaluator name must not be empty")
+
+
+def _word_tokens(text: str) -> set[str]:
+    return set(_WORD_TOKEN_PATTERN.findall(text.casefold()))
 
 
 def _json_line(payload: Mapping[str, Any]) -> str:
