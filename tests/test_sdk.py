@@ -451,6 +451,56 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(span_event["status"], "success")
             self.assertIsNone(span_event["error"])
 
+    def test_async_with_span_records_same_span_event_as_sync(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with span("retrieve_context"):
+                    await asyncio.sleep(0)
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(span_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(span_event["parent_id"], trace_event["id"])
+            self.assertEqual(span_event["name"], "retrieve_context")
+            self.assertEqual(span_event["status"], "success")
+            self.assertIsNone(span_event["error"])
+
+    def test_async_with_span_isolated_across_concurrent_tasks(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def task(value: str) -> str:
+                async with span(f"span_{value}"):
+                    # Yield control so the two tasks interleave; if the parent_id
+                    # contextvar leaked across tasks the spans would nest wrong.
+                    await asyncio.sleep(0)
+                return value
+
+            async def main() -> tuple[str, str]:
+                return await asyncio.gather(task("a"), task("b"))
+
+            self.assertEqual(sorted(asyncio.run(main())), ["a", "b"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_events = [event for event in events if event["type"] == "trace"]
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual(len(trace_events), 2)
+            self.assertEqual(len(span_events), 2)
+
+            traces_by_id = {event["id"]: event for event in trace_events}
+            for span_event in span_events:
+                self.assertIn(span_event["trace_id"], traces_by_id)
+                parent = traces_by_id[span_event["trace_id"]]
+                self.assertEqual(span_event["parent_id"], parent["id"])
+                self.assertEqual(span_event["status"], "success")
+            # Each span belongs to its own task's trace, with no cross-task leakage.
+            self.assertEqual(len({event["trace_id"] for event in span_events}), 2)
+
     def test_score_records_score_event(self) -> None:
         with temporary_workdir() as workdir:
 

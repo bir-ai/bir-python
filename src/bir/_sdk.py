@@ -802,6 +802,21 @@ class _Span:
             raise
         return False
 
+    async def __aenter__(self) -> _Span:
+        # Delegate to the sync enter so one object works as both ``with span(...)``
+        # and ``async with span(...)``. The parent_id contextvar is set here with no
+        # intervening await, so each asyncio task keeps its own value and concurrent
+        # spans stay isolated.
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        return self.__exit__(exc_type, exc, traceback)
+
 
 class _Generation:
     def __init__(
