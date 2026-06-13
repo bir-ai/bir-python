@@ -278,6 +278,14 @@ loaded = load_experiment(result.path)
 summaries = list_experiments()
 ```
 
+`Dataset.to_jsonl()` redacts common secret-like values by default when exporting
+examples. If you intentionally need to preserve raw dataset payloads, opt out
+explicitly:
+
+```python
+dataset.to_jsonl("questions.jsonl", redact=False)
+```
+
 Experiment results are written to `.bir/experiments/*.jsonl` by default, with
 one result row per example. Bir also writes a sibling `.summary.json` file with
 the experiment id, status, example count, error count, aggregate scores, and

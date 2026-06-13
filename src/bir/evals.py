@@ -194,14 +194,20 @@ class Dataset:
 
         return cls(examples)
 
-    def to_jsonl(self, path: str | Path) -> None:
-        """Write dataset examples to a JSONL file."""
+    def to_jsonl(self, path: str | Path, *, redact: bool = True) -> None:
+        """Write dataset examples to a JSONL file.
+
+        Redaction is enabled by default so exported datasets use the same safe
+        capture behavior as trace and experiment artifacts. Pass
+        ``redact=False`` only when you intentionally want to preserve raw
+        example payloads.
+        """
 
         dataset_path = Path(path)
         dataset_path.parent.mkdir(parents=True, exist_ok=True)
         with dataset_path.open("w", encoding="utf-8") as dataset_file:
             for example in self.examples:
-                dataset_file.write(_json_line(example.to_dict()))
+                dataset_file.write(_json_line(example.to_dict(redact=redact)))
 
     def __iter__(self) -> Iterator[DatasetExample]:
         """Iterate over dataset examples."""

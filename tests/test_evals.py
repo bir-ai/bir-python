@@ -385,6 +385,42 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(example.expected, "Paris")
             self.assertEqual(example.metadata, {"split": "smoke"})
 
+    def test_dataset_jsonl_export_can_preserve_raw_values_when_opted_in(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "dataset.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(
+                        id="q1",
+                        input={"question": "Capital of France?", "api_key": "sk-secret"},
+                        expected={"answer": "Paris", "token": "secret-token"},
+                        metadata={"split": "smoke", "authorization": "Bearer secret-token"},
+                    )
+                ]
+            )
+
+            dataset.to_jsonl(dataset_path, redact=False)
+            exported_rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                exported_rows,
+                [
+                    {
+                        "id": "q1",
+                        "input": {"question": "Capital of France?", "api_key": "sk-secret"},
+                        "expected": {"answer": "Paris", "token": "secret-token"},
+                        "metadata": {"split": "smoke", "authorization": "Bearer secret-token"},
+                    }
+                ],
+            )
+
+            loaded = Dataset.from_jsonl(dataset_path)
+            self.assertEqual(loaded.examples[0].input, {"question": "Capital of France?", "api_key": "sk-secret"})
+            self.assertEqual(loaded.examples[0].expected, {"answer": "Paris", "token": "secret-token"})
+            self.assertEqual(
+                loaded.examples[0].metadata,
+                {"split": "smoke", "authorization": "Bearer secret-token"},
+            )
+
     def test_dataset_jsonl_rejects_invalid_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dataset_path = Path(directory) / "dataset.jsonl"

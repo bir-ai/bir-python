@@ -45,6 +45,8 @@ Important current constraints:
 - Evaluators must not require an LLM provider.
 - Evaluators must not require the FastAPI server.
 - Evaluators must preserve redaction and safe JSON serialization.
+- Dataset JSONL export should redact by default and require an explicit opt-out
+  for raw example payloads.
 - Experiment storage is JSONL-first.
 - Async support is not required until the sync API stabilizes.
 
