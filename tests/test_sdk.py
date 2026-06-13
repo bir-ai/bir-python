@@ -920,6 +920,24 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(score_event.parent_id, "generation-fixture-1")
         self.assertEqual(score_event.value, 0.82)
         self.assertEqual(score_event.raw["value"], 0.82)
+        trace_event = next(event for event in events if event.type == "trace")
+        self.assertEqual(
+            trace_event.metadata,
+            {"service": {"name": "rag-api", "environment": "production"}},
+        )
+        self.assertEqual(
+            generation_event.metadata,
+            {
+                "provider": "local",
+                "prompt": {
+                    "name": "answer_question",
+                    "version": "v1",
+                    "template_sha256": hashlib.sha256(
+                        "Answer the question: {question}".encode("utf-8")
+                    ).hexdigest(),
+                },
+            },
+        )
 
     def test_load_events_rejects_invalid_schema(self) -> None:
         with temporary_workdir() as workdir:
