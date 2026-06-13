@@ -605,6 +605,17 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "input_tokens must be non-negative"):
                 answer()
 
+    def test_generation_usage_requires_at_least_one_token_field(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_usage()
+
+            with self.assertRaisesRegex(ValueError, "usage requires at least one token field"):
+                answer()
+
     def test_generation_cost_rejects_non_finite_values(self) -> None:
         with temporary_workdir():
 
@@ -625,6 +636,17 @@ class SdkTests(unittest.TestCase):
                     gen.set_cost(total_cost=-0.01)
 
             with self.assertRaisesRegex(ValueError, "total_cost must be non-negative"):
+                answer()
+
+    def test_generation_cost_requires_at_least_one_cost_field(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_cost()
+
+            with self.assertRaisesRegex(ValueError, "cost requires at least one cost field"):
                 answer()
 
     def test_generation_cost_rejects_invalid_currency(self) -> None:

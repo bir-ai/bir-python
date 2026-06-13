@@ -819,6 +819,9 @@ class _Generation:
         output_tokens: int | float | None = None,
         total_tokens: int | float | None = None,
     ) -> None:
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            raise ValueError("bir usage requires at least one token field")
+
         usage: dict[str, int | float] = {}
         if input_tokens is not None:
             usage["input_tokens"] = _validate_non_negative_number(input_tokens, "input_tokens")
@@ -838,6 +841,9 @@ class _Generation:
         total_cost: int | float | None = None,
         currency: str = "USD",
     ) -> None:
+        if input_cost is None and output_cost is None and total_cost is None:
+            raise ValueError("bir cost requires at least one cost field")
+
         cost: dict[str, int | float] = {}
         if input_cost is not None:
             cost["input_cost"] = _validate_non_negative_number(input_cost, "input_cost")

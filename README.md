@@ -121,8 +121,8 @@ floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
 values are truncated. `score()` requires a finite numeric value and accepts
 optional `metadata` (for example `score("faithfulness", 0.4, metadata={"reason":
 "answer cites no context"})`) that is redacted with the same rules before it is
-written to the score event. Generation token usage and generation cost require
-non-negative finite numeric values.
+written to the score event. Generation token usage and generation cost require at
+least one field, and all provided values must be non-negative finite numbers.
 
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.
