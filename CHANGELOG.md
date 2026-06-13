@@ -12,7 +12,7 @@ Initial local MVP SDK release.
 
 ### Added
 
-- `@observe()` decorator for sync Python functions.
+- `@observe()` decorator for sync and async (coroutine) Python functions, producing the same trace and span events on both paths.
 - `trace()` context manager for manually scoped root traces.
 - Nested `span()` context manager.
 - `generation()` context manager with optional model, usage, and user-provided cost fields.
@@ -37,6 +37,6 @@ Initial local MVP SDK release.
 
 ### Notes
 
-- Async tracing is intentionally not part of the first SDK release.
+- `@observe()` traces coroutine functions; async variants of the `span()`, `generation()`, and `tool_call()` context managers are a planned follow-up. They already work as sync calls inside async functions.
 - Server-side ingestion and dashboard viewing are separate local MVP components.
 - Cost values are explicit user-provided values; Bir does not calculate provider pricing.

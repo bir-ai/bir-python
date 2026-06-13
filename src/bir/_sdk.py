@@ -311,88 +311,165 @@ def observe(
     capture_inputs: bool | None = None,
     capture_outputs: bool | None = None,
 ) -> Callable[[F], F]:
-    """Decorate a sync function and record one trace event for each call."""
+    """Decorate a sync or async function and record one trace event for each call."""
 
     if name is not None:
         _validate_event_name(name, "observe name")
 
     def decorator(func: F) -> F:
-        if inspect.iscoroutinefunction(func):
-            raise TypeError("bir.observe supports sync functions only")
-
         trace_name = name or func.__name__
         signature = inspect.signature(func)
 
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                state = _begin_observe(capture_inputs, capture_outputs)
+                input_payload = None
+                try:
+                    if state.capture_inputs:
+                        input_payload = _capture_call_input(signature, args, kwargs)
+                    result = await func(*args, **kwargs)
+                except Exception as exc:
+                    _finish_observe_error(state, trace_name, exc, input_payload)
+                    raise
+                _finish_observe_success(state, trace_name, input_payload, result)
+                return result
+
+            return cast(F, async_wrapper)
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            active_trace_id = _current_trace_id.get()
-            active_parent_id = _current_parent_id.get()
-            event_id = _new_id()
-            if active_trace_id is not None and active_parent_id is not None:
-                trace_id = active_trace_id
-                parent_id = active_parent_id
-                event_type = "span"
-            else:
-                trace_id = event_id
-                parent_id = None
-                event_type = "trace"
-            start_time = _now()
-            capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
-            capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
-            trace_token = _current_trace_id.set(trace_id)
-            parent_token = _current_parent_id.set(event_id)
-            capture_inputs_token = _current_capture_inputs.set(capture_inputs_for_call)
-            capture_outputs_token = _current_capture_outputs.set(capture_outputs_for_call)
+            state = _begin_observe(capture_inputs, capture_outputs)
             input_payload = None
-
             try:
-                if capture_inputs_for_call:
+                if state.capture_inputs:
                     input_payload = _capture_call_input(signature, args, kwargs)
                 result = func(*args, **kwargs)
             except Exception as exc:
-                end_time = _now()
-                _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
-                event = _event(
-                    event_id=event_id,
-                    trace_id=trace_id,
-                    parent_id=parent_id,
-                    name=trace_name,
-                    event_type=event_type,
-                    start_time=start_time,
-                    end_time=end_time,
-                    status="error",
-                    error=_safe_error(exc),
-                    input=input_payload,
-                )
-                try:
-                    _write_event(event)
-                except Exception as storage_error:
-                    raise exc from storage_error
+                _finish_observe_error(state, trace_name, exc, input_payload)
                 raise
-
-            end_time = _now()
-            _reset_context(trace_token, parent_token, capture_inputs_token, capture_outputs_token)
-            output_payload = _safe_capture(result) if capture_outputs_for_call else None
-            _write_event(
-                _event(
-                    event_id=event_id,
-                    trace_id=trace_id,
-                    parent_id=parent_id,
-                    name=trace_name,
-                    event_type=event_type,
-                    start_time=start_time,
-                    end_time=end_time,
-                    status="success",
-                    error=None,
-                    input=input_payload,
-                    output=output_payload,
-                )
-            )
+            _finish_observe_success(state, trace_name, input_payload, result)
             return result
 
         return cast(F, wrapper)
 
     return decorator
+
+
+@dataclass(frozen=True)
+class _ObserveState:
+    """Per-call state shared by the sync and async ``observe`` wrappers."""
+
+    event_id: str
+    trace_id: str
+    parent_id: str | None
+    event_type: str
+    start_time: str
+    capture_inputs: bool
+    capture_outputs: bool
+    trace_token: Token[str | None]
+    parent_token: Token[str | None]
+    capture_inputs_token: Token[bool | None]
+    capture_outputs_token: Token[bool | None]
+
+
+def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) -> _ObserveState:
+    """Open an observation: choose trace-vs-span ids and bind the call contextvars.
+
+    Both the sync and async wrappers call this so the trace decision and
+    contextvar bookkeeping live in one place. ContextVars are task-local and each
+    asyncio task runs with a copied context, so concurrent observed coroutines
+    stay isolated.
+    """
+
+    active_trace_id = _current_trace_id.get()
+    active_parent_id = _current_parent_id.get()
+    event_id = _new_id()
+    if active_trace_id is not None and active_parent_id is not None:
+        trace_id = active_trace_id
+        parent_id = active_parent_id
+        event_type = "span"
+    else:
+        trace_id = event_id
+        parent_id = None
+        event_type = "trace"
+    start_time = _now()
+    capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
+    capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
+    return _ObserveState(
+        event_id=event_id,
+        trace_id=trace_id,
+        parent_id=parent_id,
+        event_type=event_type,
+        start_time=start_time,
+        capture_inputs=capture_inputs_for_call,
+        capture_outputs=capture_outputs_for_call,
+        trace_token=_current_trace_id.set(trace_id),
+        parent_token=_current_parent_id.set(event_id),
+        capture_inputs_token=_current_capture_inputs.set(capture_inputs_for_call),
+        capture_outputs_token=_current_capture_outputs.set(capture_outputs_for_call),
+    )
+
+
+def _finish_observe_success(
+    state: _ObserveState,
+    trace_name: str,
+    input_payload: Any,
+    result: Any,
+) -> None:
+    """Reset the call contextvars and write the success event for an observation."""
+
+    end_time = _now()
+    _reset_context(state.trace_token, state.parent_token, state.capture_inputs_token, state.capture_outputs_token)
+    output_payload = _safe_capture(result) if state.capture_outputs else None
+    _write_event(
+        _event(
+            event_id=state.event_id,
+            trace_id=state.trace_id,
+            parent_id=state.parent_id,
+            name=trace_name,
+            event_type=state.event_type,
+            start_time=state.start_time,
+            end_time=end_time,
+            status="success",
+            error=None,
+            input=input_payload,
+            output=output_payload,
+        )
+    )
+
+
+def _finish_observe_error(
+    state: _ObserveState,
+    trace_name: str,
+    exc: Exception,
+    input_payload: Any,
+) -> None:
+    """Reset the call contextvars and write the error event for a failed observation.
+
+    A storage failure re-raises the original ``exc`` chained to it so the user's
+    exception is never silently swallowed by a write error.
+    """
+
+    end_time = _now()
+    _reset_context(state.trace_token, state.parent_token, state.capture_inputs_token, state.capture_outputs_token)
+    event = _event(
+        event_id=state.event_id,
+        trace_id=state.trace_id,
+        parent_id=state.parent_id,
+        name=trace_name,
+        event_type=state.event_type,
+        start_time=state.start_time,
+        end_time=end_time,
+        status="error",
+        error=_safe_error(exc),
+        input=input_payload,
+    )
+    try:
+        _write_event(event)
+    except Exception as storage_error:
+        raise exc from storage_error
 
 
 def span(name: str) -> _Span:

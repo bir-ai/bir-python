@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import os
@@ -328,6 +329,108 @@ class SdkTests(unittest.TestCase):
             child = next(event for event in events if event["name"] == "child")
             self.assertEqual(score_event["parent_id"], recover_trace["id"])
             self.assertEqual(child["parent_id"], success_trace["id"])
+
+    def test_async_observe_records_single_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer(question: str) -> str:
+                await asyncio.sleep(0)
+                return "ok"
+
+            self.assertEqual(asyncio.run(answer("hello")), "ok")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["name"], "answer")
+            self.assertEqual(event["id"], event["trace_id"])
+            self.assertIsNone(event["parent_id"])
+            self.assertEqual(event["status"], "success")
+
+    def test_nested_async_observe_records_span_under_same_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(name="inner_step")
+            async def inner() -> str:
+                await asyncio.sleep(0)
+                return "inner"
+
+            @observe()
+            async def outer() -> str:
+                return await inner()
+
+            self.assertEqual(asyncio.run(outer()), "inner")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_events = [event for event in events if event["type"] == "trace"]
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual(len(trace_events), 1)
+            self.assertEqual(len(span_events), 1)
+
+            trace_event = trace_events[0]
+            span_event = span_events[0]
+            self.assertEqual(span_event["name"], "inner_step")
+            self.assertEqual(span_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(span_event["parent_id"], trace_event["id"])
+            self.assertEqual(span_event["status"], "success")
+
+    def test_async_observe_records_error_and_reraises(self) -> None:
+        with temporary_workdir() as workdir:
+            secret_error = "provider failed api_key=sk-secret"
+
+            @observe()
+            async def boom() -> None:
+                await asyncio.sleep(0)
+                raise RuntimeError(secret_error)
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                asyncio.run(boom())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["status"], "error")
+            self.assertEqual(event["error"], "provider failed api_key=[redacted]")
+
+    def test_async_observe_captures_inputs_and_outputs(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            async def answer(question: str) -> dict[str, str]:
+                await asyncio.sleep(0)
+                return {"answer": question.upper()}
+
+            self.assertEqual(asyncio.run(answer("hello")), {"answer": "HELLO"})
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["input"], {"question": "hello"})
+            self.assertEqual(event["output"], {"answer": "HELLO"})
+
+    def test_gather_of_observed_coroutines_records_separate_traces(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def task(value: str) -> str:
+                # Yield control so the two gathered tasks interleave; if the
+                # contextvars leaked across tasks one would nest under the other.
+                await asyncio.sleep(0)
+                return value
+
+            async def main() -> tuple[str, str]:
+                return await asyncio.gather(task("a"), task("b"))
+
+            self.assertEqual(sorted(asyncio.run(main())), ["a", "b"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 2)
+            self.assertTrue(all(event["type"] == "trace" for event in events))
+            self.assertTrue(all(event["parent_id"] is None for event in events))
+            self.assertEqual(len({event["trace_id"] for event in events}), 2)
 
     def test_span_creates_nested_event(self) -> None:
         with temporary_workdir() as workdir:
