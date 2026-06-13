@@ -6,6 +6,7 @@ import os
 import tempfile
 import urllib.error
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.client import HTTPMessage
@@ -1410,6 +1411,27 @@ class SdkTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Invalid JSON"):
                 load_events(trace_path)
+
+    def test_concurrent_trace_writes_produce_valid_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True)
+            def answer(index: int) -> str:
+                score("thread_index", index)
+                return str(index)
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(answer, range(50)))
+
+            self.assertEqual(results, [str(index) for index in range(50)])
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw_lines = trace_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(raw_lines), 100)
+
+            events = load_events(trace_path)
+            self.assertEqual(len(events), 100)
+            self.assertEqual(sum(1 for event in events if event.type == "trace"), 50)
+            self.assertEqual(sum(1 for event in events if event.type == "score"), 50)
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:

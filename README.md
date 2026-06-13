@@ -49,6 +49,10 @@ Trace, span, tool call, generation, and score events are written as JSONL to:
 .bir/traces.jsonl
 ```
 
+Writes to the local trace file are serialized within the SDK process so
+multi-threaded sync applications keep the JSONL file line-delimited and
+parseable.
+
 ## Manual Trace Contexts
 
 Use `trace()` when your workflow is easier to wrap with a context manager than a

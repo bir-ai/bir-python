@@ -14,6 +14,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from types import TracebackType
 from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
@@ -176,6 +177,7 @@ class PromptRecord:
 
 
 _config = _Config()
+_write_lock = Lock()
 
 
 def configure(
@@ -1050,10 +1052,11 @@ def _service_metadata() -> dict[str, str] | None:
 
 
 def _write_event(event: dict[str, Any]) -> None:
-    _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
-    with _config.trace_path.open("a", encoding="utf-8") as trace_file:
-        trace_file.write(json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False))
-        trace_file.write("\n")
+    payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    with _write_lock:
+        _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with _config.trace_path.open("a", encoding="utf-8") as trace_file:
+            trace_file.write(payload)
 
 
 def _events_endpoint(server_url: str) -> str:
