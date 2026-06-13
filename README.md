@@ -86,14 +86,16 @@ To send local events to a running Bir server:
 from bir import send_events
 
 result = send_events("http://127.0.0.1:8000")
-print(result.accepted)
+print(result.accepted, result.attempted, result.skipped)
 ```
 
 `send_events()` posts each local JSONL event to `/v1/events`. It uses the Python
-standard library, reports the server's accepted event count, raises `RuntimeError`
-when the server rejects an event or cannot be reached, and does not remove local
-events after sending. Re-sending the same file is safe against the Bir server
-because duplicate event IDs are treated as already ingested.
+standard library, reports how many local events were attempted, how many were
+newly accepted, and how many were skipped by an idempotent server response,
+raises `RuntimeError` when the server rejects an event or cannot be reached, and
+does not remove local events after sending. Re-sending the same file is safe
+against the Bir server because duplicate event IDs are treated as already
+ingested.
 Complete traces are sent root-first so the server receives the trace event before
 its spans, tool calls, generations, and scores.
 

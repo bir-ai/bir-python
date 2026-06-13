@@ -122,6 +122,13 @@ class SendEventsResult:
 
     accepted: int
     event_ids: list[str]
+    attempted: int = 0
+
+    @property
+    def skipped(self) -> int:
+        """Return events the server did not newly accept, usually duplicates."""
+
+        return max(self.attempted - self.accepted, 0)
 
 
 @dataclass(frozen=True)
@@ -264,7 +271,7 @@ def send_events(
     events = _events_for_sending(path)
     endpoint = _events_endpoint(server_url)
     if not events:
-        return SendEventsResult(accepted=0, event_ids=[])
+        return SendEventsResult(accepted=0, event_ids=[], attempted=0)
 
     batch_result = _post_event_batch(f"{endpoint}/batch", [event.raw for event in events], timeout=timeout)
     if batch_result is not None:
@@ -278,7 +285,7 @@ def send_events(
         if event_accepted:
             event_ids.append(event.id)
 
-    return SendEventsResult(accepted=accepted, event_ids=event_ids)
+    return SendEventsResult(accepted=accepted, event_ids=event_ids, attempted=len(events))
 
 
 def _events_for_sending(path: str | Path | None = None) -> list[TraceEvent]:
@@ -1079,10 +1086,10 @@ def _post_event_batch(
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {body}")
-    return _batch_result_from_response(body)
+    return _batch_result_from_response(body, attempted=len(events))
 
 
-def _batch_result_from_response(body: str) -> SendEventsResult:
+def _batch_result_from_response(body: str, *, attempted: int) -> SendEventsResult:
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -1095,7 +1102,7 @@ def _batch_result_from_response(body: str) -> SendEventsResult:
         raise RuntimeError(f"bir server returned an invalid batch response: {body}")
     if not isinstance(event_ids, list) or not all(isinstance(event_id, str) for event_id in event_ids):
         raise RuntimeError(f"bir server returned an invalid batch response: {body}")
-    return SendEventsResult(accepted=accepted, event_ids=list(event_ids))
+    return SendEventsResult(accepted=accepted, event_ids=list(event_ids), attempted=attempted)
 
 
 def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> int:

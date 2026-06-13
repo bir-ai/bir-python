@@ -1210,6 +1210,8 @@ class SdkTests(unittest.TestCase):
 
             self.assertEqual(result.accepted, 2)
             self.assertEqual(len(result.event_ids), 2)
+            self.assertEqual(result.attempted, 2)
+            self.assertEqual(result.skipped, 0)
             self.assertEqual(posted_urls, ["http://server.test/v1/events/batch"])
             posted_events = posted_batches[0]
             posted_types = [event["type"] for event in posted_events]
@@ -1243,6 +1245,8 @@ class SdkTests(unittest.TestCase):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 5)
+            self.assertEqual(result.attempted, 5)
+            self.assertEqual(result.skipped, 0)
             posted_events = posted_batches[0]
             self.assertEqual(
                 [event["type"] for event in posted_events],
@@ -1283,6 +1287,8 @@ class SdkTests(unittest.TestCase):
             )
             self.assertEqual([event["type"] for event in posted_events], ["trace", "score"])
             self.assertEqual(result.event_ids, [event["id"] for event in posted_events])
+            self.assertEqual(result.attempted, 2)
+            self.assertEqual(result.skipped, 0)
 
     def test_send_events_makes_no_requests_when_there_are_no_events(self) -> None:
         with temporary_workdir():
@@ -1295,6 +1301,8 @@ class SdkTests(unittest.TestCase):
 
             self.assertEqual(result.accepted, 0)
             self.assertEqual(result.event_ids, [])
+            self.assertEqual(result.attempted, 0)
+            self.assertEqual(result.skipped, 0)
 
     def test_send_events_raises_when_server_rejects_batch(self) -> None:
         with temporary_workdir():
@@ -1348,6 +1356,8 @@ class SdkTests(unittest.TestCase):
 
             self.assertEqual(result.accepted, 0)
             self.assertEqual(result.event_ids, [])
+            self.assertEqual(result.attempted, 1)
+            self.assertEqual(result.skipped, 1)
 
     def test_send_events_fallback_uses_server_accepted_count(self) -> None:
         with temporary_workdir():
@@ -1368,6 +1378,8 @@ class SdkTests(unittest.TestCase):
 
             self.assertEqual(result.accepted, 0)
             self.assertEqual(result.event_ids, [])
+            self.assertEqual(result.attempted, 1)
+            self.assertEqual(result.skipped, 1)
 
     def test_load_events_rejects_invalid_jsonl(self) -> None:
         with temporary_workdir() as workdir:

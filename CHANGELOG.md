@@ -24,6 +24,7 @@ Initial local MVP SDK release.
 - Local JSONL trace storage at `.bir/traces.jsonl` by default.
 - `load_events()` and `load_traces()` helpers for reading local JSONL traces.
 - `send_events()` helper for posting local events to the Bir FastAPI ingestion server.
+- `SendEventsResult.attempted` and `SendEventsResult.skipped` for clearer upload summaries.
 - Opt-in input and output capture.
 - Best-effort redaction for common secret-like keys and text patterns.
 - `bir.evals` deterministic evaluators: `exact_match()`, `contains()`, `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`, `latency_under()`, `cost_under()`, `numeric_between()`, and `custom_evaluator()`.
