@@ -13,6 +13,7 @@ Initial local MVP SDK release.
 ### Added
 
 - `@observe()` decorator for sync Python functions.
+- `trace()` context manager for manually scoped root traces.
 - Nested `span()` context manager.
 - `generation()` context manager with optional model, usage, and user-provided cost fields.
 - `tool_call()` context manager for external function or tool usage.

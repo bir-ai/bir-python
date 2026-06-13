@@ -393,6 +393,12 @@ def span(name: str) -> _Span:
     return _Span(name)
 
 
+def trace(name: str, *, metadata: Mapping[str, Any] | None = None) -> _TraceContext:
+    """Create a trace root with a context manager."""
+
+    return _trace_context(name=name, metadata=metadata)
+
+
 def prompt(
     name: str,
     *,

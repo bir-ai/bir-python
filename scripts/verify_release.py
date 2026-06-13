@@ -174,7 +174,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
     smoke_test.write_text(
         textwrap.dedent(
             """
-            from bir import configure, generation, load_traces, observe, prompt, retrieval, score, span
+            from bir import configure, generation, load_traces, observe, prompt, retrieval, score, span, trace
             from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
 
             configure(capture_inputs=True, capture_outputs=True)
@@ -198,9 +198,15 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
                 return "ok"
 
             assert answer("hello") == "ok"
-            trace = load_traces()[0]
-            events = trace.events
+            recorded_trace = load_traces()[0]
+            events = recorded_trace.events
             assert [event.type for event in events] == ["trace", "span", "tool_call", "generation", "score"]
+
+            with trace("manual"):
+                score("manual_score", 1.0)
+            manual_trace = load_traces()[1]
+            assert manual_trace.name == "manual"
+            assert [event.type for event in manual_trace.events] == ["trace", "score"]
 
             retrieval_event = next(event for event in events if event.name == "vector_search")
             assert retrieval_event.metadata["kind"] == "retrieval"

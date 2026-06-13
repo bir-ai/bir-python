@@ -15,8 +15,8 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import bir
-from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call
-from bir._sdk import _reset_config_for_tests, _trace_context
+from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
+from bir._sdk import _reset_config_for_tests
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
@@ -112,6 +112,10 @@ class SdkTests(unittest.TestCase):
         self.assertIn("__version__", bir.__all__)
         self.assertIsInstance(bir.__version__, str)
         self.assertRegex(bir.__version__, r"^\d+\.\d+\.\d+")
+
+    def test_exposes_trace_context_manager(self) -> None:
+        self.assertIn("trace", bir.__all__)
+        self.assertIs(bir.trace, trace)
 
     def test_observe_creates_trace_event(self) -> None:
         with temporary_workdir() as workdir:
@@ -1523,11 +1527,32 @@ class SdkTests(unittest.TestCase):
         with temporary_workdir() as workdir:
             configure(service_name="rag-api")
 
-            with _trace_context(name="manual", metadata={"service": {"name": "override"}}):
+            with trace("manual", metadata={"service": {"name": "override"}}):
                 pass
 
             events = read_events(workdir / ".bir" / "traces.jsonl")
             self.assertEqual(events[0]["metadata"], {"service": {"name": "override"}})
+
+    def test_trace_context_manager_records_nested_events(self) -> None:
+        with temporary_workdir() as workdir:
+            with trace("manual_workflow", metadata={"kind": "manual"}):
+                with span("retrieve_context"):
+                    with generation("local.llm", model="demo") as gen:
+                        gen.set_output("ok")
+                score("helpfulness", 0.9)
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            span_event = next(event for event in events if event["type"] == "span")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            score_event = next(event for event in events if event["type"] == "score")
+
+            self.assertEqual(trace_event["name"], "manual_workflow")
+            self.assertEqual(trace_event["metadata"], {"kind": "manual"})
+            self.assertEqual(span_event["trace_id"], trace_event["id"])
+            self.assertEqual(span_event["parent_id"], trace_event["id"])
+            self.assertEqual(generation_event["parent_id"], span_event["id"])
+            self.assertEqual(score_event["parent_id"], trace_event["id"])
 
     def test_configure_rejects_invalid_service_metadata(self) -> None:
         with self.assertRaisesRegex(ValueError, "service_name"):

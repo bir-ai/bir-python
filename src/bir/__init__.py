@@ -18,6 +18,7 @@ from ._sdk import (
     send_events,
     span,
     tool_call,
+    trace,
 )
 
 try:
@@ -36,6 +37,7 @@ __all__ = [
     "load_traces",
     "send_events",
     "observe",
+    "trace",
     "prompt",
     "span",
     "generation",

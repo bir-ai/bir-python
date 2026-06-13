@@ -49,6 +49,22 @@ Trace, span, tool call, generation, and score events are written as JSONL to:
 .bir/traces.jsonl
 ```
 
+## Manual Trace Contexts
+
+Use `trace()` when your workflow is easier to wrap with a context manager than a
+decorator:
+
+```python
+from bir import generation, score, span, trace
+
+with trace("answer_question", metadata={"kind": "manual"}):
+    with span("draft_answer"):
+        with generation("local.llm", model="demo-model") as gen:
+            response = "ok"
+            gen.set_output(response)
+    score("helpfulness", 0.82)
+```
+
 ## Read Local Traces
 
 You can also read local traces back from the same file:
