@@ -135,8 +135,8 @@ the currency to `USD`; it does not calculate provider pricing automatically.
 
 Use `configure()` to tag traces with the service and environment that produced
 them. Both values are optional, must be non-empty strings, and are recorded on
-trace root events under `metadata.service` so traces from different deployments
-can be told apart later.
+trace root events under `metadata.service` so the server and dashboard can
+filter traces by service and environment.
 
 ```python
 from bir import configure
