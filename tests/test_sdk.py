@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import bir
 from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call
 from bir._sdk import _reset_config_for_tests, _trace_context
 
@@ -106,6 +107,11 @@ def load_contract_schema() -> dict[str, object]:
 class SdkTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
+
+    def test_exposes_a_version_string(self) -> None:
+        self.assertIn("__version__", bir.__all__)
+        self.assertIsInstance(bir.__version__, str)
+        self.assertRegex(bir.__version__, r"^\d+\.\d+\.\d+")
 
     def test_observe_creates_trace_event(self) -> None:
         with temporary_workdir() as workdir:

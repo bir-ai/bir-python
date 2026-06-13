@@ -1,5 +1,7 @@
 """Public API for the Bir Python SDK."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from ._sdk import (
     LoadedTrace,
     PromptRecord,
@@ -18,7 +20,13 @@ from ._sdk import (
     tool_call,
 )
 
+try:
+    __version__ = version("bir")
+except PackageNotFoundError:  # running from source (PYTHONPATH=src) without an install
+    __version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "TraceEvent",
     "LoadedTrace",
     "SendEventsResult",
