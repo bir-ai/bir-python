@@ -227,7 +227,9 @@ result = chain.invoke(
 Root chains become trace events, nested chains become spans, LLM/chat model
 callbacks become generation events, retrievers become retrieval tool calls, and
 tools become tool call events. Direct model calls without an active chain create
-a small implicit trace root.
+a small implicit trace root. The handler records token usage from common
+LangChain response shapes including `llm_output.token_usage`,
+`usage_metadata`, and `response_metadata.token_usage`.
 
 ## Local Evals And Experiments
 

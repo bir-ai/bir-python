@@ -338,18 +338,61 @@ def _set_generation_usage(context: Any, response: Any) -> None:
 
 
 def _token_usage(response: Any) -> Mapping[str, Any] | None:
-    llm_output = None
-    if isinstance(response, Mapping):
-        llm_output = response.get("llm_output")
-    else:
-        llm_output = getattr(response, "llm_output", None)
-
-    if not isinstance(llm_output, Mapping):
-        return None
-    token_usage = llm_output.get("token_usage") or llm_output.get("usage")
-    if isinstance(token_usage, Mapping):
-        return token_usage
+    for source in _token_usage_sources(response):
+        token_usage = _token_usage_from_source(source)
+        if token_usage is not None:
+            return token_usage
     return None
+
+
+def _token_usage_sources(response: Any) -> list[Any]:
+    sources = [response]
+    llm_output = _mapping_value(response, "llm_output")
+    if llm_output is not None:
+        sources.append(llm_output)
+
+    generations = _mapping_value(response, "generations")
+    if isinstance(generations, list):
+        for generation_group in generations:
+            group_items = generation_group if isinstance(generation_group, list) else [generation_group]
+            for generation_item in group_items:
+                sources.append(generation_item)
+                message = _mapping_value(generation_item, "message")
+                if message is not None:
+                    sources.append(message)
+    return sources
+
+
+def _token_usage_from_source(source: Any) -> Mapping[str, Any] | None:
+    for key in ("token_usage", "usage", "usage_metadata"):
+        value = _mapping_value(source, key)
+        if isinstance(value, Mapping):
+            return value
+
+    response_metadata = _mapping_value(source, "response_metadata")
+    if isinstance(response_metadata, Mapping):
+        for key in ("token_usage", "usage", "usage_metadata"):
+            value = response_metadata.get(key)
+            if isinstance(value, Mapping):
+                return value
+        if any(_numeric_token(response_metadata, key) is not None for key in _TOKEN_USAGE_KEYS):
+            return response_metadata
+    return None
+
+
+_TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "prompt_tokens",
+    "output_tokens",
+    "completion_tokens",
+    "total_tokens",
+)
+
+
+def _mapping_value(source: Any, key: str) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(key)
+    return getattr(source, key, None)
 
 
 def _numeric_token(usage: Mapping[str, Any], *keys: str) -> int | float | None:

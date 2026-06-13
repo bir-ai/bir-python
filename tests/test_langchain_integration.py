@@ -31,6 +31,22 @@ class FakeDocument:
         self.id = id
 
 
+class FakeMessage:
+    def __init__(
+        self,
+        *,
+        usage_metadata: dict[str, object] | None = None,
+        response_metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.usage_metadata = usage_metadata
+        self.response_metadata = response_metadata
+
+
+class FakeChatGeneration:
+    def __init__(self, message: FakeMessage) -> None:
+        self.message = message
+
+
 class LangChainIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -134,6 +150,62 @@ class LangChainIntegrationTests(unittest.TestCase):
             self.assertEqual(events[0].name, "local.llm")
             self.assertEqual(events[0].input, {"prompts": ["Say hello"]})
             self.assertEqual(events[1].metadata["kind"], "implicit_root")
+
+    def test_callback_handler_extracts_chat_message_usage_metadata(self) -> None:
+        with temporary_workdir():
+            handler = BirCallbackHandler()
+
+            handler.on_llm_start({"name": "chat.model"}, ["Say hello"], run_id="llm-usage")
+            handler.on_llm_end(
+                {
+                    "generations": [
+                        [
+                            FakeChatGeneration(
+                                FakeMessage(
+                                    usage_metadata={
+                                        "input_tokens": 9,
+                                        "output_tokens": 4,
+                                        "total_tokens": 13,
+                                    }
+                                )
+                            )
+                        ]
+                    ]
+                },
+                run_id="llm-usage",
+            )
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.usage, {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13})
+
+    def test_callback_handler_extracts_response_metadata_token_usage(self) -> None:
+        with temporary_workdir():
+            handler = BirCallbackHandler()
+
+            handler.on_llm_start({"name": "chat.model"}, ["Say hello"], run_id="llm-response-metadata")
+            handler.on_llm_end(
+                {
+                    "generations": [
+                        [
+                            {
+                                "message": FakeMessage(
+                                    response_metadata={
+                                        "token_usage": {
+                                            "prompt_tokens": 11,
+                                            "completion_tokens": 5,
+                                            "total_tokens": 16,
+                                        }
+                                    }
+                                )
+                            }
+                        ]
+                    ]
+                },
+                run_id="llm-response-metadata",
+            )
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 5, "total_tokens": 16})
 
 
 if __name__ == "__main__":
