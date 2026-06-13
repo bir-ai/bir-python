@@ -1,0 +1,27 @@
+[
+  {
+    "name": "authorization-bearer-header",
+    "input": "Authorization: Bearer abc123def456",
+    "expected": "Authorization: Bearer [redacted]"
+  },
+  {
+    "name": "api-key-assignment",
+    "input": "api_key=supersecretvalue",
+    "expected": "api_key=[redacted]"
+  },
+  {
+    "name": "openai-style-sk-token",
+    "input": "sk-ABCD1234efgh5678",
+    "expected": "[redacted]"
+  },
+  {
+    "name": "password-substring",
+    "input": "connect using password=hunter2 and retry",
+    "expected": "connect using password=[redacted] and retry"
+  },
+  {
+    "name": "nested-secret-key",
+    "input": { "api_key": "abc" },
+    "expected": { "api_key": "[redacted]" }
+  }
+]
