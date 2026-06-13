@@ -385,6 +385,50 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "score value must be finite"):
                 answer()
 
+    def test_score_records_redacted_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                score(
+                    "faithfulness",
+                    0.4,
+                    metadata={"reason": "answer cites no context", "api_key": "sk-secret"},
+                )
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            score_event = next(event for event in events if event["type"] == "score")
+            self.assertEqual(score_event["value"], 0.4)
+            self.assertEqual(
+                score_event["metadata"],
+                {"reason": "answer cites no context", "api_key": "[redacted]"},
+            )
+
+    def test_score_without_metadata_keeps_empty_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                score("helpfulness", 0.9)
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            score_event = next(event for event in events if event["type"] == "score")
+            self.assertEqual(score_event["metadata"], {})
+
+    def test_score_rejects_non_mapping_metadata(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                score("helpfulness", 0.9, metadata=["not", "a", "mapping"])  # type: ignore[arg-type]
+
+            with self.assertRaisesRegex(TypeError, "score metadata must be a mapping"):
+                answer()
+
     def test_generation_records_llm_call_event(self) -> None:
         with temporary_workdir() as workdir:
 

@@ -493,10 +493,17 @@ def retrieval(
     )
 
 
-def score(name: str, value: int | float) -> None:
-    """Attach a score event to the current trace."""
+def score(name: str, value: int | float, *, metadata: Mapping[str, Any] | None = None) -> None:
+    """Attach a score event to the current trace.
+
+    Optional ``metadata`` (for example an evaluator's reasoning or threshold) is
+    redacted with the same rules as captured input/output and stored on the
+    score event so it can be inspected in the dashboard later.
+    """
 
     _validate_event_name(name, "score name")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        raise TypeError("bir score metadata must be a mapping")
     trace_id = _current_trace_id.get()
     parent_id = _current_parent_id.get()
     if trace_id is None or parent_id is None:
@@ -515,6 +522,7 @@ def score(name: str, value: int | float) -> None:
             end_time=timestamp,
             status="success",
             error=None,
+            metadata=_safe_capture(dict(metadata or {})),
             value=score_value,
         )
     )

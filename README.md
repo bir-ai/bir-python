@@ -100,8 +100,11 @@ configure(capture_inputs=True, capture_outputs=True)
 
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
-values are truncated. `score()` requires a finite numeric value. Generation token
-usage and generation cost require non-negative finite numeric values.
+values are truncated. `score()` requires a finite numeric value and accepts
+optional `metadata` (for example `score("faithfulness", 0.4, metadata={"reason":
+"answer cites no context"})`) that is redacted with the same rules before it is
+written to the score event. Generation token usage and generation cost require
+non-negative finite numeric values.
 
 Generation cost is user-provided. Bir records explicit cost values and defaults
 the currency to `USD`; it does not calculate provider pricing automatically.

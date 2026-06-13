@@ -19,7 +19,7 @@ Initial local MVP SDK release.
 - `retrieval()` context manager for RAG lookups using the existing tool call event contract.
 - `prompt()` helper for attaching prompt name, version, and optional prompt payload metadata to generation events.
 - `BirCallbackHandler` for dependency-free LangChain callback tracing.
-- `score()` helper for attaching evaluation scores to active traces.
+- `score()` helper for attaching evaluation scores to active traces, with optional redacted `metadata` for evaluator reasoning or thresholds.
 - Local JSONL trace storage at `.bir/traces.jsonl` by default.
 - `load_events()` and `load_traces()` helpers for reading local JSONL traces.
 - `send_events()` helper for posting local events to the Bir FastAPI ingestion server.
