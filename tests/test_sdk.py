@@ -1042,6 +1042,56 @@ class SdkTests(unittest.TestCase):
             },
         )
 
+    def test_load_events_parses_server_shape_with_explicit_optional_nulls(self) -> None:
+        # The server persists every event with model_dump(exclude_none=False), so
+        # optional fields the SDK omits are written as explicit JSON nulls. The SDK
+        # reader must keep parsing that canonical persisted shape so it cannot drift
+        # away from the writer. See docs/IMPLEMENTATION_ROADMAP.md Stage 2.
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "server-shape.jsonl"
+            base = {
+                "schema_version": "1.0",
+                "trace_id": "trace-1",
+                "parent_id": "trace-1",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T00:00:01+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+                # exclude_none=False spells unset optional fields as explicit nulls.
+                "model": None,
+                "usage": None,
+                "cost": None,
+                "currency": None,
+            }
+            generation_event = dict(base, id="generation-1", name="local.llm", type="generation", value=None)
+            score_event = dict(base, id="score-1", name="helpfulness", type="score", value=0.82)
+            trace_path.write_text(
+                json.dumps(generation_event) + "\n" + json.dumps(score_event) + "\n",
+                encoding="utf-8",
+            )
+
+            events = load_events(trace_path)
+
+            self.assertEqual([event.type for event in events], ["generation", "score"])
+            generation_loaded = next(event for event in events if event.type == "generation")
+            self.assertIsNone(generation_loaded.value)
+            self.assertIsNone(generation_loaded.model)
+            self.assertIsNone(generation_loaded.usage)
+            self.assertIsNone(generation_loaded.cost)
+            self.assertIsNone(generation_loaded.currency)
+            score_loaded = next(event for event in events if event.type == "score")
+            self.assertEqual(score_loaded.value, 0.82)
+            self.assertIsNone(score_loaded.model)
+            self.assertIsNone(score_loaded.usage)
+            self.assertIsNone(score_loaded.cost)
+            self.assertIsNone(score_loaded.currency)
+            # The explicit nulls survive on the raw payload, so a re-send keeps them.
+            self.assertIsNone(score_loaded.raw["usage"])
+            self.assertIsNone(score_loaded.raw["model"])
+
     def test_load_events_rejects_invalid_schema(self) -> None:
         with temporary_workdir() as workdir:
             valid_event = {
