@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import math
+import random
 import re
 import urllib.error
 import urllib.request
@@ -57,6 +58,9 @@ _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", d
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 _current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
 _current_capture_outputs: ContextVar[bool | None] = ContextVar("bir_current_capture_outputs", default=None)
+# Set once at trace-root creation so every descendant event of a sampled-out
+# trace is skipped. False means "keep this trace"; the default keeps everything.
+_current_trace_dropped: ContextVar[bool] = ContextVar("bir_current_trace_dropped", default=False)
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,7 @@ class _Config:
     capture_outputs: bool = False
     service_name: str | None = None
     environment: str | None = None
+    sample_rate: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -187,11 +192,17 @@ def configure(
     capture_outputs: bool | None = None,
     service_name: str | None = None,
     environment: str | None = None,
+    sample_rate: float | None = None,
 ) -> None:
     """Configure local SDK behavior.
 
     ``service_name`` and ``environment`` are recorded on trace root events
     under ``metadata.service`` so traces can be filtered by deployment later.
+
+    ``sample_rate`` is the probability (``0.0`` to ``1.0``) that a trace is
+    recorded. It is decided once per trace root; when a trace is sampled out the
+    function still runs and still raises, but the trace and every event under it
+    write nothing. The default ``1.0`` records every trace.
     """
 
     global _config
@@ -207,6 +218,8 @@ def configure(
         updates["service_name"] = _validate_event_name(service_name, "service_name")
     if environment is not None:
         updates["environment"] = _validate_event_name(environment, "environment")
+    if sample_rate is not None:
+        updates["sample_rate"] = _validate_sample_rate(sample_rate)
 
     _config = replace(_config, **updates)
 
@@ -368,10 +381,12 @@ class _ObserveState:
     start_time: str
     capture_inputs: bool
     capture_outputs: bool
+    dropped: bool
     trace_token: Token[str | None]
     parent_token: Token[str | None]
     capture_inputs_token: Token[bool | None]
     capture_outputs_token: Token[bool | None]
+    dropped_token: Token[bool]
 
 
 def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) -> _ObserveState:
@@ -380,7 +395,8 @@ def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) ->
     Both the sync and async wrappers call this so the trace decision and
     contextvar bookkeeping live in one place. ContextVars are task-local and each
     asyncio task runs with a copied context, so concurrent observed coroutines
-    stay isolated.
+    stay isolated. A new trace root also rolls the sampling decision once here so
+    that every nested span inherits it instead of re-rolling.
     """
 
     active_trace_id = _current_trace_id.get()
@@ -390,10 +406,13 @@ def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) ->
         trace_id = active_trace_id
         parent_id = active_parent_id
         event_type = "span"
+        # Inherit the root's decision so a span never re-rolls sampling.
+        dropped = _current_trace_dropped.get()
     else:
         trace_id = event_id
         parent_id = None
         event_type = "trace"
+        dropped = _should_drop_trace()
     start_time = _now()
     capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
     capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
@@ -405,10 +424,12 @@ def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) ->
         start_time=start_time,
         capture_inputs=capture_inputs_for_call,
         capture_outputs=capture_outputs_for_call,
+        dropped=dropped,
         trace_token=_current_trace_id.set(trace_id),
         parent_token=_current_parent_id.set(event_id),
         capture_inputs_token=_current_capture_inputs.set(capture_inputs_for_call),
         capture_outputs_token=_current_capture_outputs.set(capture_outputs_for_call),
+        dropped_token=_current_trace_dropped.set(dropped),
     )
 
 
@@ -421,7 +442,15 @@ def _finish_observe_success(
     """Reset the call contextvars and write the success event for an observation."""
 
     end_time = _now()
-    _reset_context(state.trace_token, state.parent_token, state.capture_inputs_token, state.capture_outputs_token)
+    _reset_context(
+        state.trace_token,
+        state.parent_token,
+        state.capture_inputs_token,
+        state.capture_outputs_token,
+        state.dropped_token,
+    )
+    if state.dropped:
+        return
     output_payload = _safe_capture(result) if state.capture_outputs else None
     _write_event(
         _event(
@@ -453,7 +482,15 @@ def _finish_observe_error(
     """
 
     end_time = _now()
-    _reset_context(state.trace_token, state.parent_token, state.capture_inputs_token, state.capture_outputs_token)
+    _reset_context(
+        state.trace_token,
+        state.parent_token,
+        state.capture_inputs_token,
+        state.capture_outputs_token,
+        state.dropped_token,
+    )
+    if state.dropped:
+        return
     event = _event(
         event_id=state.event_id,
         trace_id=state.trace_id,
@@ -692,18 +729,22 @@ class _TraceContext:
         self.metadata = metadata
         self.id: str | None = None
         self.start_time: str | None = None
+        self._dropped = False
         self._trace_token: Token[str | None] | None = None
         self._parent_token: Token[str | None] | None = None
         self._capture_inputs_token: Token[bool | None] | None = None
         self._capture_outputs_token: Token[bool | None] | None = None
+        self._dropped_token: Token[bool] | None = None
 
     def __enter__(self) -> _TraceContext:
         self.id = _new_id()
         self.start_time = _now()
+        self._dropped = _should_drop_trace()
         self._trace_token = _current_trace_id.set(self.id)
         self._parent_token = _current_parent_id.set(self.id)
         self._capture_inputs_token = _current_capture_inputs.set(_config.capture_inputs)
         self._capture_outputs_token = _current_capture_outputs.set(_config.capture_outputs)
+        self._dropped_token = _current_trace_dropped.set(self._dropped)
         return self
 
     def __exit__(
@@ -717,6 +758,9 @@ class _TraceContext:
 
         if self.id is None or self.start_time is None:
             raise RuntimeError("bir trace context exited before it was entered")
+
+        if self._dropped:
+            return False
 
         event = _event(
             event_id=self.id,
@@ -739,6 +783,8 @@ class _TraceContext:
         return False
 
     def _reset(self) -> None:
+        if self._dropped_token is not None:
+            _current_trace_dropped.reset(self._dropped_token)
         if self._capture_outputs_token is not None:
             _current_capture_outputs.reset(self._capture_outputs_token)
         if self._capture_inputs_token is not None:
@@ -1144,6 +1190,12 @@ def _service_metadata() -> dict[str, str] | None:
 
 
 def _write_event(event: dict[str, Any]) -> None:
+    # Child events (spans, generations, tool calls, scores) run while the root's
+    # contextvar is still active, so dropping them is centralized here. Trace
+    # roots reset their contextvars before writing, so they check their own
+    # stored decision instead and never reach this guard while dropped.
+    if _current_trace_dropped.get():
+        return
     payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     with _write_lock:
         _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1421,6 +1473,22 @@ def _should_capture(override: bool | None, target: str) -> bool:
     return _config.capture_outputs
 
 
+def _should_drop_trace() -> bool:
+    """Decide whether the trace starting now should be sampled out.
+
+    ``sample_rate`` is the probability of keeping a trace, so the deterministic
+    edges (``1.0`` keeps everything, ``0.0`` drops everything) never touch the
+    random generator. Only partial rates draw from ``random.random()``.
+    """
+
+    sample_rate = _config.sample_rate
+    if sample_rate >= 1.0:
+        return False
+    if sample_rate <= 0.0:
+        return True
+    return random.random() >= sample_rate
+
+
 def _capture_call_input(
     signature: inspect.Signature,
     args: tuple[Any, ...],
@@ -1534,6 +1602,13 @@ def _validate_non_negative_number(value: Any, field: str) -> int | float:
     return numeric_value
 
 
+def _validate_sample_rate(value: Any) -> float:
+    numeric_value = _validate_number(value, "sample_rate")
+    if numeric_value < 0.0 or numeric_value > 1.0:
+        raise ValueError("bir sample_rate must be between 0.0 and 1.0")
+    return float(numeric_value)
+
+
 def _validate_non_negative_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"bir {field} must be an int")
@@ -1568,7 +1643,9 @@ def _reset_context(
     parent_token: Token[str | None],
     capture_inputs_token: Token[bool | None],
     capture_outputs_token: Token[bool | None],
+    dropped_token: Token[bool],
 ) -> None:
+    _current_trace_dropped.reset(dropped_token)
     _current_capture_outputs.reset(capture_outputs_token)
     _current_capture_inputs.reset(capture_inputs_token)
     _current_parent_id.reset(parent_token)

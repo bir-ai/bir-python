@@ -2076,6 +2076,122 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(event["output"], {"not_a_number": "nan", "bad": "<unrepresentable BadRepr>"})
             self.assertIn("[max_depth]", raw_trace_file)
 
+    def test_sample_rate_zero_drops_entire_trace_workflow(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    with tool_call("search_docs", input={"query": question}) as tool:
+                        tool.set_output(["doc-1"])
+                    with retrieval("vector_search", query=question) as result:
+                        result.add_document(id="doc-1")
+                with generation("local.llm", model="demo") as gen:
+                    gen.set_output("ok")
+                score("helpfulness", 0.9)
+                return "ok"
+
+            # The function still runs and returns; only the writes are skipped.
+            self.assertEqual(answer("hello"), "ok")
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_sample_rate_zero_drops_span_and_score_inside_trace_context(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            with trace("manual_workflow"):
+                with span("retrieve_context"):
+                    score("helpfulness", 0.9)
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_sample_rate_zero_still_runs_and_reraises_user_exception(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            @observe()
+            def fail() -> None:
+                with span("explode"):
+                    raise ValueError("boom")
+
+            with self.assertRaisesRegex(ValueError, "boom"):
+                fail()
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_sample_rate_zero_drops_async_observe(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            @observe()
+            async def answer(question: str) -> str:
+                await asyncio.sleep(0)
+                async with span("retrieve_context"):
+                    score("helpfulness", 0.9)
+                return "ok"
+
+            self.assertEqual(asyncio.run(answer("hello")), "ok")
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_sample_rate_one_records_full_workflow(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=1.0)
+
+            @observe()
+            def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    with tool_call("search_docs") as tool:
+                        tool.set_output(["doc-1"])
+                with generation("local.llm", model="demo") as gen:
+                    gen.set_output("ok")
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(
+                sorted(str(event["type"]) for event in events),
+                ["generation", "score", "span", "tool_call", "trace"],
+            )
+
+    def test_sample_rate_partial_decision_is_deterministic_when_seeded(self) -> None:
+        with temporary_workdir():
+            configure(sample_rate=0.5)
+
+            @observe()
+            def answer(index: int) -> int:
+                return index
+
+            # random.random() >= sample_rate drops the trace, so a fixed draw
+            # sequence makes the per-trace decision fully deterministic.
+            with patch("bir._sdk.random.random", side_effect=[0.9, 0.1, 0.5, 0.0]):
+                for index in range(4):
+                    self.assertEqual(answer(index), index)
+
+            # 0.9 and 0.5 are dropped (>= 0.5); 0.1 and 0.0 are kept.
+            traces = load_traces()
+            self.assertEqual(len(traces), 2)
+
+    def test_configure_rejects_invalid_sample_rate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "sample_rate"):
+            configure(sample_rate=-0.1)
+        with self.assertRaisesRegex(ValueError, "sample_rate"):
+            configure(sample_rate=1.5)
+        with self.assertRaisesRegex(ValueError, "sample_rate"):
+            configure(sample_rate=float("nan"))
+        with self.assertRaisesRegex(TypeError, "sample_rate"):
+            configure(sample_rate=cast(Any, "high"))
+        with self.assertRaisesRegex(TypeError, "sample_rate"):
+            configure(sample_rate=cast(Any, True))
+
 
 if __name__ == "__main__":
     unittest.main()

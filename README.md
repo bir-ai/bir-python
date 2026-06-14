@@ -144,6 +144,23 @@ from bir import configure
 configure(service_name="rag-api", environment="production")
 ```
 
+## Sampling
+
+Use `configure(sample_rate=...)` to keep local trace volume bounded under load.
+`sample_rate` is the probability (`0.0` to `1.0`) that a trace is recorded and
+defaults to `1.0`, which records every trace. The decision is made once per
+trace root and inherited by every event under it, so a sampled-out trace and all
+of its spans, generations, tool calls, retrievals, and scores write nothing.
+
+Sampling never changes control flow: a sampled-out function still runs and still
+raises its own exceptions; only the local JSONL writes are skipped.
+
+```python
+from bir import configure
+
+configure(sample_rate=0.1)  # record about 10% of traces
+```
+
 ## Retrieval
 
 Use `retrieval()` to record RAG lookups with the existing `tool_call` event
