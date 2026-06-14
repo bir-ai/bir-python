@@ -501,6 +501,178 @@ class SdkTests(unittest.TestCase):
             # Each span belongs to its own task's trace, with no cross-task leakage.
             self.assertEqual(len({event["trace_id"] for event in span_events}), 2)
 
+    def test_async_with_generation_records_same_generation_event_as_sync(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with generation("local.llm", model="demo", capture_output=True) as gen:
+                    await asyncio.sleep(0)
+                    gen.set_output("ok")
+                    gen.set_usage(input_tokens=1, output_tokens=2)
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(generation_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(generation_event["parent_id"], trace_event["id"])
+            self.assertEqual(generation_event["name"], "local.llm")
+            self.assertEqual(generation_event["model"], "demo")
+            self.assertEqual(generation_event["output"], "ok")
+            self.assertEqual(
+                generation_event["usage"],
+                {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            )
+            self.assertEqual(generation_event["status"], "success")
+            self.assertIsNone(generation_event["error"])
+
+    def test_async_with_generation_records_error_status(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def fail() -> None:
+                async with generation("openai.chat"):
+                    await asyncio.sleep(0)
+                    raise RuntimeError("provider failed")
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                asyncio.run(fail())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(generation_event["status"], "error")
+            self.assertEqual(generation_event["error"], "provider failed")
+            self.assertEqual(trace_event["status"], "error")
+
+    def test_async_with_tool_call_records_same_tool_call_event_as_sync(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with tool_call("search_docs", capture_output=True) as tool:
+                    await asyncio.sleep(0)
+                    tool.set_output(["doc-1"])
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(tool_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(tool_event["parent_id"], trace_event["id"])
+            self.assertEqual(tool_event["name"], "search_docs")
+            self.assertEqual(tool_event["output"], ["doc-1"])
+            self.assertEqual(tool_event["status"], "success")
+            self.assertIsNone(tool_event["error"])
+
+    def test_async_with_tool_call_records_error_status(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def fail() -> None:
+                async with tool_call("search_docs"):
+                    await asyncio.sleep(0)
+                    raise LookupError("search failed")
+
+            with self.assertRaisesRegex(LookupError, "search failed"):
+                asyncio.run(fail())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(tool_event["status"], "error")
+            self.assertEqual(tool_event["error"], "search failed")
+            self.assertEqual(trace_event["status"], "error")
+
+    def test_async_with_retrieval_records_same_tool_call_shape_as_sync(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with retrieval("vector_search", query="hello", capture_output=True) as result:
+                    await asyncio.sleep(0)
+                    result.add_document(id="doc-1", rank=1, score=0.5)
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(retrieval_event["type"], "tool_call")
+            self.assertEqual(retrieval_event["trace_id"], trace_event["trace_id"])
+            self.assertEqual(retrieval_event["parent_id"], trace_event["id"])
+            self.assertEqual(retrieval_event["metadata"], {"kind": "retrieval"})
+            self.assertEqual(
+                retrieval_event["output"],
+                {"documents": [{"id": "doc-1", "rank": 1, "score": 0.5}]},
+            )
+            self.assertEqual(retrieval_event["status"], "success")
+            self.assertIsNone(retrieval_event["error"])
+
+    def test_async_with_retrieval_records_error_status(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def fail() -> None:
+                async with retrieval("vector_search", query="hello"):
+                    await asyncio.sleep(0)
+                    raise LookupError("retrieval failed")
+
+            with self.assertRaisesRegex(LookupError, "retrieval failed"):
+                asyncio.run(fail())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(retrieval_event["type"], "tool_call")
+            self.assertEqual(retrieval_event["status"], "error")
+            self.assertEqual(retrieval_event["error"], "retrieval failed")
+            self.assertEqual(trace_event["status"], "error")
+
+    def test_async_with_trace_records_same_trace_event_as_sync(self) -> None:
+        with temporary_workdir() as workdir:
+
+            async def workflow() -> None:
+                async with trace("manual_workflow", metadata={"kind": "manual"}):
+                    await asyncio.sleep(0)
+                    async with span("retrieve_context"):
+                        score("helpfulness", 0.9)
+
+            asyncio.run(workflow())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            span_event = next(event for event in events if event["type"] == "span")
+            score_event = next(event for event in events if event["type"] == "score")
+            self.assertEqual(trace_event["name"], "manual_workflow")
+            self.assertEqual(trace_event["id"], trace_event["trace_id"])
+            self.assertIsNone(trace_event["parent_id"])
+            self.assertEqual(trace_event["metadata"], {"kind": "manual"})
+            self.assertEqual(trace_event["status"], "success")
+            self.assertIsNone(trace_event["error"])
+            self.assertEqual(span_event["trace_id"], trace_event["id"])
+            self.assertEqual(span_event["parent_id"], trace_event["id"])
+            self.assertEqual(score_event["parent_id"], span_event["id"])
+
+    def test_async_with_trace_records_error_status(self) -> None:
+        with temporary_workdir() as workdir:
+
+            async def workflow() -> None:
+                async with trace("manual_workflow"):
+                    await asyncio.sleep(0)
+                    raise RuntimeError("workflow failed")
+
+            with self.assertRaisesRegex(RuntimeError, "workflow failed"):
+                asyncio.run(workflow())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(trace_event["status"], "error")
+            self.assertEqual(trace_event["error"], "workflow failed")
+
     def test_score_records_score_event(self) -> None:
         with temporary_workdir() as workdir:
 

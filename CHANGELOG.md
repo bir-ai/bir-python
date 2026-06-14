@@ -18,6 +18,7 @@ Initial local MVP SDK release.
 - `generation()` context manager with optional model, usage, and user-provided cost fields.
 - `tool_call()` context manager for external function or tool usage.
 - `retrieval()` context manager for RAG lookups using the existing tool call event contract.
+- `async with` support for the `generation()`, `tool_call()`, `retrieval()`, and `trace()` context managers, matching `span()` and recording the same events as their sync `with` form.
 - `prompt()` helper for attaching prompt name, version, and optional prompt payload metadata to generation events.
 - `BirCallbackHandler` for dependency-free LangChain callback tracing.
 - LangChain token usage extraction from common `usage_metadata` and `response_metadata` response shapes.
@@ -37,6 +38,6 @@ Initial local MVP SDK release.
 
 ### Notes
 
-- `@observe()` traces coroutine functions; async variants of the `span()`, `generation()`, and `tool_call()` context managers are a planned follow-up. They already work as sync calls inside async functions.
+- `@observe()` traces coroutine functions, and the `span()`, `generation()`, `tool_call()`, `retrieval()`, and `trace()` context managers all support `async with`, producing the same events on the sync and async paths.
 - Server-side ingestion and dashboard viewing are separate local MVP components.
 - Cost values are explicit user-provided values; Bir does not calculate provider pricing.

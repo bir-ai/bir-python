@@ -782,6 +782,21 @@ class _TraceContext:
             raise
         return False
 
+    async def __aenter__(self) -> _TraceContext:
+        # Delegate to the sync enter so one object works as both ``with trace(...)``
+        # and ``async with trace(...)``. The trace and parent_id contextvars are set
+        # here with no intervening await, so each asyncio task keeps its own values and
+        # concurrent traces stay isolated.
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        return self.__exit__(exc_type, exc, traceback)
+
     def _reset(self) -> None:
         if self._dropped_token is not None:
             _current_trace_dropped.reset(self._dropped_token)
@@ -949,6 +964,21 @@ class _Generation:
             raise
         return False
 
+    async def __aenter__(self) -> _Generation:
+        # Delegate to the sync enter so one object works as both ``with generation(...)``
+        # and ``async with generation(...)``. The parent_id contextvar is set here with no
+        # intervening await, so each asyncio task keeps its own value and concurrent
+        # generations stay isolated.
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        return self.__exit__(exc_type, exc, traceback)
+
     def set_output(self, output: Any) -> None:
         self.output = output
 
@@ -1069,6 +1099,21 @@ class _ToolCall:
             raise
         return False
 
+    async def __aenter__(self) -> _ToolCall:
+        # Delegate to the sync enter so one object works as both ``with tool_call(...)``
+        # and ``async with tool_call(...)``. The parent_id contextvar is set here with no
+        # intervening await, so each asyncio task keeps its own value and concurrent
+        # tool calls stay isolated.
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        return self.__exit__(exc_type, exc, traceback)
+
     def set_output(self, output: Any) -> None:
         self.output = output
 
@@ -1096,6 +1141,12 @@ class _Retrieval(_ToolCall):
 
     def __enter__(self) -> _Retrieval:
         super().__enter__()
+        return self
+
+    async def __aenter__(self) -> _Retrieval:
+        # Override the inherited tool-call ``__aenter__`` only to keep the static
+        # return type ``_Retrieval``; the sync delegation it wraps is unchanged.
+        await super().__aenter__()
         return self
 
     def add_document(
