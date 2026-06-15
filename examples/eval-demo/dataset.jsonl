@@ -1,0 +1,5 @@
+{"id": "trace", "input": {"question": "What is a trace?"}, "expected": "A trace is one full LLM workflow execution recorded by Bir.", "metadata": {"topic": "concepts"}}
+{"id": "span", "input": {"question": "What is a span?"}, "expected": "A span is a nested operation inside a Bir trace.", "metadata": {"topic": "concepts"}}
+{"id": "score", "input": {"question": "What is an eval score?"}, "expected": "An eval score is a quality or safety metric attached to a Bir trace.", "metadata": {"topic": "concepts"}}
+{"id": "generation", "input": {"question": "What does a generation capture?"}, "expected": "A generation captures a single LLM call.", "metadata": {"topic": "concepts"}}
+{"id": "pricing", "input": {"question": "How much does Bir cost?"}, "expected": "Bir is source-available under the FSL-1.1-ALv2 license.", "metadata": {"topic": "licensing"}}

@@ -10,6 +10,8 @@ Only the fully offline demos are exercised here:
 * ``examples/openai-demo/demo.py`` is simulated end to end (no network).
 * ``examples/langchain-demo/demo.py`` drives the dependency-free
   ``BirCallbackHandler`` through a LangChain-shaped callback lifecycle.
+* ``examples/eval-demo/demo.py`` runs a deterministic local experiment over a
+  small JSONL dataset (no network).
 
 ``examples/ollama-demo/demo.py`` is intentionally excluded: it makes real HTTP
 calls to a live Ollama model server on 127.0.0.1:11434, which is not available
@@ -26,6 +28,7 @@ from types import ModuleType
 import pytest
 
 import bir
+from bir import evals
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
@@ -102,3 +105,34 @@ def test_langchain_demo_records_offline_trace(tmp_path: Path) -> None:
         event.type == "tool_call" and event.metadata.get("kind") == "retrieval"
         for event in recorded.events
     )
+
+
+def test_eval_demo_runs_offline_experiment(tmp_path: Path) -> None:
+    """The eval demo runs a deterministic experiment and persists scored results."""
+
+    module = _load_demo("eval-demo", "bir_example_eval_demo")
+    experiment_path = tmp_path / "faq-eval.jsonl"
+
+    # Use the shipped dataset; redirect output into tmp_path to stay hermetic.
+    result = module.run_eval(experiment_path=experiment_path)
+
+    # Every dataset example runs without error.
+    assert result.status == "success"
+    assert len(result.results) == 5
+    assert all(example_result.status == "success" for example_result in result.results)
+
+    # Both built-in evaluators score every example; on the shipped dataset the
+    # task is exactly right 3/5 times but mentions the product 4/5 times.
+    assert set(result.aggregate_scores) == {"exact_match", "contains"}
+    assert result.aggregate_scores["exact_match"] == pytest.approx(0.6)
+    assert result.aggregate_scores["contains"] == pytest.approx(0.8)
+
+    # Results and the aggregate summary persist and reload cleanly.
+    reloaded = evals.load_experiment(experiment_path)
+    assert reloaded.id == result.id
+    assert len(reloaded.results) == 5
+
+    summary = evals.load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+    assert summary.example_count == 5
+    assert summary.error_count == 0
+    assert summary.aggregate_scores["exact_match"] == pytest.approx(0.6)
