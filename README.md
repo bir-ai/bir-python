@@ -93,9 +93,11 @@ result = send_events("http://127.0.0.1:8000")
 print(result.accepted, result.attempted, result.skipped)
 ```
 
-`send_events()` posts each local JSONL event to `/v1/events`. It uses the Python
-standard library, reports how many local events were attempted, how many were
-newly accepted, and how many were skipped by an idempotent server response,
+`send_events()` posts local JSONL events to the Bir server, batching them into a
+single request when the server supports it and otherwise posting them to
+`/v1/events` one at a time. It uses the Python standard library, reports how many
+local events were attempted, how many were newly accepted, and how many were
+skipped by an idempotent server response,
 raises `RuntimeError` when the server rejects an event or cannot be reached, and
 does not remove local events after sending. Re-sending the same file is safe
 against the Bir server because duplicate event IDs are treated as already

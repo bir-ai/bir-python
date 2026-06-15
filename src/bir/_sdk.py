@@ -657,34 +657,6 @@ def score(name: str, value: int | float, *, metadata: Mapping[str, Any] | None =
     )
 
 
-def _record_trace_event(
-    *,
-    name: str,
-    start_time: str,
-    end_time: str,
-    status: str,
-    metadata: Mapping[str, Any] | None = None,
-    error: str | None = None,
-) -> str:
-    _validate_event_name(name, "trace name")
-    trace_id = _new_id()
-    _write_event(
-        _event(
-            event_id=trace_id,
-            trace_id=trace_id,
-            parent_id=None,
-            name=name,
-            event_type="trace",
-            start_time=start_time,
-            end_time=end_time,
-            status=status,
-            error=_redact_secret_text(error) if error is not None else None,
-            metadata=_safe_capture(dict(metadata or {})),
-        )
-    )
-    return trace_id
-
-
 def _trace_context(
     *,
     name: str,
