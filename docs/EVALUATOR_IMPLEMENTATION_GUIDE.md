@@ -36,6 +36,8 @@ Implemented SDK pieces:
 - `field_contains()`
 - `numeric_between(..., field="path")`
 - `custom_evaluator()`
+- `retrieved_context_contains()`
+- `answer_context_overlap()`
 
 Current tests live in `packages/python-sdk/tests/test_evals.py`.
 
