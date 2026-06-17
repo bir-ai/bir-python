@@ -8,7 +8,7 @@ reads the model and token usage from the response when they are present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
@@ -43,6 +43,17 @@ def trace_chat_completion(
     if bir_metadata:
         metadata.update(bir_metadata)
 
+    if kwargs.get("stream") is True:
+        return _stream_chat_completion(
+            create,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
     with generation(
         bir_name,
         model=_string_or_none(kwargs.get("model")),
@@ -54,6 +65,52 @@ def trace_chat_completion(
         response = create(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+def _stream_chat_completion(
+    create: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> Iterable[Any]:
+    with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = create(*args, **kwargs)
+        if not _is_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            for chunk in stream:
+                response_model = _string_or_none(_value(chunk, "model"))
+                if response_model is not None:
+                    gen.model = response_model
+
+                content = _chunk_delta_content(chunk)
+                if content is not None:
+                    output_parts.append(content)
+
+                usage = _value(chunk, "usage")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 def _record_response(gen: Any, response: Any) -> None:
@@ -78,6 +135,29 @@ def _record_usage(gen: Any, usage: Any) -> None:
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
+
+
+def _is_streamed_response(response: Any) -> bool:
+    if isinstance(response, (str, bytes, bytearray, Mapping)):
+        return False
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        return False
+    try:
+        iter(response)
+    except TypeError:
+        return False
+    return True
+
+
+def _chunk_delta_content(chunk: Any) -> str | None:
+    choices = _value(chunk, "choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+
+    delta = _value(choices[0], "delta")
+    content = _value(delta, "content")
+    return _string_or_none(content)
 
 
 def _request_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:

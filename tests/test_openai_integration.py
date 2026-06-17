@@ -53,6 +53,29 @@ class FakeChatCompletion:
         return dict(self._payload)
 
 
+class FakeDelta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class FakeChoice:
+    def __init__(self, delta: FakeDelta) -> None:
+        self.delta = delta
+
+
+class FakeChatCompletionChunk:
+    def __init__(
+        self,
+        *,
+        content: str | None = None,
+        usage: object | None = None,
+        model: str | None = "gpt-4o-mini-2024-07-18",
+    ) -> None:
+        self.model = model
+        self.choices = [FakeChoice(FakeDelta(content))]
+        self.usage = usage
+
+
 class OpenAIIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -168,6 +191,71 @@ class OpenAIIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed token=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeChatCompletionChunk(content="Bir "),
+                FakeChatCompletionChunk(content="streams"),
+                FakeChatCompletionChunk(
+                    content=None,
+                    usage=FakeUsage(prompt_tokens=11, completion_tokens=4, total_tokens=15),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_create(**kwargs: object) -> list[FakeChatCompletionChunk]:
+                received.update(kwargs)
+                return chunks
+
+            consumed: list[FakeChatCompletionChunk] = []
+            with trace("chat"):
+                stream = trace_chat_completion(
+                    fake_create,
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                consumed = list(stream)
+
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+            self.assertEqual(received["stream_options"], {"include_usage": True})
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "gpt-4o-mini-2024-07-18")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[FakeChatCompletionChunk]:
+                yield FakeChatCompletionChunk(content="partial api_key=sk-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-secret123")
+
+            def fake_create(**kwargs: object) -> Iterator[FakeChatCompletionChunk]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_chat_completion(
+                    fake_create,
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():
