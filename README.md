@@ -271,6 +271,27 @@ The wrapper forwards positional and keyword arguments unchanged, returns the
 Mistral response untouched, and records the response model, token usage, and
 `model_dump()` output when capture settings allow it.
 
+## Cohere
+
+Use `trace_chat()` to record Cohere v2 chat calls without adding `cohere` as a
+Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.cohere import trace_chat
+
+with trace("chat"):
+    response = trace_chat(
+        client.chat,
+        model="command-a-03-2025",
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+```
+
+The wrapper forwards positional and keyword arguments unchanged, returns the
+Cohere response untouched, records the request model, and reads token usage from
+`response.usage.tokens` when present.
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.
