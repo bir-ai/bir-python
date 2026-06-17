@@ -117,12 +117,12 @@ def metadata(version: str) -> str:
     requires_python = required_string(pyproject, "requires-python")
     headers = "\n".join(
         [
-            "Metadata-Version: 2.3",
+            "Metadata-Version: 2.4",
             "Name: bir",
             f"Version: {version}",
             f"Summary: {description}",
             f"Requires-Python: {requires_python}",
-            "License: FSL-1.1-ALv2",
+            "License-Expression: Apache-2.0",
             "Description-Content-Type: text/markdown",
         ]
     )

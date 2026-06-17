@@ -553,6 +553,4 @@ Release planning lives in `CHANGELOG.md` and `docs/SDK_RELEASE_CHECKLIST.md`.
 
 ## License
 
-Bir is source-available under the Functional Source License 1.1 with Apache 2.0
-as the future license (`FSL-1.1-ALv2`). FSL is not an OSI-approved open source
-license.
+Bir is licensed under the [Apache License 2.0](LICENSE).
