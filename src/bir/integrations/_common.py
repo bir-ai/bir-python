@@ -1,10 +1,10 @@
-"""Shared response-parsing helpers for the OpenAI and Anthropic integrations.
+"""Shared response-parsing helpers for the OpenAI, Anthropic, and Google integrations.
 
-Both wrappers read the model, token usage, and a serializable output from
-whatever object the provider ``create`` callable returns, and those values use
-the same shapes across providers. These small, side-effect-free helpers back
-that reading. The module is private to ``bir.integrations``; nothing here is
-exported from the package.
+The wrappers read the model, token usage, and a serializable output from
+whatever object the provider call returns, and those values use the same shapes
+across providers. These small, side-effect-free helpers back that reading. The
+module is private to ``bir.integrations``; nothing here is exported from the
+package.
 """
 
 from __future__ import annotations
