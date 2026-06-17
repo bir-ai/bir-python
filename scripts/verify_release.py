@@ -17,7 +17,9 @@ from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = PACKAGE_ROOT.parents[1]
+# The SDK package now lives at the repository root, so the package root and the
+# repository root are the same directory.
+REPO_ROOT = PACKAGE_ROOT
 
 
 def main() -> int:

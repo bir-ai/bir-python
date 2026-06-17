@@ -20,7 +20,7 @@ that the answer mentions the product. On the shipped dataset that yields an
 From this directory:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py
+PYTHONPATH=../../src python3 demo.py
 ```
 
 The demo writes two files:
@@ -33,7 +33,7 @@ The demo writes two files:
 To inspect the persisted experiment from Python:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 - <<'PY'
+PYTHONPATH=../../src python3 - <<'PY'
 from bir.evals import load_experiment
 
 experiment = load_experiment(".bir/experiments/faq-eval.jsonl")
@@ -64,7 +64,7 @@ uvicorn app.main:app --reload
 Then send the recorded experiment:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py --send
+PYTHONPATH=../../src python3 demo.py --send
 ```
 
 The server accepts the experiment at `/v1/experiments` and lists it at

@@ -20,7 +20,7 @@ in `output.documents` when capture is enabled.
 From this directory:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py
+PYTHONPATH=../../src python3 demo.py
 ```
 
 The demo writes events to:
@@ -32,7 +32,7 @@ The demo writes events to:
 To inspect the local trace from Python:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 - <<'PY'
+PYTHONPATH=../../src python3 - <<'PY'
 from bir import load_traces
 
 for trace in load_traces(".bir/traces.jsonl"):
@@ -62,7 +62,7 @@ uvicorn app.main:app --reload
 Then send the recorded events:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py --send
+PYTHONPATH=../../src python3 demo.py --send
 ```
 
 The server stores accepted events in `.bir/server-events.jsonl` from the server

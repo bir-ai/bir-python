@@ -20,7 +20,7 @@ import bir
 from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
 from bir._sdk import _reset_config_for_tests
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
 CONTRACT_SCHEMA_PATH = ROOT / "tests" / "fixtures" / "event-schema-v1.json"
 

@@ -4,9 +4,9 @@ All notable changes to the Bir Python SDK are documented here.
 
 This project follows a small-release workflow while the SDK is early-stage.
 Before publishing, verify the release with the SDK release checklist in
-`../../docs/SDK_RELEASE_CHECKLIST.md`.
+`docs/SDK_RELEASE_CHECKLIST.md`.
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-06-17
 
 Initial local MVP SDK release.
 

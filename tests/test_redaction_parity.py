@@ -7,7 +7,7 @@ from typing import Any
 
 from bir._sdk import _redact_secret_text, _safe_capture
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[1]
 REDACTION_CASES_PATH = ROOT / "tests" / "fixtures" / "redaction-cases.json"
 
 

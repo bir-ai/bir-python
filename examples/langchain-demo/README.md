@@ -30,7 +30,7 @@ of your application.
 From this directory:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py
+PYTHONPATH=../../src python3 demo.py
 ```
 
 The demo writes events to:
@@ -42,7 +42,7 @@ The demo writes events to:
 To send the events to a running Bir server:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py --send
+PYTHONPATH=../../src python3 demo.py --send
 ```
 
 Open the dashboard and refresh the trace list to inspect the LangChain-shaped

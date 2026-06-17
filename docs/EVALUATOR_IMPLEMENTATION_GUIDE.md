@@ -7,7 +7,7 @@ work through small, tested, local-first slices.
 
 ## Current State
 
-The first evaluator slice exists in `packages/python-sdk/src/bir/evals.py`.
+The first evaluator slice exists in `src/bir/evals.py`.
 
 Implemented SDK pieces:
 
@@ -40,7 +40,7 @@ Implemented SDK pieces:
 - `answer_context_overlap()`
 - `answer_contains_citation()`
 
-Current tests live in `packages/python-sdk/tests/test_evals.py`.
+Current tests live in `tests/test_evals.py`.
 
 Important current constraints:
 

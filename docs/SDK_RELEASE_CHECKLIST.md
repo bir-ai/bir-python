@@ -1,12 +1,8 @@
 # Python SDK Release Candidate Checklist
 
-Use this checklist to keep `packages/python-sdk` release-candidate quality while
-development continues. Passing this checklist does not mean the project should
-be published. Publishing is intentionally deferred until the user explicitly
-asks for it.
-
-Agents should treat this document as a quality gate and regression checklist,
-not as a release plan.
+Use this checklist to keep the `bir` SDK at release-candidate quality. Passing
+this checklist does not mean a new version must be published — publish only when
+you intend to cut a release.
 
 ## Candidate Readiness
 
@@ -16,8 +12,10 @@ not as a release plan.
 - Confirm input and output capture remains opt-in by default.
 - Confirm common secret-like keys and text patterns are redacted before local
   events are written.
-- Confirm schema version `1.0` remains aligned across SDK, server, dashboard,
-  and `tests/fixtures`.
+- Confirm schema version `1.0` stays aligned with the wire-contract fixtures in
+  `tests/fixtures/` (`event-schema-v1.json`, `valid-events.jsonl`). These
+  fixtures are the shared contract with the server and dashboard, which now live
+  in the separate `bir-app` repository.
 - Confirm `retrieval()` still emits the existing `tool_call` event contract with
   `metadata.kind = "retrieval"` and retrieved records under `output.documents`.
 - Confirm retrieval query/document capture follows the same opt-in capture and
@@ -26,15 +24,15 @@ not as a release plan.
   `metadata.prompt` without capturing template text, variables, or rendered
   prompts unless explicitly configured.
 - Confirm no server is required for the first useful local tracing workflow.
-- Confirm `packages/python-sdk/CHANGELOG.md` accurately describes unreleased
-  changes.
+- Confirm `CHANGELOG.md` accurately describes the changes in the version you are
+  about to release.
 
 ## Local Verification
 
 Run the repeatable release verification script from the repository root:
 
 ```bash
-./.venv/bin/python packages/python-sdk/scripts/verify_release.py
+./.venv/bin/python scripts/verify_release.py
 ```
 
 The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
@@ -44,40 +42,29 @@ virtual environment, and executes a smoke test that covers trace, span,
 retrieval, prompt metadata, generation, usage, cost, score events,
 deterministic evaluators, and local experiment writing.
 
-CI runs the same release verification script, plus server tests and dashboard
-lint/typecheck/contract tests, on pushes and pull requests to `main`.
+CI runs the same release verification script on pushes and pull requests to
+`main`. The server and dashboard contract tests run in the `bir-app`
+repository, against the published `bir` package.
 
-From `packages/python-sdk`:
-
-```bash
-PYTHONPATH=src ../../.venv/bin/python -m unittest discover -s tests
-```
-
-From the repository root:
+To run the unit tests, example smoke tests, and type checks directly from the
+repository root:
 
 ```bash
+PYTHONPATH=src ./.venv/bin/python -m unittest discover -s tests
+PYTHONPATH=src ./.venv/bin/python -m pytest tests/test_examples.py
 ./.venv/bin/pyright
 ```
 
-When server and web dependencies are available, run the contract checks that
-protect SDK/server/dashboard alignment:
-
-```bash
-cd apps/server
-../../.venv/bin/python -m pytest
-
-cd ../web
-npm run lint
-npm run typecheck
-```
+The shared wire-contract fixtures live under `tests/fixtures/`. The SDK keeps
+its own copy of the redaction logic and the schema contract (the SDK ships zero
+dependencies and cannot import server code), so `tests/test_redaction_parity.py`
+and the schema-contract assertions in `tests/test_sdk.py` are what keep the SDK
+from drifting away from the `bir-app` server and dashboard.
 
 The release verification script does not require `build`, `twine`, or network
-access. Do not run package-index checks or publishing commands unless the user
-explicitly asks for a release. If publishing work is explicitly requested later,
-the optional package index checks are:
+access. When you are ready to publish, the package-index checks are:
 
 ```bash
-cd packages/python-sdk
 python -m build
 python -m twine check dist/*
 ```
@@ -127,7 +114,7 @@ PY
 
 ## Manual Package Review
 
-- Inspect `packages/python-sdk/pyproject.toml` metadata.
+- Inspect `pyproject.toml` metadata.
 - Inspect the rendered README content on the package index.
 - Confirm the wheel contains only the SDK package and expected metadata.
 - Confirm no `.env`, local trace files, caches, or generated artifacts are
@@ -137,13 +124,13 @@ PY
 
 ## Publish Gate
 
-Do not publish unless the user explicitly asks for publishing work. Even when
-publishing is requested, do not publish if any of these are true:
+Even when you intend to publish, do not publish if any of these are true:
 
 - SDK tests or pyright fail.
 - Input/output capture defaults changed to enabled.
 - Redaction tests are failing or were removed.
 - Retrieval tests are failing or no longer assert `output.documents`.
-- SDK-generated events are no longer accepted by the server contract tests.
-- The release includes unrelated product features or infrastructure changes.
-- Remote CI has not passed on the release branch or commit.
+- The shared wire-contract fixtures in `tests/fixtures/` changed without a
+  matching update in the `bir-app` repository.
+- The release includes unrelated changes.
+- Remote CI has not passed on the release commit.

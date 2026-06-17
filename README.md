@@ -539,14 +539,14 @@ Run repository type checking from the repository root:
 Run the release verification script from the repository root before publishing:
 
 ```bash
-./.venv/bin/python packages/python-sdk/scripts/verify_release.py
+./.venv/bin/python scripts/verify_release.py
 ```
 
 The script builds a temporary SDK wheel, installs it in a fresh temporary
 virtual environment, and smoke-tests local tracing and retrieval without writing
 build artifacts into the repository.
 
-Release planning lives in `CHANGELOG.md` and `../../docs/SDK_RELEASE_CHECKLIST.md`.
+Release planning lives in `CHANGELOG.md` and `docs/SDK_RELEASE_CHECKLIST.md`.
 
 ## License
 

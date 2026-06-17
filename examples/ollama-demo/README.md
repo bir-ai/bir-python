@@ -17,13 +17,13 @@ ollama pull llama3.2:1b
 From this directory:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py
+PYTHONPATH=../../src python3 demo.py
 ```
 
 Send the trace to a running Bir server:
 
 ```bash
-PYTHONPATH=../../packages/python-sdk/src python3 demo.py --send
+PYTHONPATH=../../src python3 demo.py --send
 ```
 
 Useful flags:
