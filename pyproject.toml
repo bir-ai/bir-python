@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bir"
+name = "bir-sdk"
 version = "0.1.0"
 description = "Minimal local tracing SDK for LLM applications."
 readme = "README.md"

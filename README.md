@@ -11,8 +11,11 @@ server when you want to inspect them in the dashboard.
 After the first package release:
 
 ```bash
-python -m pip install bir
+python -m pip install bir-sdk
 ```
+
+The distribution is published on PyPI as `bir-sdk`; the import name is `bir`
+(e.g. `from bir import observe`).
 
 For local development from this repository:
 
