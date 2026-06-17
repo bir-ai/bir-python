@@ -13,6 +13,8 @@ from typing import Any
 
 from bir import generation
 
+from ._common import _response_output, _string_or_none, _usage_tokens, _value
+
 
 def trace_chat_completion(
     create: Callable[..., Any],
@@ -78,42 +80,8 @@ def _record_usage(gen: Any, usage: Any) -> None:
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
 
 
-def _response_output(response: Any) -> Any:
-    model_dump = getattr(response, "model_dump", None)
-    if callable(model_dump):
-        return model_dump()
-    as_dict = getattr(response, "dict", None)
-    if callable(as_dict):
-        return as_dict()
-    if isinstance(response, Mapping):
-        return dict(response)
-    return response
-
-
 def _request_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = dict(kwargs)
     if args:
         payload["args"] = list(args)
     return payload
-
-
-def _usage_tokens(usage: Any, *keys: str) -> int | float | None:
-    for key in keys:
-        value = _value(usage, key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return value
-    return None
-
-
-def _value(source: Any, key: str) -> Any:
-    if isinstance(source, Mapping):
-        return source.get(key)
-    return getattr(source, key, None)
-
-
-def _string_or_none(value: Any) -> str | None:
-    if isinstance(value, str) and value:
-        return value
-    return None
