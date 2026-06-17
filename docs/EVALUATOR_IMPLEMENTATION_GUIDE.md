@@ -517,7 +517,7 @@ Initial screens:
 - experiment detail
 - aggregate score table
 - per-example result table
-- failed examples filter
+- failed examples filter (implemented)
 - output/expected side-by-side panel
 
 Dashboard rules:
