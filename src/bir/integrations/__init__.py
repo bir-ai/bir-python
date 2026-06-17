@@ -3,6 +3,13 @@
 from .anthropic import trace_messages
 from .google import trace_generate_content
 from .langchain import BirCallbackHandler
+from .litellm import trace_completion
 from .openai import trace_chat_completion
 
-__all__ = ["trace_messages", "trace_generate_content", "BirCallbackHandler", "trace_chat_completion"]
+__all__ = [
+    "trace_messages",
+    "trace_generate_content",
+    "BirCallbackHandler",
+    "trace_completion",
+    "trace_chat_completion",
+]

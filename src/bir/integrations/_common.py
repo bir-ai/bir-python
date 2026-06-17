@@ -1,4 +1,4 @@
-"""Shared response-parsing helpers for the OpenAI, Anthropic, and Google integrations.
+"""Shared response-parsing helpers for the OpenAI, Anthropic, Google, and LiteLLM integrations.
 
 The wrappers read the model, token usage, and a serializable output from
 whatever object the provider call returns, and those values use the same shapes
