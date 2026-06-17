@@ -33,6 +33,7 @@ from bir.evals import (
     load_experiment_summary,
     numeric_between,
     regex_match,
+    retrieved_context_contains,
     run_experiment,
     send_experiment,
 )
@@ -133,6 +134,72 @@ class EvalTests(unittest.TestCase):
             answer_context_overlap(math.nan)
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             answer_context_overlap(0.5, name="")
+
+    def test_retrieved_context_contains_scores_hits_and_misses(self) -> None:
+        evaluator = retrieved_context_contains("capital of France")
+
+        hit = evaluator.evaluate(
+            {
+                "answer": "Paris is the capital of France.",
+                "contexts": ["France is in Europe.", "Paris is the capital of France."],
+                "citations": ["doc-1"],
+            }
+        )
+        self.assertEqual(hit.value, 1.0)
+        self.assertEqual(hit.metadata["matched_index"], 1)
+        self.assertEqual(hit.metadata["context_count"], 2)
+        self.assertNotIn("reason", hit.metadata)
+
+        miss = evaluator.evaluate({"answer": "I am not sure.", "contexts": ["Unrelated document text."]})
+        self.assertEqual(miss.value, 0.0)
+        self.assertEqual(miss.metadata["context_count"], 1)
+        self.assertNotIn("reason", miss.metadata)
+        self.assertNotIn("matched_index", miss.metadata)
+
+        json.dumps(hit.to_dict(), allow_nan=False)
+        json.dumps(miss.to_dict(), allow_nan=False)
+
+    def test_retrieved_context_contains_reports_missing_and_empty_contexts(self) -> None:
+        evaluator = retrieved_context_contains("anything")
+
+        plain_string = evaluator.evaluate("just an answer")
+        self.assertEqual(plain_string.value, 0.0)
+        self.assertEqual(plain_string.metadata["reason"], "non_object_output")
+
+        missing_contexts = evaluator.evaluate({"answer": "no contexts here"})
+        self.assertEqual(missing_contexts.value, 0.0)
+        self.assertEqual(missing_contexts.metadata["reason"], "missing_contexts")
+
+        non_string_contexts = evaluator.evaluate({"contexts": ["doc", 1]})
+        self.assertEqual(non_string_contexts.value, 0.0)
+        self.assertEqual(non_string_contexts.metadata["reason"], "missing_contexts")
+
+        empty_contexts = evaluator.evaluate({"contexts": []})
+        self.assertEqual(empty_contexts.value, 0.0)
+        self.assertEqual(empty_contexts.metadata["reason"], "empty_contexts")
+        self.assertEqual(empty_contexts.metadata["context_count"], 0)
+
+    def test_retrieved_context_contains_supports_case_insensitive_matching(self) -> None:
+        output = {"contexts": ["bir stores local traces in jsonl files."]}
+
+        self.assertEqual(retrieved_context_contains("LOCAL TRACES").evaluate(output).value, 0.0)
+        self.assertEqual(
+            retrieved_context_contains("LOCAL TRACES", case_sensitive=False).evaluate(output).value,
+            1.0,
+        )
+
+    def test_retrieved_context_contains_rejects_invalid_configuration(self) -> None:
+        with self.assertRaisesRegex(TypeError, "expected value must be a string"):
+            retrieved_context_contains(123)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            retrieved_context_contains("doc", name="")
+
+    def test_retrieved_context_contains_redacts_failure_metadata(self) -> None:
+        result = retrieved_context_contains("api_key=sk-secret").evaluate({"contexts": ["unrelated text"]})
+
+        self.assertEqual(result.value, 0.0)
+        self.assertEqual(result.metadata["expected"], "api_key=[redacted]")
+        self.assertNotIn("sk-secret", json.dumps(result.to_dict(), allow_nan=False))
 
     def test_context_evaluators_return_numeric_scores(self) -> None:
         context = EvaluationContext(
@@ -744,6 +811,37 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(result.aggregate_scores["field_equals"], 0.5)
             self.assertEqual(result.aggregate_scores["numeric_between"], 0.5)
             self.assertEqual(result.results[1].scores[1].metadata["reason"], "index_out_of_range")
+
+    def test_run_experiment_supports_retrieved_context_contains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "capital"}),
+                    DatasetExample(id="q2", input={"question": "country"}),
+                ]
+            )
+
+            def answer(question: str) -> dict[str, object]:
+                if question == "capital":
+                    return {
+                        "answer": "Paris is the capital of France.",
+                        "contexts": ["Paris is the capital of France.", "France is in Europe."],
+                    }
+                return {"answer": "I am not sure.", "contexts": ["Unrelated document text."]}
+
+            result = run_experiment(
+                "rag",
+                dataset=dataset,
+                task=answer,
+                evaluators=[retrieved_context_contains("capital of France")],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["retrieved_context_contains"], 0.5)
+            self.assertEqual(result.results[0].scores[0].metadata["matched_index"], 0)
+            self.assertNotIn("reason", result.results[1].scores[0].metadata)
 
     def test_run_experiment_supports_custom_evaluators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

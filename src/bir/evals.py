@@ -45,6 +45,7 @@ __all__ = [
     "load_experiment_summary",
     "numeric_between",
     "regex_match",
+    "retrieved_context_contains",
     "run_experiment",
     "send_experiment",
 ]
@@ -688,6 +689,53 @@ def answer_context_overlap(min_ratio: float, *, name: str = "answer_context_over
         if unsupported_words:
             metadata["unsupported_words"] = unsupported_words[:_UNSUPPORTED_WORD_LIMIT]
         return EvalResult(name=name, value=1.0 if overlap_ratio >= min_ratio_value else 0.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
+def retrieved_context_contains(
+    expected: str,
+    *,
+    case_sensitive: bool = True,
+    name: str = "retrieved_context_contains",
+) -> DeterministicEvaluator:
+    """Create an evaluator that checks whether retrieved context contains a string.
+
+    This is a deterministic retrieval check, not proof of relevance or
+    faithfulness: it only confirms that ``expected`` appears verbatim in one of
+    the retrieved context strings, not that the answer relied on it.
+
+    The task output must be a mapping with a ``contexts`` list of retrieved text
+    strings:
+
+    ``{"answer": "...", "contexts": ["doc text", "other doc text"]}``
+    """
+
+    if not isinstance(expected, str):
+        raise TypeError("retrieved_context_contains expected value must be a string")
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        del example_expected
+        metadata: dict[str, Any] = {"expected": expected}
+        if not isinstance(output, Mapping):
+            metadata["reason"] = "non_object_output"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        contexts = output.get("contexts")
+        if not isinstance(contexts, list) or any(not isinstance(item, str) for item in contexts):
+            metadata["reason"] = "missing_contexts"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        metadata["context_count"] = len(contexts)
+        if not contexts:
+            metadata["reason"] = "empty_contexts"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+
+        needle = expected if case_sensitive else expected.lower()
+        for index, context_text in enumerate(contexts):
+            haystack = context_text if case_sensitive else context_text.lower()
+            if needle in haystack:
+                metadata["matched_index"] = index
+                return EvalResult(name=name, value=1.0, metadata=metadata)
+        return EvalResult(name=name, value=0.0, metadata=metadata)
 
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 

@@ -33,6 +33,7 @@ Initial local MVP SDK release.
 - Best-effort redaction for common secret-like keys and text patterns.
 - `bir.evals` deterministic evaluators: `exact_match()`, `contains()`, `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`, `latency_under()`, `cost_under()`, `numeric_between()`, and `custom_evaluator()`.
 - `bir.evals.answer_context_overlap()` deterministic RAG faithfulness heuristic that scores answer/context word overlap.
+- `bir.evals.retrieved_context_contains()` deterministic RAG retrieval check that scores whether an expected string appears in the retrieved `contexts` list.
 - Local JSONL dataset loading and experiment result writing through `Dataset` and `run_experiment()`.
 - `Dataset.to_jsonl(..., redact=False)` for intentional raw dataset export while keeping redaction enabled by default.
 

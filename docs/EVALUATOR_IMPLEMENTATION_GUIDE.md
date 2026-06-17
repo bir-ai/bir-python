@@ -375,13 +375,14 @@ Tests:
 
 Goal: support retrieval quality and faithfulness checks without LLM judges.
 
-Status: `answer_context_overlap()` is implemented and tested. The remaining
-evaluators in this phase are not implemented yet.
+Status: `answer_context_overlap()` and `retrieved_context_contains()` are
+implemented and tested. The remaining evaluators in this phase are not
+implemented yet.
 
 Add evaluators:
 
 ```python
-retrieved_context_contains(expected: str, *, name: str = "retrieved_context_contains")
+retrieved_context_contains(expected: str, *, case_sensitive: bool = True, name: str = "retrieved_context_contains")  # implemented
 answer_contains_citation(*, name: str = "answer_contains_citation")
 answer_context_overlap(min_ratio: float, *, name: str = "answer_context_overlap")  # implemented
 ```

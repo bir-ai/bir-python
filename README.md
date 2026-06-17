@@ -319,8 +319,8 @@ the experiment id, status, example count, error count, aggregate scores, and
 result path so local runs can be listed without scanning every result row.
 Available deterministic evaluators are `exact_match()`, `contains()`,
 `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`,
-`latency_under()`, `cost_under()`, `numeric_between()`, and
-`custom_evaluator()`.
+`latency_under()`, `cost_under()`, `numeric_between()`,
+`retrieved_context_contains()`, and `custom_evaluator()`.
 
 Upload a completed experiment to a running Bir server so the dashboard can show
 the experiment list and per-example result detail:
@@ -402,6 +402,24 @@ debuggable = custom_evaluator(
 
 Custom evaluators may return `bool`, `int`, `float`, or `EvalResult`. Exceptions
 from custom evaluator functions surface normally during development.
+
+Use `retrieved_context_contains()` to check retrieval quality without an LLM
+judge:
+
+```python
+from bir.evals import retrieved_context_contains
+
+evaluators = [
+    retrieved_context_contains("observability"),
+]
+```
+
+`retrieved_context_contains()` reads the `contexts` list from a structured RAG
+output such as `{"answer": "...", "contexts": ["doc text", ...]}` and scores
+`1.0` when `expected` appears in one of the retrieved strings. Missing or empty
+`contexts` produce a `0.0` score with failure metadata instead of failing the
+experiment. Pass `case_sensitive=False` for case-insensitive matching. This is a
+deterministic retrieval check, not proof that the answer used the context.
 
 ## Event Loading
 
