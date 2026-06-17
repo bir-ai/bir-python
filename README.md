@@ -250,6 +250,27 @@ a small implicit trace root. The handler records token usage from common
 LangChain response shapes including `llm_output.token_usage`,
 `usage_metadata`, and `response_metadata.token_usage`.
 
+## Mistral
+
+Use `trace_chat()` to record Mistral chat completions without adding `mistralai`
+as a Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.mistral import trace_chat
+
+with trace("chat"):
+    response = trace_chat(
+        client.chat.complete,
+        model="mistral-small-latest",
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+```
+
+The wrapper forwards positional and keyword arguments unchanged, returns the
+Mistral response untouched, and records the response model, token usage, and
+`model_dump()` output when capture settings allow it.
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.
