@@ -19,6 +19,7 @@ from bir.evals import (
     DeterministicEvaluator,
     EvaluationContext,
     EvalResult,
+    answer_contains_citation,
     answer_context_overlap,
     contains,
     cost_under,
@@ -201,6 +202,84 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(result.metadata["expected"], "api_key=[redacted]")
         self.assertNotIn("sk-secret", json.dumps(result.to_dict(), allow_nan=False))
 
+    def test_answer_contains_citation_scores_default_bracketed_markers(self) -> None:
+        evaluator = answer_contains_citation()
+
+        present = evaluator.evaluate("Paris is the capital of France [1].")
+        self.assertEqual(present.value, 1.0)
+        self.assertEqual(present.metadata["citation"], "[1]")
+        self.assertEqual(present.metadata["pattern"], r"\[[\w-]+\]")
+        self.assertNotIn("reason", present.metadata)
+        self.assertNotIn("answer_preview", present.metadata)
+
+        labeled = evaluator.evaluate("Bir records local traces [doc-1].")
+        self.assertEqual(labeled.value, 1.0)
+        self.assertEqual(labeled.metadata["citation"], "[doc-1]")
+
+        absent = evaluator.evaluate("Paris is the capital of France.")
+        self.assertEqual(absent.value, 0.0)
+        self.assertEqual(absent.metadata["answer_preview"], "Paris is the capital of France.")
+        self.assertNotIn("citation", absent.metadata)
+
+        json.dumps(present.to_dict(), allow_nan=False)
+        json.dumps(absent.to_dict(), allow_nan=False)
+
+    def test_answer_contains_citation_supports_dict_output(self) -> None:
+        evaluator = answer_contains_citation()
+
+        structured = evaluator.evaluate(
+            {
+                "answer": "Paris is the capital of France [2].",
+                "contexts": ["Paris is the capital of France."],
+                "citations": ["doc-2"],
+            }
+        )
+        self.assertEqual(structured.value, 1.0)
+        self.assertEqual(structured.metadata["citation"], "[2]")
+
+        missing_answer = evaluator.evaluate({"contexts": ["doc text"]})
+        self.assertEqual(missing_answer.value, 0.0)
+        self.assertEqual(missing_answer.metadata["reason"], "missing_answer")
+
+        non_string_answer = evaluator.evaluate({"answer": 123})
+        self.assertEqual(non_string_answer.value, 0.0)
+        self.assertEqual(non_string_answer.metadata["reason"], "missing_answer")
+
+        non_text_output = evaluator.evaluate(["not", "an", "answer"])
+        self.assertEqual(non_text_output.value, 0.0)
+        self.assertEqual(non_text_output.metadata["reason"], "non_text_output")
+
+    def test_answer_contains_citation_supports_custom_pattern(self) -> None:
+        evaluator = answer_contains_citation(pattern=r"\(\d+\)")
+
+        hit = evaluator.evaluate("Paris is the capital of France (1).")
+        self.assertEqual(hit.value, 1.0)
+        self.assertEqual(hit.metadata["citation"], "(1)")
+        self.assertEqual(hit.metadata["pattern"], r"\(\d+\)")
+
+        miss = evaluator.evaluate("Paris is the capital of France [1].")
+        self.assertEqual(miss.value, 0.0)
+        self.assertEqual(miss.metadata["answer_preview"], "Paris is the capital of France [1].")
+
+    def test_answer_contains_citation_rejects_invalid_pattern(self) -> None:
+        with self.assertRaisesRegex(ValueError, "valid regex"):
+            answer_contains_citation(pattern="[")
+
+    def test_answer_contains_citation_redacts_failure_metadata(self) -> None:
+        result = answer_contains_citation().evaluate("Token api_key=sk-secret has no citation marker.")
+
+        self.assertEqual(result.value, 0.0)
+        self.assertEqual(result.metadata["answer_preview"], "Token api_key=[redacted] has no citation marker.")
+        self.assertNotIn("sk-secret", json.dumps(result.to_dict(), allow_nan=False))
+
+    def test_answer_contains_citation_truncates_long_answer_preview(self) -> None:
+        answer = "No citation here. " + "padding " * 60
+        result = answer_contains_citation().evaluate(answer)
+
+        self.assertEqual(result.value, 0.0)
+        self.assertEqual(len(result.metadata["answer_preview"]), 203)
+        self.assertTrue(result.metadata["answer_preview"].endswith("..."))
+
     def test_context_evaluators_return_numeric_scores(self) -> None:
         context = EvaluationContext(
             example=DatasetExample(id="q1", input={"question": "hello"}),
@@ -263,6 +342,8 @@ class EvalTests(unittest.TestCase):
             cost_under(0.01, name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             numeric_between(max_value=1.0, name="")
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            answer_contains_citation(name="")
         with self.assertRaisesRegex(ValueError, "evaluator name"):
             custom_evaluator("", lambda output, expected: 1.0)
 
@@ -842,6 +923,37 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(result.aggregate_scores["retrieved_context_contains"], 0.5)
             self.assertEqual(result.results[0].scores[0].metadata["matched_index"], 0)
             self.assertNotIn("reason", result.results[1].scores[0].metadata)
+
+    def test_run_experiment_supports_answer_contains_citation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "capital"}),
+                    DatasetExample(id="q2", input={"question": "country"}),
+                ]
+            )
+
+            def answer(question: str) -> dict[str, object]:
+                if question == "capital":
+                    return {
+                        "answer": "Paris is the capital of France [1].",
+                        "contexts": ["Paris is the capital of France."],
+                    }
+                return {"answer": "France is in Europe.", "contexts": ["France is in Europe."]}
+
+            result = run_experiment(
+                "rag-citation",
+                dataset=dataset,
+                task=answer,
+                evaluators=[answer_contains_citation()],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["answer_contains_citation"], 0.5)
+            self.assertEqual(result.results[0].scores[0].metadata["citation"], "[1]")
+            self.assertEqual(result.results[1].scores[0].metadata["answer_preview"], "France is in Europe.")
 
     def test_run_experiment_supports_custom_evaluators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -20,6 +20,8 @@ _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
 _UNSUPPORTED_WORD_LIMIT = 20
 _WORD_TOKEN_PATTERN = re.compile(r"\w+")
+_CITATION_ANSWER_PREVIEW_LIMIT = 200
+_DEFAULT_CITATION_PATTERN = r"\[[\w-]+\]"
 
 __all__ = [
     "Dataset",
@@ -31,6 +33,7 @@ __all__ = [
     "ExperimentResult",
     "ExperimentSummary",
     "SendExperimentResult",
+    "answer_contains_citation",
     "answer_context_overlap",
     "contains",
     "cost_under",
@@ -740,6 +743,59 @@ def retrieved_context_contains(
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 
 
+def answer_contains_citation(
+    *,
+    pattern: str | None = None,
+    name: str = "answer_contains_citation",
+) -> DeterministicEvaluator:
+    """Create an evaluator that checks whether an answer includes a citation marker.
+
+    This is a deterministic format check, not proof of grounding or relevance:
+    it only confirms that a citation marker is present in the answer text, not
+    that the citation is correct or that the cited source supports the answer.
+
+    The task output may be a plain answer string or a structured RAG mapping
+    with an ``answer`` string:
+
+    ``"Paris is the capital of France [1]."``
+    ``{"answer": "Paris is the capital of France [1].", "contexts": [...]}``
+
+    By default any bracketed marker such as ``[1]`` or ``[doc-1]`` counts as a
+    citation. Pass ``pattern`` to override the citation regex, for example
+    ``r"\\(\\d+\\)"`` to require parenthetical markers like ``(1)``.
+    """
+
+    citation_pattern = _DEFAULT_CITATION_PATTERN if pattern is None else pattern
+    try:
+        compiled = re.compile(citation_pattern)
+    except re.error as exc:
+        raise ValueError(f"answer_contains_citation pattern is not a valid regex: {exc}") from exc
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        del example_expected
+        metadata: dict[str, Any] = {"pattern": citation_pattern}
+        if isinstance(output, str):
+            answer = output
+        elif isinstance(output, Mapping):
+            answer_value = output.get("answer")
+            if not isinstance(answer_value, str):
+                metadata["reason"] = "missing_answer"
+                return EvalResult(name=name, value=0.0, metadata=metadata)
+            answer = answer_value
+        else:
+            metadata["reason"] = "non_text_output"
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+
+        match = compiled.search(answer)
+        if match is None:
+            metadata["answer_preview"] = _answer_preview(answer)
+            return EvalResult(name=name, value=0.0, metadata=metadata)
+        metadata["citation"] = match.group(0)
+        return EvalResult(name=name, value=1.0, metadata=metadata)
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
 def run_experiment(
     name: str,
     *,
@@ -1376,6 +1432,12 @@ def _validate_evaluator_name(name: str) -> None:
 
 def _word_tokens(text: str) -> set[str]:
     return set(_WORD_TOKEN_PATTERN.findall(text.casefold()))
+
+
+def _answer_preview(answer: str) -> str:
+    if len(answer) <= _CITATION_ANSWER_PREVIEW_LIMIT:
+        return answer
+    return answer[:_CITATION_ANSWER_PREVIEW_LIMIT] + "..."
 
 
 def _json_line(payload: Mapping[str, Any]) -> str:

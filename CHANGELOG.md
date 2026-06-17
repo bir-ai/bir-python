@@ -34,6 +34,7 @@ Initial local MVP SDK release.
 - `bir.evals` deterministic evaluators: `exact_match()`, `contains()`, `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`, `latency_under()`, `cost_under()`, `numeric_between()`, and `custom_evaluator()`.
 - `bir.evals.answer_context_overlap()` deterministic RAG faithfulness heuristic that scores answer/context word overlap.
 - `bir.evals.retrieved_context_contains()` deterministic RAG retrieval check that scores whether an expected string appears in the retrieved `contexts` list.
+- `bir.evals.answer_contains_citation()` deterministic RAG citation check that scores whether an answer (a plain string or the `answer` field of a dict) contains a bracketed citation marker such as `[1]` or `[doc-1]`, with an optional `pattern` override for custom citation formats.
 - Local JSONL dataset loading and experiment result writing through `Dataset` and `run_experiment()`.
 - `Dataset.to_jsonl(..., redact=False)` for intentional raw dataset export while keeping redaction enabled by default.
 

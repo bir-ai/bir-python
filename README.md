@@ -320,8 +320,8 @@ result path so local runs can be listed without scanning every result row.
 Available deterministic evaluators are `exact_match()`, `contains()`,
 `regex_match()`, `json_valid()`, `field_equals()`, `field_contains()`,
 `latency_under()`, `cost_under()`, `numeric_between()`,
-`retrieved_context_contains()`, `answer_context_overlap()`, and
-`custom_evaluator()`.
+`retrieved_context_contains()`, `answer_context_overlap()`,
+`answer_contains_citation()`, and `custom_evaluator()`.
 
 Upload a completed experiment to a running Bir server so the dashboard can show
 the experiment list and per-example result detail:
@@ -440,6 +440,26 @@ contexts. It is a deterministic faithfulness heuristic, not proof of
 faithfulness: paraphrased but faithful answers can score low, and unfaithful
 answers that reuse context words can score high. Missing answers or contexts
 produce a `0.0` score with failure metadata instead of failing the experiment.
+
+Use `answer_contains_citation()` to check that an answer cites a source, also
+without an LLM judge:
+
+```python
+from bir.evals import answer_contains_citation
+
+evaluators = [
+    answer_contains_citation(),
+]
+```
+
+`answer_contains_citation()` reads a plain answer string or the `answer` field
+of a structured RAG output (`{"answer": "...", "contexts": [...]}`) and scores
+`1.0` when the answer contains a citation marker. By default any bracketed
+marker such as `[1]` or `[doc-1]` counts; pass `pattern` to require a custom
+citation format such as `pattern=r"\(\d+\)"` for markers like `(1)`. This is a
+deterministic format check, not proof that the citation is correct or that the
+cited source supports the answer. Non-text output or a missing `answer` produces
+a `0.0` score with failure metadata instead of failing the experiment.
 
 ## Event Loading
 
