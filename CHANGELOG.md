@@ -6,6 +6,13 @@ This project follows a small-release workflow while the SDK is early-stage.
 Before publishing, verify the release with the SDK release checklist in
 `docs/SDK_RELEASE_CHECKLIST.md`.
 
+## 0.1.1 - 2026-06-18
+
+### Changed
+
+- Relicensed the project from FSL-1.1-ALv2 to the Apache License 2.0.
+- Updated project links to the `bir-ai/bir-python` GitHub repository.
+
 ## 0.1.0 - 2026-06-17
 
 Initial local MVP SDK release.

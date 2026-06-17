@@ -24,7 +24,7 @@ from ._sdk import (
 try:
     __version__ = version("bir")
 except PackageNotFoundError:  # running from source (PYTHONPATH=src) without an install
-    __version__ = "0.1.0"
+    __version__ = "0.1.1"
 
 __all__ = [
     "__version__",
