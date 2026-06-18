@@ -53,6 +53,14 @@ class FakeGenerateContentResponse:
         return dict(self._payload)
 
 
+class FakeGenerateContentChunk:
+    # A streamed chunk exposes incremental ``text``; the final chunk also carries
+    # the cumulative ``usage_metadata``.
+    def __init__(self, *, text: str | None = None, usage_metadata: object | None = None) -> None:
+        self.text = text
+        self.usage_metadata = usage_metadata
+
+
 class GoogleIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -178,6 +186,97 @@ class GoogleIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeGenerateContentChunk(text="Bir "),
+                FakeGenerateContentChunk(text="streams"),
+                FakeGenerateContentChunk(
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=11,
+                        candidates_token_count=4,
+                        total_token_count=15,
+                    ),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_generate(**kwargs: object) -> list[object]:
+                received.update(kwargs)
+                return chunks
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate,
+                    model="gemini-2.5-flash",
+                    contents="Stream it",
+                    stream=True,
+                )
+                consumed = list(stream)
+
+            # Chunks pass through unchanged in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            # Gemini chunks omit a model, so it comes from the request keyword.
+            self.assertEqual(generation_event.model, "gemini-2.5-flash")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_records_streamed_generation_from_dict_chunks(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            chunks = [
+                {"text": "Bir "},
+                {"text": "streams"},
+                {"text": None, "usage_metadata": {"prompt_token_count": 7, "candidates_token_count": 3, "total_token_count": 10}},
+            ]
+
+            def fake_generate(**kwargs: object) -> list[dict[str, object]]:
+                return chunks
+
+            with trace("chat"):
+                stream = trace_generate_content(fake_generate, model="gemini-2.5-flash", contents=[], stream=True)
+                consumed = list(stream)
+
+            self.assertEqual(consumed, chunks)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.model, "gemini-2.5-flash")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[object]:
+                yield FakeGenerateContentChunk(text="partial api_key=AIzaSyExampleSecret123 ")
+                raise RuntimeError("stream failed api_key=AIzaSyExampleSecret123")
+
+            def fake_generate(**kwargs: object) -> Iterator[object]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate,
+                    model="gemini-2.5-flash",
+                    contents="Stream it",
+                    stream=True,
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

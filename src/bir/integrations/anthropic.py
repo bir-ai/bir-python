@@ -8,12 +8,18 @@ reads the model and token usage from the response when they are present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
-from ._common import _response_output, _string_or_none, _usage_tokens, _value
+from ._common import (
+    _is_streamed_response,
+    _response_output,
+    _string_or_none,
+    _usage_tokens,
+    _value,
+)
 
 
 def trace_messages(
@@ -43,6 +49,17 @@ def trace_messages(
     if bir_metadata:
         metadata.update(bir_metadata)
 
+    if kwargs.get("stream") is True:
+        return _stream_messages(
+            create,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
     with generation(
         bir_name,
         model=_string_or_none(kwargs.get("model")),
@@ -54,6 +71,81 @@ def trace_messages(
         response = create(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+def _stream_messages(
+    create: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> Iterable[Any]:
+    with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = create(*args, **kwargs)
+        if not _is_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        usage_tokens: dict[str, int | float] = {}
+
+        try:
+            for chunk in stream:
+                model = _chunk_model(chunk)
+                if model is not None:
+                    gen.model = model
+
+                text = _chunk_delta_text(chunk)
+                if text is not None:
+                    output_parts.append(text)
+
+                _merge_stream_usage(usage_tokens, chunk)
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, usage_tokens)
+
+
+def _chunk_model(chunk: Any) -> str | None:
+    # Anthropic carries the model on the ``message_start`` event's nested message.
+    message = _value(chunk, "message")
+    return _string_or_none(_value(message, "model"))
+
+
+def _chunk_delta_text(chunk: Any) -> str | None:
+    # ``content_block_delta`` events carry incremental output at ``delta.text``;
+    # other events (``message_delta`` stop reasons, content-block starts) expose
+    # no ``delta.text`` and are skipped.
+    delta = _value(chunk, "delta")
+    return _string_or_none(_value(delta, "text"))
+
+
+def _merge_stream_usage(tokens: dict[str, int | float], chunk: Any) -> None:
+    # Streamed usage is split across events: ``message_start`` carries
+    # ``input_tokens`` on the nested ``message.usage``, while ``message_delta``
+    # carries the final ``output_tokens`` on the top-level ``usage``. Take the
+    # latest value seen for each so the cumulative counts win.
+    message = _value(chunk, "message")
+    for source in (_value(message, "usage"), _value(chunk, "usage")):
+        if source is None:
+            continue
+        input_tokens = _usage_tokens(source, "input_tokens")
+        if input_tokens is not None:
+            tokens["input_tokens"] = input_tokens
+        output_tokens = _usage_tokens(source, "output_tokens")
+        if output_tokens is not None:
+            tokens["output_tokens"] = output_tokens
 
 
 def _record_response(gen: Any, response: Any) -> None:

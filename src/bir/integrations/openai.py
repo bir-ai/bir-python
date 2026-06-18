@@ -13,7 +13,7 @@ from typing import Any
 
 from bir import generation
 
-from ._common import _response_output, _string_or_none, _usage_tokens, _value
+from ._common import _is_streamed_response, _response_output, _string_or_none, _usage_tokens, _value
 
 
 def trace_chat_completion(
@@ -135,19 +135,6 @@ def _record_usage(gen: Any, usage: Any) -> None:
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
-
-
-def _is_streamed_response(response: Any) -> bool:
-    if isinstance(response, (str, bytes, bytearray, Mapping)):
-        return False
-    model_dump = getattr(response, "model_dump", None)
-    if callable(model_dump):
-        return False
-    try:
-        iter(response)
-    except TypeError:
-        return False
-    return True
 
 
 def _chunk_delta_content(chunk: Any) -> str | None:

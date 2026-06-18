@@ -45,3 +45,25 @@ def _response_output(response: Any) -> Any:
     if isinstance(response, Mapping):
         return dict(response)
     return response
+
+
+def _is_streamed_response(response: Any) -> bool:
+    """Return ``True`` when ``response`` looks like an iterable stream of chunks.
+
+    A streaming provider call returns an iterator of chunk events, while a
+    non-streaming call returns a single response object (typically a pydantic
+    model exposing ``model_dump``, a mapping, or a string). Those whole-response
+    shapes are rejected so a streaming wrapper can fall back to recording them in
+    one piece when a provider ignores the streaming request.
+    """
+
+    if isinstance(response, (str, bytes, bytearray, Mapping)):
+        return False
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        return False
+    try:
+        iter(response)
+    except TypeError:
+        return False
+    return True

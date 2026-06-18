@@ -9,12 +9,18 @@ when it is present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
-from ._common import _response_output, _string_or_none, _usage_tokens, _value
+from ._common import (
+    _is_streamed_response,
+    _response_output,
+    _string_or_none,
+    _usage_tokens,
+    _value,
+)
 
 
 def trace_generate_content(
@@ -46,6 +52,17 @@ def trace_generate_content(
     if bir_metadata:
         metadata.update(bir_metadata)
 
+    if kwargs.get("stream") is True:
+        return _stream_generate_content(
+            generate,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
     with generation(
         bir_name,
         model=_string_or_none(kwargs.get("model")),
@@ -57,6 +74,50 @@ def trace_generate_content(
         response = generate(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+def _stream_generate_content(
+    generate: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> Iterable[Any]:
+    with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = generate(*args, **kwargs)
+        if not _is_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        # Gemini chunks carry no top-level model, so the request ``model`` keyword
+        # passed to ``generation()`` stands; only text and usage are accumulated.
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            for chunk in stream:
+                text = _string_or_none(_value(chunk, "text"))
+                if text is not None:
+                    output_parts.append(text)
+
+                usage = _value(chunk, "usage_metadata")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 def _record_response(gen: Any, response: Any) -> None:

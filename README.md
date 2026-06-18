@@ -362,6 +362,85 @@ The wrapper forwards positional and keyword arguments unchanged, returns the
 Cohere response untouched, records the request model, and reads token usage from
 `response.usage.tokens` when present.
 
+## Anthropic
+
+Use `trace_messages()` to record Anthropic Messages calls without adding
+`anthropic` as a Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.anthropic import trace_messages
+
+with trace("chat"):
+    response = trace_messages(
+        client.messages.create,
+        model="claude-haiku-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+```
+
+The wrapper forwards positional and keyword arguments unchanged, returns the
+Anthropic response untouched, records the response model, and reads token usage
+from `response.usage` when present.
+
+Streaming is supported. Pass `stream=True` and the wrapper returns the event
+stream unchanged, then records one generation once the stream is consumed: it
+accumulates output text from `content_block_delta` events and reads token usage
+from the `message_start` and `message_delta` events.
+
+```python
+with trace("chat"):
+    stream = trace_messages(
+        client.messages.create,
+        model="claude-haiku-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": "What is Bir?"}],
+        stream=True,
+    )
+    for event in stream:
+        ...  # consume the stream as usual; chunks pass through unchanged
+```
+
+## Google Gemini
+
+Use `trace_generate_content()` to record Gemini `generate_content` calls without
+adding `google-genai` (or the legacy `google-generativeai`) as a Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.google import trace_generate_content
+
+with trace("chat"):
+    response = trace_generate_content(
+        client.models.generate_content,
+        model="gemini-2.5-flash",
+        contents="What is Bir?",
+    )
+```
+
+The wrapper forwards positional and keyword arguments unchanged, returns the
+Gemini response untouched, records the request model (Gemini responses carry no
+top-level model), and reads token usage from `response.usage_metadata` when
+present.
+
+Streaming is supported. Pass `stream=True` and the wrapper returns the chunk
+stream unchanged, then records one generation once the stream is consumed: it
+accumulates output text from each chunk's `.text` and reads token usage from
+`usage_metadata` on the final chunk.
+
+```python
+with trace("chat"):
+    stream = trace_generate_content(
+        client.models.generate_content,
+        model="gemini-2.5-flash",
+        contents="What is Bir?",
+        stream=True,
+    )
+    for chunk in stream:
+        ...  # consume the stream as usual; chunks pass through unchanged
+```
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.

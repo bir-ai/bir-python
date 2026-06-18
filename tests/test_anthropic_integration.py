@@ -51,6 +51,45 @@ class FakeMessage:
         return dict(self._payload)
 
 
+class FakeStreamMessage:
+    """The ``message`` payload nested in a ``message_start`` stream event."""
+
+    def __init__(self, *, model: str | None = None, usage: object | None = None) -> None:
+        self.model = model
+        self.usage = usage
+
+
+class FakeMessageStartEvent:
+    def __init__(self, *, model: str | None = None, usage: object | None = None) -> None:
+        self.type = "message_start"
+        self.message = FakeStreamMessage(model=model, usage=usage)
+
+
+class FakeTextDelta:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+
+class FakeContentBlockDeltaEvent:
+    def __init__(self, text: str | None) -> None:
+        self.type = "content_block_delta"
+        self.delta = FakeTextDelta(text)
+
+
+class FakeStopDelta:
+    """The stop-reason ``delta`` nested in a ``message_delta`` event (no text)."""
+
+    def __init__(self, *, stop_reason: str | None = None) -> None:
+        self.stop_reason = stop_reason
+
+
+class FakeMessageDeltaEvent:
+    def __init__(self, *, usage: object | None = None, stop_reason: str | None = "end_turn") -> None:
+        self.type = "message_delta"
+        self.delta = FakeStopDelta(stop_reason=stop_reason)
+        self.usage = usage
+
+
 class AnthropicIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -166,6 +205,98 @@ class AnthropicIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed token=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeMessageStartEvent(
+                    model="claude-haiku-4-5-20251001",
+                    usage=FakeUsage(input_tokens=11, output_tokens=1),
+                ),
+                FakeContentBlockDeltaEvent("Bir "),
+                FakeContentBlockDeltaEvent("streams"),
+                FakeMessageDeltaEvent(usage=FakeUsage(output_tokens=4)),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_create(**kwargs: object) -> list[object]:
+                received.update(kwargs)
+                return chunks
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_messages(
+                    fake_create,
+                    model="claude-haiku-4-5",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                )
+                consumed = list(stream)
+
+            # Chunks pass through unchanged in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            # The model is refined from the message_start event's nested message.
+            self.assertEqual(generation_event.model, "claude-haiku-4-5-20251001")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            # input_tokens come from message_start, the final output_tokens from
+            # message_delta, and the total is derived from both.
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_records_streamed_generation_from_dict_chunks(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            chunks = [
+                {"type": "message_start", "message": {"model": "claude-haiku-4-5-20251001", "usage": {"input_tokens": 7, "output_tokens": 1}}},
+                {"type": "content_block_delta", "delta": {"text": "Bir "}},
+                {"type": "content_block_delta", "delta": {"text": "streams"}},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
+            ]
+
+            def fake_create(**kwargs: object) -> list[dict[str, object]]:
+                return chunks
+
+            with trace("chat"):
+                stream = trace_messages(fake_create, model="claude-haiku-4-5", messages=[], stream=True)
+                consumed = list(stream)
+
+            self.assertEqual(consumed, chunks)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.model, "claude-haiku-4-5-20251001")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[object]:
+                yield FakeContentBlockDeltaEvent("partial api_key=sk-ant-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-ant-secret123")
+
+            def fake_create(**kwargs: object) -> Iterator[object]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_messages(
+                    fake_create,
+                    model="claude-haiku-4-5",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():
