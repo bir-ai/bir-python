@@ -87,6 +87,11 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
         for source in sorted((PACKAGE_ROOT / "src" / "bir").glob("*.py")):
             write_file(archive, f"bir/{source.name}", source.read_bytes())
 
+        # Ship the PEP 561 marker so downstream type checkers trust the inline
+        # types. Carry the real marker bytes so RECORD reflects what we ship.
+        py_typed = PACKAGE_ROOT / "src" / "bir" / "py.typed"
+        write_file(archive, "bir/py.typed", py_typed.read_bytes())
+
         write_file(archive, f"{dist_info}/METADATA", metadata(version).encode("utf-8"))
         write_file(
             archive,
@@ -143,6 +148,7 @@ def inspect_wheel(wheel: Path) -> None:
     required_files = {
         "bir/__init__.py",
         "bir/_sdk.py",
+        "bir/py.typed",
     }
 
     with zipfile.ZipFile(wheel) as archive:

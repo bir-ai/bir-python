@@ -37,7 +37,8 @@ Run the repeatable release verification script from the repository root:
 
 The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
 wheel from the SDK package files and metadata, checks the wheel contents for
-obvious local/generated artifacts, installs the wheel into a fresh temporary
+obvious local/generated artifacts and for the PEP 561 `bir/py.typed` marker,
+installs the wheel into a fresh temporary
 virtual environment, and executes a smoke test that covers trace, span,
 retrieval, prompt metadata, generation, usage, cost, score events,
 deterministic evaluators, and local experiment writing.
@@ -117,6 +118,8 @@ PY
 - Inspect `pyproject.toml` metadata.
 - Inspect the rendered README content on the package index.
 - Confirm the wheel contains only the SDK package and expected metadata.
+- Confirm the wheel ships the `bir/py.typed` PEP 561 marker so downstream type
+  checkers honor the SDK's inline types.
 - Confirm no `.env`, local trace files, caches, or generated artifacts are
   included in the package.
 - Confirm the version in `pyproject.toml` matches the changelog entry.

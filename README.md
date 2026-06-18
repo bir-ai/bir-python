@@ -17,6 +17,10 @@ python -m pip install bir-sdk
 The distribution is published on PyPI as `bir-sdk`; the import name is `bir`
 (e.g. `from bir import observe`).
 
+Bir ships inline type annotations and a PEP 561 `py.typed` marker, so type
+checkers such as mypy and pyright use the SDK's types in your code without any
+extra stub packages.
+
 For local development from this repository:
 
 ```bash

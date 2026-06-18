@@ -6,6 +6,13 @@ This project follows a small-release workflow while the SDK is early-stage.
 Before publishing, verify the release with the SDK release checklist in
 `docs/SDK_RELEASE_CHECKLIST.md`.
 
+## Unreleased
+
+### Added
+
+- Shipped a PEP 561 `py.typed` marker so downstream type checkers (mypy,
+  pyright) use the SDK's inline type annotations instead of ignoring them.
+
 ## 0.1.1 - 2026-06-18
 
 ### Changed
