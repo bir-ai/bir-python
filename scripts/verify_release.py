@@ -95,6 +95,12 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
         py_typed = PACKAGE_ROOT / "src" / "bir" / "py.typed"
         write_file(archive, "bir/py.typed", py_typed.read_bytes())
 
+        # Ship console_scripts so pip generates the ``bir`` command at install
+        # time. Derived from pyproject's [project.scripts] so the two cannot drift.
+        scripts = console_scripts()
+        if scripts:
+            write_file(archive, f"{dist_info}/entry_points.txt", entry_points_text(scripts).encode("utf-8"))
+
         write_file(archive, f"{dist_info}/METADATA", metadata(version).encode("utf-8"))
         write_file(
             archive,
@@ -277,12 +283,53 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
     )
     run([str(smoke_python), str(smoke_test)], cwd=smoke_dir, label="fresh venv smoke test")
 
+    # The console_scripts entry point must be installed by the real wheel and be
+    # invokable as ``bir``. ``--version`` exercises the SDK import path and
+    # ``traces`` exercises a subcommand (no local traces exist, so it exits 0).
+    if console_scripts():
+        bir_script = smoke_env / "bin" / "bir"
+        run([str(bir_script), "--version"], cwd=smoke_dir, label="installed bir --version")
+        run([str(bir_script), "traces"], cwd=smoke_dir, label="installed bir traces")
+
 
 def package_version() -> str:
     """Read the SDK package version from pyproject.toml."""
 
     pyproject = PACKAGE_ROOT / "pyproject.toml"
     return required_string(pyproject.read_text(encoding="utf-8"), "version")
+
+
+def console_scripts() -> dict[str, str]:
+    """Parse the ``[project.scripts]`` table from pyproject.toml.
+
+    Implemented without ``tomllib`` so it runs on Python 3.10, the minimum the
+    SDK supports. The table is flat (``name = "module:callable"``), so a small
+    line scan is enough.
+    """
+
+    text = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    scripts: dict[str, str] = {}
+    in_section = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_section = line == "[project.scripts]"
+            continue
+        if in_section:
+            match = re.match(r'^([A-Za-z0-9._-]+)\s*=\s*"([^"]+)"', line)
+            if match:
+                scripts[match.group(1)] = match.group(2)
+    return scripts
+
+
+def entry_points_text(scripts: dict[str, str]) -> str:
+    """Render a wheel ``entry_points.txt`` for the given console scripts."""
+
+    lines = ["[console_scripts]"]
+    lines.extend(f"{name} = {target}" for name, target in scripts.items())
+    return "\n".join(lines) + "\n"
 
 
 def required_string(text: str, key: str) -> str:

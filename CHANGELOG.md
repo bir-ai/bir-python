@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- A stdlib-only `bir` command-line interface, installed as a console script, for
+  inspecting local traces and experiments and sending them to a server without
+  writing a script. Subcommands: `bir traces`, `bir tail`, `bir experiments`,
+  `bir send`, and `bir send-experiment`, with `--json` output on `traces` and
+  `experiments` for scripting. The CLI builds on the existing public API and
+  adds no runtime dependencies.
 - Environment-variable defaults for SDK configuration so deployments can
   configure Bir without code changes. `BIR_TRACE_PATH`, `BIR_CAPTURE_INPUTS`,
   `BIR_CAPTURE_OUTPUTS`, `BIR_SAMPLE_RATE`, `BIR_SERVICE_NAME`, and
@@ -26,6 +32,9 @@ Before publishing, verify the release with the SDK release checklist in
   `importlib.metadata.version("bir-sdk")` matches the project version, so
   distribution-name drift fails release verification instead of being masked by
   a wheel named `bir`.
+- `scripts/verify_release.py` now ships the `[project.scripts]` console-script
+  entry point in its verification wheel and asserts the installed `bir` command
+  is invokable, so console-script regressions fail release verification.
 - CI now runs the SDK unit tests and example smoke tests against Python 3.10,
   3.11, 3.12, and 3.13 (previously only 3.12) so version-specific regressions
   across the advertised support range surface before release.

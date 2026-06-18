@@ -39,6 +39,9 @@ Documentation = "https://github.com/bir-ai/bir-python/tree/main/docs"
 Source = "https://github.com/bir-ai/bir-python"
 Issues = "https://github.com/bir-ai/bir-python/issues"
 
+[project.scripts]
+bir = "bir.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 

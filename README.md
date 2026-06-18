@@ -112,6 +112,39 @@ ingested.
 Complete traces are sent root-first so the server receives the trace event before
 its spans, tool calls, generations, and scores.
 
+## Command Line
+
+Installing the SDK adds a `bir` command (a console script) for inspecting local
+traces and experiments and uploading them to a server without writing a script.
+It is built entirely on the standard library and the public API, so it adds no
+runtime dependencies.
+
+```bash
+bir traces                    # list local traces, newest first
+bir traces --limit 20 --json  # machine-readable JSON for scripting
+bir tail                      # follow .bir/traces.jsonl and print new events
+bir experiments               # list local experiments and their scores
+bir send                      # POST local events to http://127.0.0.1:8000
+bir send-experiment .bir/experiments/<name>-<id>.jsonl
+```
+
+| Command | What it does |
+| --- | --- |
+| `bir traces [--path P] [--limit N] [--json]` | List traces: start time, status, duration, event count, and name. |
+| `bir tail [--path P]` | Follow the trace file and print each new event as it is written (Ctrl-C to stop). |
+| `bir experiments [--dir D] [--json]` | List experiments: id, name, status, example and error counts, and aggregate scores. |
+| `bir send [--path P] [--server URL]` | Send local events and report how many were accepted, attempted, and skipped. |
+| `bir send-experiment PATH [--server URL]` | Send a saved experiment and its summary, and report the accepted count and id. |
+
+Every command accepts `--help`. `traces`, `tail`, and `send` read
+`.bir/traces.jsonl` by default; pass `--path` (or set `BIR_TRACE_PATH`) to use
+another file. `experiments` reads `.bir/experiments` by default; pass `--dir` to
+override. `send` and `send-experiment` default to `http://127.0.0.1:8000` and
+take `--server` to target another host. `--json` (on `traces` and `experiments`)
+emits a JSON array for piping into other tools. Commands print errors to stderr
+and exit non-zero when a file is missing or malformed or the server cannot be
+reached, so they compose cleanly in scripts.
+
 ## Privacy And Capture
 
 Input and output capture is disabled by default. Enable it globally with `configure()`

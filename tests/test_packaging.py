@@ -92,6 +92,34 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
         self.assertIn("bir/__init__.py", names)
 
 
+class VerifyReleaseEntryPointTests(unittest.TestCase):
+    """``verify_release`` ships the ``bir`` console script declared in pyproject."""
+
+    def setUp(self) -> None:
+        self.verify_release = _load_verify_release()
+        tmp = tempfile.TemporaryDirectory(prefix="bir-entrypoint-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+
+    def test_pyproject_declares_the_bir_console_script(self) -> None:
+        self.assertEqual(self.verify_release.console_scripts(), {"bir": "bir.cli:main"})
+
+    def test_built_wheel_ships_console_script_entry_point(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+
+        with zipfile.ZipFile(wheel) as archive:
+            names = set(archive.namelist())
+            entry_points = archive.read(f"bir_sdk-{version}.dist-info/entry_points.txt").decode("utf-8")
+            record = archive.read(f"bir_sdk-{version}.dist-info/RECORD").decode("utf-8")
+
+        self.assertIn(f"bir_sdk-{version}.dist-info/entry_points.txt", names)
+        self.assertIn("[console_scripts]", entry_points)
+        self.assertIn("bir = bir.cli:main", entry_points)
+        # The entry-point file is accounted for in RECORD like every shipped file.
+        self.assertIn(f"bir_sdk-{version}.dist-info/entry_points.txt", record)
+
+
 class VersionSurfaceTests(unittest.TestCase):
     """``bir.__version__`` resolves the ``bir-sdk`` distribution version."""
 
