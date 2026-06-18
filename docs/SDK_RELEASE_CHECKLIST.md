@@ -134,3 +134,39 @@ Even when you intend to publish, do not publish if any of these are true:
   matching update in the `bir-app` repository.
 - The release includes unrelated changes.
 - Remote CI has not passed on the release commit.
+
+## Publishing (tag-driven)
+
+Releases are automated by `.github/workflows/release.yml`. Pushing a version tag
+that matches the `pyproject.toml` version builds the package, publishes it to
+PyPI via Trusted Publishing, and creates a GitHub Release from the matching
+`CHANGELOG.md` section.
+
+```bash
+# After CI is green on the release commit and the checklist above passes:
+git tag v0.1.2          # tag must equal the pyproject version, prefixed with v
+git push origin v0.1.2
+```
+
+The PyPI publish step uses `skip-existing`, so tagging a version that was already
+uploaded manually still completes (the upload is skipped and the GitHub Release
+is created). The GitHub Release job is independent of the PyPI job, so a missing
+publisher configuration does not block the release from appearing.
+
+### One-time PyPI Trusted Publisher setup
+
+Trusted Publishing avoids storing a PyPI API token in GitHub. Configure it once
+on PyPI before the first automated publish:
+
+1. Sign in to PyPI and open the `bir-sdk` project →
+   Settings → Publishing → "Add a new publisher".
+2. Choose GitHub and enter:
+   - Owner: `bir-ai`
+   - Repository: `bir-python`
+   - Workflow name: `release.yml`
+   - Environment name: `pypi`
+3. Save. The next `v*.*.*` tag push will publish without any token.
+
+If you prefer an API token instead, remove the `id-token` permission and the
+Trusted Publishing step's reliance on OIDC, add a `PYPI_API_TOKEN` repository
+secret, and pass `password: ${{ secrets.PYPI_API_TOKEN }}` to the publish step.
