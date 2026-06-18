@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import random
 import re
 import urllib.error
@@ -181,7 +182,10 @@ class PromptRecord:
         return self.template.format(**self.variables)
 
 
-_config = _Config()
+# ``_config`` holds the active configuration. It is initialized from the BIR_*
+# environment variables at import time by ``_config_from_env`` near the bottom of
+# this module (defined there so the validators it reuses already exist) and is
+# then replaced wholesale by ``configure``.
 _write_lock = Lock()
 
 
@@ -203,6 +207,13 @@ def configure(
     recorded. It is decided once per trace root; when a trace is sampled out the
     function still runs and still raises, but the trace and every event under it
     write nothing. The default ``1.0`` records every trace.
+
+    Any field left unset falls back to the value supplied by the matching
+    environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
+    ``BIR_CAPTURE_OUTPUTS``, ``BIR_SAMPLE_RATE``, ``BIR_SERVICE_NAME``,
+    ``BIR_ENVIRONMENT``), which is read once at import time, and otherwise to the
+    hardcoded default. Explicit arguments to this function take precedence over
+    the environment.
     """
 
     global _config
@@ -1683,6 +1694,114 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# Environment-variable configuration
+#
+# The BIR_* variables let deployments configure the SDK without code changes.
+# They supply the starting defaults for ``_config`` at import time; explicit
+# ``configure(...)`` arguments still win. Capture stays opt-in: it is enabled
+# only when an env var or a ``configure`` call asks for it.
+# ---------------------------------------------------------------------------
+
+_ENV_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_ENV_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _env_value(name: str) -> str | None:
+    """Return the stripped value of ``name``, or ``None`` when unset or blank.
+
+    A blank (whitespace-only) value is treated as unset so a deployment template
+    that always defines ``BIR_*`` but sometimes leaves it empty falls back to the
+    hardcoded default instead of failing at import.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _parse_env_bool(value: str, name: str) -> bool:
+    """Parse a boolean-like environment value, rejecting ambiguous input."""
+
+    normalized = value.strip().lower()
+    if normalized in _ENV_TRUE_VALUES:
+        return True
+    if normalized in _ENV_FALSE_VALUES:
+        return False
+    allowed = ", ".join(sorted(_ENV_TRUE_VALUES | _ENV_FALSE_VALUES))
+    raise ValueError(f"bir {name} must be a boolean-like value (one of: {allowed}), got {value!r}")
+
+
+def _parse_env_sample_rate(value: str) -> float:
+    """Parse a float sample rate from the environment and range-check it."""
+
+    try:
+        numeric = float(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"bir BIR_SAMPLE_RATE must be a number between 0.0 and 1.0, got {value!r}") from exc
+    return _validate_sample_rate(numeric)
+
+
+def _config_from_env() -> _Config:
+    """Build the starting config from the ``BIR_*`` environment variables.
+
+    Every field falls back to its hardcoded default when the matching variable is
+    unset or blank, so with no environment set this returns a pristine
+    ``_Config()``. Invalid values raise a clear error, and capture stays disabled
+    unless an env var explicitly enables it.
+    """
+
+    defaults = _Config()
+    trace_path = _env_value("BIR_TRACE_PATH")
+    capture_inputs = _env_value("BIR_CAPTURE_INPUTS")
+    capture_outputs = _env_value("BIR_CAPTURE_OUTPUTS")
+    service_name = _env_value("BIR_SERVICE_NAME")
+    environment = _env_value("BIR_ENVIRONMENT")
+    sample_rate = _env_value("BIR_SAMPLE_RATE")
+    return _Config(
+        trace_path=Path(trace_path) if trace_path is not None else defaults.trace_path,
+        capture_inputs=(
+            _parse_env_bool(capture_inputs, "BIR_CAPTURE_INPUTS")
+            if capture_inputs is not None
+            else defaults.capture_inputs
+        ),
+        capture_outputs=(
+            _parse_env_bool(capture_outputs, "BIR_CAPTURE_OUTPUTS")
+            if capture_outputs is not None
+            else defaults.capture_outputs
+        ),
+        service_name=(
+            _validate_event_name(service_name, "BIR_SERVICE_NAME")
+            if service_name is not None
+            else defaults.service_name
+        ),
+        environment=(
+            _validate_event_name(environment, "BIR_ENVIRONMENT")
+            if environment is not None
+            else defaults.environment
+        ),
+        sample_rate=(
+            _parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate
+        ),
+    )
+
+
+# Apply env-derived defaults at import, now that the validators above exist.
+# ``configure(...)`` still overrides these, and tests reset to a pristine
+# ``_Config()`` via ``_reset_config_for_tests`` so ambient env never leaks in.
+_config = _config_from_env()
+
+
 def _reset_config_for_tests() -> None:
+    """Reset the active config to hardcoded defaults, ignoring ambient env.
+
+    Tests rely on a clean baseline, so this deliberately constructs a pristine
+    ``_Config()`` rather than re-reading the ``BIR_*`` variables; otherwise a
+    developer's real environment (or another test's monkeypatched env) could leak
+    into an unrelated test.
+    """
+
     global _config
     _config = _Config()

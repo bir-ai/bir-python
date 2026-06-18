@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Environment-variable defaults for SDK configuration so deployments can
+  configure Bir without code changes. `BIR_TRACE_PATH`, `BIR_CAPTURE_INPUTS`,
+  `BIR_CAPTURE_OUTPUTS`, `BIR_SAMPLE_RATE`, `BIR_SERVICE_NAME`, and
+  `BIR_ENVIRONMENT` provide the defaults read once at import time. Explicit
+  `configure(...)` arguments still take precedence, capture stays disabled
+  unless explicitly enabled, and invalid values raise a clear error.
 - Shipped a PEP 561 `py.typed` marker so downstream type checkers (mypy,
   pyright) use the SDK's inline type annotations instead of ignoring them.
 

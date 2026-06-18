@@ -129,6 +129,20 @@ from bir import configure
 configure(capture_inputs=True, capture_outputs=True)
 ```
 
+The same defaults can be set from the environment so a deployment can enable
+capture without code changes. `BIR_CAPTURE_INPUTS` and `BIR_CAPTURE_OUTPUTS`
+accept boolean-like values (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`,
+case-insensitive), and `BIR_TRACE_PATH` overrides the default
+`.bir/traces.jsonl` location. These variables are read once at import time and
+are overridden by any explicit `configure()` argument. Capture stays disabled
+unless an environment variable or a `configure()` call enables it.
+
+```bash
+export BIR_CAPTURE_INPUTS=true
+export BIR_CAPTURE_OUTPUTS=true
+export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
+```
+
 Captured values are normalized to JSON-compatible data before writing. Non-finite
 floats such as `NaN` and `Infinity` are stored as strings, and deeply nested
 values are truncated. `score()` requires a finite numeric value and accepts
@@ -153,6 +167,14 @@ from bir import configure
 configure(service_name="rag-api", environment="production")
 ```
 
+`BIR_SERVICE_NAME` and `BIR_ENVIRONMENT` set the same values from the
+environment; an explicit `configure()` argument takes precedence.
+
+```bash
+export BIR_SERVICE_NAME=rag-api
+export BIR_ENVIRONMENT=production
+```
+
 ## Sampling
 
 Use `configure(sample_rate=...)` to keep local trace volume bounded under load.
@@ -168,6 +190,14 @@ raises its own exceptions; only the local JSONL writes are skipped.
 from bir import configure
 
 configure(sample_rate=0.1)  # record about 10% of traces
+```
+
+`BIR_SAMPLE_RATE` sets the same default from the environment (a float between
+`0.0` and `1.0`); an explicit `configure(sample_rate=...)` argument takes
+precedence.
+
+```bash
+export BIR_SAMPLE_RATE=0.1  # record about 10% of traces
 ```
 
 ## Retrieval

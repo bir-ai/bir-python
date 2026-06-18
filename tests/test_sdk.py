@@ -18,7 +18,22 @@ from unittest.mock import patch
 
 import bir
 from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
-from bir._sdk import _reset_config_for_tests
+from bir._sdk import (
+    _Config,
+    _config_from_env,
+    _parse_env_bool,
+    _parse_env_sample_rate,
+    _reset_config_for_tests,
+)
+
+_BIR_ENV_VARS = (
+    "BIR_TRACE_PATH",
+    "BIR_CAPTURE_INPUTS",
+    "BIR_CAPTURE_OUTPUTS",
+    "BIR_SAMPLE_RATE",
+    "BIR_SERVICE_NAME",
+    "BIR_ENVIRONMENT",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_EVENTS_PATH = ROOT / "tests" / "fixtures" / "valid-events.jsonl"
@@ -39,6 +54,28 @@ def temporary_workdir() -> Iterator[Path]:
             yield workdir
         finally:
             os.chdir(previous)
+
+
+@contextmanager
+def env_vars(**values: str) -> Iterator[None]:
+    """Run with only the given BIR_* variables set, restoring the prior env.
+
+    All recognized BIR_* variables are cleared first so a developer's real
+    environment cannot leak into the assertions, then the provided ones are set.
+    """
+
+    saved = {name: os.environ.get(name) for name in _BIR_ENV_VARS}
+    for name in _BIR_ENV_VARS:
+        os.environ.pop(name, None)
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name in _BIR_ENV_VARS:
+            os.environ.pop(name, None)
+            previous = saved[name]
+            if previous is not None:
+                os.environ[name] = previous
 
 
 class FakeHttpResponse:
@@ -107,6 +144,11 @@ def load_contract_schema() -> dict[str, object]:
 
 
 class SdkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Start every test from hardcoded defaults so an ambient BIR_* variable
+        # in the developer's environment never changes the import-time config.
+        _reset_config_for_tests()
+
     def tearDown(self) -> None:
         _reset_config_for_tests()
 
@@ -2363,6 +2405,158 @@ class SdkTests(unittest.TestCase):
             configure(sample_rate=cast(Any, "high"))
         with self.assertRaisesRegex(TypeError, "sample_rate"):
             configure(sample_rate=cast(Any, True))
+
+    def test_config_from_env_with_nothing_set_matches_hardcoded_defaults(self) -> None:
+        with env_vars():
+            self.assertEqual(_config_from_env(), _Config())
+
+    def test_env_trace_path_sets_default_trace_path(self) -> None:
+        with env_vars(BIR_TRACE_PATH="/tmp/custom/bir-events.jsonl"):
+            config = _config_from_env()
+        self.assertEqual(config.trace_path, Path("/tmp/custom/bir-events.jsonl"))
+
+    def test_env_capture_inputs_sets_default(self) -> None:
+        with env_vars(BIR_CAPTURE_INPUTS="true"):
+            config = _config_from_env()
+        self.assertTrue(config.capture_inputs)
+        self.assertFalse(config.capture_outputs)
+
+    def test_env_capture_outputs_sets_default(self) -> None:
+        with env_vars(BIR_CAPTURE_OUTPUTS="1"):
+            config = _config_from_env()
+        self.assertTrue(config.capture_outputs)
+        self.assertFalse(config.capture_inputs)
+
+    def test_env_sample_rate_sets_default(self) -> None:
+        with env_vars(BIR_SAMPLE_RATE="0.25"):
+            config = _config_from_env()
+        self.assertEqual(config.sample_rate, 0.25)
+
+    def test_env_service_name_and_environment_set_defaults(self) -> None:
+        with env_vars(BIR_SERVICE_NAME="  rag-api  ", BIR_ENVIRONMENT="production"):
+            config = _config_from_env()
+        # The value is stripped before it is stored.
+        self.assertEqual(config.service_name, "rag-api")
+        self.assertEqual(config.environment, "production")
+
+    def test_env_blank_value_is_treated_as_unset(self) -> None:
+        with env_vars(BIR_SERVICE_NAME="   ", BIR_SAMPLE_RATE=""):
+            config = _config_from_env()
+        self.assertIsNone(config.service_name)
+        self.assertEqual(config.sample_rate, 1.0)
+
+    def test_env_capture_defaults_off_when_unset(self) -> None:
+        with env_vars(BIR_SERVICE_NAME="rag-api"):
+            config = _config_from_env()
+        self.assertFalse(config.capture_inputs)
+        self.assertFalse(config.capture_outputs)
+
+    def test_env_invalid_bool_raises_clear_error(self) -> None:
+        with env_vars(BIR_CAPTURE_INPUTS="maybe"):
+            with self.assertRaisesRegex(ValueError, "BIR_CAPTURE_INPUTS"):
+                _config_from_env()
+
+    def test_env_invalid_sample_rate_raises_clear_error(self) -> None:
+        with env_vars(BIR_SAMPLE_RATE="high"):
+            with self.assertRaisesRegex(ValueError, "BIR_SAMPLE_RATE"):
+                _config_from_env()
+        with env_vars(BIR_SAMPLE_RATE="1.5"):
+            with self.assertRaisesRegex(ValueError, "sample_rate"):
+                _config_from_env()
+
+    def test_parse_env_bool_accepts_truthy_and_falsy_values(self) -> None:
+        for value in ("1", "true", "TRUE", "Yes", "on", " true "):
+            self.assertIs(_parse_env_bool(value, "BIR_CAPTURE_INPUTS"), True)
+        for value in ("0", "false", "FALSE", "No", "off", " 0 "):
+            self.assertIs(_parse_env_bool(value, "BIR_CAPTURE_INPUTS"), False)
+
+    def test_parse_env_bool_rejects_ambiguous_values(self) -> None:
+        for value in ("maybe", "2", "", "tru", "t"):
+            with self.assertRaisesRegex(ValueError, "BIR_CAPTURE_INPUTS"):
+                _parse_env_bool(value, "BIR_CAPTURE_INPUTS")
+
+    def test_parse_env_sample_rate_parses_and_range_checks(self) -> None:
+        self.assertEqual(_parse_env_sample_rate("0.0"), 0.0)
+        self.assertEqual(_parse_env_sample_rate("1"), 1.0)
+        self.assertEqual(_parse_env_sample_rate(" 0.5 "), 0.5)
+        with self.assertRaisesRegex(ValueError, "BIR_SAMPLE_RATE"):
+            _parse_env_sample_rate("high")
+        for out_of_range in ("1.5", "-0.1", "nan", "inf"):
+            with self.assertRaisesRegex(ValueError, "sample_rate"):
+                _parse_env_sample_rate(out_of_range)
+
+    def test_explicit_configure_arguments_override_env_defaults(self) -> None:
+        import bir._sdk as sdk
+
+        with env_vars(BIR_SAMPLE_RATE="0.25", BIR_SERVICE_NAME="env-svc"):
+            # Simulate the import-time construction that read these env vars.
+            sdk._config = _config_from_env()
+            configure(sample_rate=0.9)
+
+        self.assertEqual(sdk._config.sample_rate, 0.9)  # explicit argument wins
+        self.assertEqual(sdk._config.service_name, "env-svc")  # env value preserved
+
+    def test_env_service_metadata_appears_on_trace_root(self) -> None:
+        import bir._sdk as sdk
+
+        with temporary_workdir() as workdir, env_vars(
+            BIR_SERVICE_NAME="env-svc", BIR_ENVIRONMENT="production"
+        ):
+            sdk._config = _config_from_env()
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(
+                root["metadata"],
+                {"service": {"name": "env-svc", "environment": "production"}},
+            )
+
+    def test_env_capture_flags_enable_capture(self) -> None:
+        import bir._sdk as sdk
+
+        with temporary_workdir() as workdir, env_vars(
+            BIR_CAPTURE_INPUTS="true", BIR_CAPTURE_OUTPUTS="yes"
+        ):
+            sdk._config = _config_from_env()
+
+            @observe()
+            def answer(question: str) -> str:
+                return "ok:" + question
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(root["input"], {"question": "hello"})
+            self.assertEqual(root["output"], "ok:hello")
+
+    def test_explicit_configure_capture_overrides_env_capture(self) -> None:
+        import bir._sdk as sdk
+
+        with temporary_workdir() as workdir, env_vars(
+            BIR_CAPTURE_OUTPUTS="true", BIR_SERVICE_NAME="env-svc"
+        ):
+            sdk._config = _config_from_env()
+            configure(capture_outputs=False)
+
+            @observe()
+            def answer(question: str) -> str:
+                return "secret-" + question
+
+            answer("hello")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            # Explicit configure(capture_outputs=False) wins over the env var.
+            self.assertIsNone(root["output"])
+            # The env-provided service name still survives the configure() call.
+            self.assertEqual(root["metadata"], {"service": {"name": "env-svc"}})
 
 
 if __name__ == "__main__":
