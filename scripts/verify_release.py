@@ -39,7 +39,7 @@ def main() -> int:
         run_pyright()
         wheel = build_wheel(wheelhouse, version)
         inspect_wheel(wheel)
-        run_install_smoke_test(smoke_env, smoke_dir, wheel)
+        run_install_smoke_test(smoke_env, smoke_dir, wheel, version)
 
     print("Bir SDK release verification passed.")
     return 0
@@ -74,8 +74,11 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
     """Build a minimal pure-Python wheel into the given wheelhouse."""
 
     print("==> wheel build", flush=True)
-    wheel = wheelhouse / f"bir-{version}-py3-none-any.whl"
-    dist_info = f"bir-{version}.dist-info"
+    # Use the normalized "bir-sdk" distribution name (bir_sdk) for the wheel
+    # filename and *.dist-info so pip/importlib resolve the dist as "bir-sdk",
+    # matching the published package. The import package stays "bir/".
+    wheel = wheelhouse / f"bir_sdk-{version}-py3-none-any.whl"
+    dist_info = f"bir_sdk-{version}.dist-info"
     records: list[tuple[str, str, int]] = []
 
     def write_file(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
@@ -123,7 +126,7 @@ def metadata(version: str) -> str:
     headers = "\n".join(
         [
             "Metadata-Version: 2.4",
-            "Name: bir",
+            "Name: bir-sdk",
             f"Version: {version}",
             f"Summary: {description}",
             f"Requires-Python: {requires_python}",
@@ -164,7 +167,7 @@ def inspect_wheel(wheel: Path) -> None:
             raise RuntimeError(f"wheel contains forbidden local/generated path: {name}")
 
 
-def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> None:
+def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, version: str) -> None:
     """Install the wheel into a fresh venv and run a basic SDK smoke test."""
 
     venv.EnvBuilder(with_pip=True).create(smoke_env)
@@ -179,8 +182,28 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path) -> Non
     )
 
     smoke_test = smoke_dir / "smoke_test.py"
+    # Assert the installed distribution resolves as "bir-sdk" at the expected
+    # version, so future drift between the dist name and __version__ fails here.
+    version_check = textwrap.dedent(
+        f"""
+        from importlib.metadata import version as _distribution_version
+
+        import bir
+
+        installed_version = _distribution_version("bir-sdk")
+        assert installed_version == {version!r}, (
+            "installed bir-sdk version " + repr(installed_version)
+            + " does not match the pyproject version " + {version!r}
+        )
+        assert bir.__version__ == {version!r}, (
+            "bir.__version__ " + repr(bir.__version__)
+            + " does not match the pyproject version " + {version!r}
+        )
+        """
+    )
     smoke_test.write_text(
-        textwrap.dedent(
+        version_check
+        + textwrap.dedent(
             """
             from bir import configure, generation, load_traces, observe, prompt, retrieval, score, span, trace
             from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment

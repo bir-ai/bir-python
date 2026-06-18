@@ -22,8 +22,11 @@ from ._sdk import (
 )
 
 try:
-    __version__ = version("bir")
-except PackageNotFoundError:  # running from source (PYTHONPATH=src) without an install
+    # The published distribution is "bir-sdk"; the import package is "bir".
+    __version__ = version("bir-sdk")
+except PackageNotFoundError:
+    # Fallback only applies when running from source (PYTHONPATH=src) without an
+    # install, where no distribution metadata exists.
     __version__ = "0.1.1"
 
 __all__ = [

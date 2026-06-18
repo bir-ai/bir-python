@@ -17,6 +17,8 @@ import zipfile
 from pathlib import Path
 from types import ModuleType
 
+import bir
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -54,7 +56,7 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
 
         with zipfile.ZipFile(wheel) as archive:
             names = set(archive.namelist())
-            record = archive.read(f"bir-{version}.dist-info/RECORD").decode("utf-8")
+            record = archive.read(f"bir_sdk-{version}.dist-info/RECORD").decode("utf-8")
 
         self.assertIn("bir/py.typed", names)
         # The marker is also accounted for in RECORD (with a hash and size).
@@ -71,6 +73,39 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.verify_release.inspect_wheel(wheel)
+
+    def test_built_wheel_resolves_as_bir_sdk_distribution(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+
+        # The wheel filename and *.dist-info use the normalized distribution
+        # name so pip/importlib resolve the dist as "bir-sdk", not "bir".
+        self.assertEqual(wheel.name, f"bir_sdk-{version}-py3-none-any.whl")
+
+        with zipfile.ZipFile(wheel) as archive:
+            names = set(archive.namelist())
+            metadata = archive.read(f"bir_sdk-{version}.dist-info/METADATA").decode("utf-8")
+
+        self.assertIn(f"bir_sdk-{version}.dist-info/METADATA", names)
+        self.assertIn("Name: bir-sdk", metadata.splitlines())
+        # The import package is still shipped as "bir/", unchanged.
+        self.assertIn("bir/__init__.py", names)
+
+
+class VersionSurfaceTests(unittest.TestCase):
+    """``bir.__version__`` resolves the ``bir-sdk`` distribution version."""
+
+    def test_version_is_non_empty_well_formed_string(self) -> None:
+        self.assertIsInstance(bir.__version__, str)
+        self.assertTrue(bir.__version__)
+        self.assertRegex(bir.__version__, r"^\d+\.\d+\.\d+")
+
+    def test_version_matches_pyproject_version(self) -> None:
+        # Holds whether the dist is installed (``version("bir-sdk")``) or running
+        # from source (the literal fallback): both must equal the pyproject
+        # version, so a stale fallback or wrong dist name fails here.
+        expected = _load_verify_release().package_version()
+        self.assertEqual(bir.__version__, expected)
 
 
 if __name__ == "__main__":

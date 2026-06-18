@@ -36,16 +36,18 @@ Run the repeatable release verification script from the repository root:
 ```
 
 The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
-wheel from the SDK package files and metadata, checks the wheel contents for
-obvious local/generated artifacts and for the PEP 561 `bir/py.typed` marker,
-installs the wheel into a fresh temporary
-virtual environment, and executes a smoke test that covers trace, span,
-retrieval, prompt metadata, generation, usage, cost, score events,
-deterministic evaluators, and local experiment writing.
+wheel under the `bir-sdk` distribution name from the SDK package files and
+metadata, checks the wheel contents for obvious local/generated artifacts and
+for the PEP 561 `bir/py.typed` marker, installs the wheel into a fresh temporary
+virtual environment, and executes a smoke test that asserts the installed
+distribution resolves as `bir-sdk` at the project version (so distribution-name
+drift fails verification) and covers trace, span, retrieval, prompt metadata,
+generation, usage, cost, score events, deterministic evaluators, and local
+experiment writing.
 
 CI runs the same release verification script on pushes and pull requests to
 `main`. The server and dashboard contract tests run in the `bir-app`
-repository, against the published `bir` package.
+repository, against the published `bir-sdk` package.
 
 To run the unit tests, example smoke tests, and type checks directly from the
 repository root:

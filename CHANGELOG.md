@@ -13,6 +13,24 @@ Before publishing, verify the release with the SDK release checklist in
 - Shipped a PEP 561 `py.typed` marker so downstream type checkers (mypy,
   pyright) use the SDK's inline type annotations instead of ignoring them.
 
+### Changed
+
+- `scripts/verify_release.py` now builds and installs its verification wheel
+  under the `bir-sdk` distribution name and asserts that
+  `importlib.metadata.version("bir-sdk")` matches the project version, so
+  distribution-name drift fails release verification instead of being masked by
+  a wheel named `bir`.
+- CI now runs the SDK unit tests and example smoke tests against Python 3.10,
+  3.11, 3.12, and 3.13 (previously only 3.12) so version-specific regressions
+  across the advertised support range surface before release.
+
+### Fixed
+
+- `bir.__version__` now reads the published `bir-sdk` distribution metadata
+  instead of `bir`. Installed packages report their real version instead of
+  silently falling back to a hardcoded string; the fallback applies only when
+  running from source (`PYTHONPATH=src`) without an install.
+
 ## 0.1.1 - 2026-06-18
 
 ### Changed
