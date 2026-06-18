@@ -203,7 +203,7 @@ class GoogleIntegrationTests(unittest.TestCase):
             ]
             received: dict[str, object] = {}
 
-            def fake_generate(**kwargs: object) -> list[object]:
+            def fake_generate(**kwargs: object) -> list[FakeGenerateContentChunk]:
                 received.update(kwargs)
                 return chunks
 
@@ -241,6 +241,7 @@ class GoogleIntegrationTests(unittest.TestCase):
             def fake_generate(**kwargs: object) -> list[dict[str, object]]:
                 return chunks
 
+            consumed: list[dict[str, object]] = []
             with trace("chat"):
                 stream = trace_generate_content(fake_generate, model="gemini-2.5-flash", contents=[], stream=True)
                 consumed = list(stream)

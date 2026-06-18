@@ -261,6 +261,7 @@ class AnthropicIntegrationTests(unittest.TestCase):
             def fake_create(**kwargs: object) -> list[dict[str, object]]:
                 return chunks
 
+            consumed: list[dict[str, object]] = []
             with trace("chat"):
                 stream = trace_messages(fake_create, model="claude-haiku-4-5", messages=[], stream=True)
                 consumed = list(stream)
