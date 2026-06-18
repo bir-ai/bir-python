@@ -19,9 +19,12 @@ from bir.evals import (
     DeterministicEvaluator,
     EvaluationContext,
     EvalResult,
+    ExperimentDiff,
+    ExperimentResult,
     answer_contains_citation,
     answer_context_overlap,
     contains,
+    compare_experiments,
     cost_under,
     custom_evaluator,
     exact_match,
@@ -43,6 +46,72 @@ from bir.evals import (
 class EvalTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
+
+    def test_compare_experiments_classifies_aggregate_score_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(
+                Path(directory) / "baseline.jsonl",
+                {"quality": 0.8, "speed": 0.5, "stable": 0.7, "removed": 0.4},
+            )
+            candidate = self._run_score_experiment(
+                Path(directory) / "candidate.jsonl",
+                {"quality": 0.6, "speed": 0.8, "stable": 0.7, "added": 0.9},
+            )
+
+            diff = compare_experiments(baseline, candidate, tolerance=0.1)
+
+            self.assertIsInstance(diff, ExperimentDiff)
+            self.assertAlmostEqual(diff.deltas["quality"], -0.2)
+            self.assertAlmostEqual(diff.deltas["speed"], 0.3)
+            self.assertEqual(diff.deltas["stable"], 0.0)
+            self.assertEqual(diff.regressed, {"quality"})
+            self.assertEqual(diff.improved, {"speed"})
+            self.assertEqual(diff.unchanged, {"stable"})
+            self.assertEqual(diff.baseline_only, {"removed"})
+            self.assertEqual(diff.candidate_only, {"added"})
+            self.assertTrue(diff.has_regressions)
+            self.assertEqual(diff.to_dict()["regressed"], ["quality"])
+
+    def test_compare_experiments_tolerance_boundary_is_not_a_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.8})
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.7})
+
+            diff = compare_experiments(baseline, candidate, tolerance=0.1)
+
+            self.assertFalse(diff.has_regressions)
+            self.assertEqual(diff.regressed, set())
+            self.assertEqual(diff.unchanged, {"quality"})
+
+    def test_compare_experiments_loads_result_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.9})
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.8})
+
+            diff = compare_experiments(baseline.path or "", Path(candidate.path or ""), tolerance=0.05)
+
+            self.assertEqual(diff.regressed, {"quality"})
+
+    def test_compare_experiments_rejects_invalid_tolerance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment = self._run_score_experiment(Path(directory) / "experiment.jsonl", {"quality": 1.0})
+            with self.assertRaisesRegex(ValueError, "tolerance must be non-negative"):
+                compare_experiments(experiment, experiment, tolerance=-0.1)
+            with self.assertRaisesRegex(ValueError, "tolerance must be finite"):
+                compare_experiments(experiment, experiment, tolerance=math.inf)
+
+    @staticmethod
+    def _run_score_experiment(path: Path, scores: dict[str, float]) -> ExperimentResult:
+        return run_experiment(
+            path.stem,
+            dataset=Dataset([DatasetExample(id="row", input={"scores": scores})]),
+            task=lambda scores: scores,
+            evaluators=[
+                custom_evaluator(name, lambda output, _expected, key=name: output[key])
+                for name in scores
+            ],
+            path=path,
+        )
 
     def test_deterministic_evaluators_return_numeric_scores(self) -> None:
         self.assertEqual(exact_match("Paris").evaluate("Paris").value, 1.0)

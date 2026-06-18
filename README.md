@@ -496,6 +496,26 @@ loaded = load_experiment(result.path)
 summaries = list_experiments()
 ```
 
+Compare a candidate run with a persisted baseline using aggregate evaluator
+means. Deltas outside the tolerance are improved or regressed, while evaluators
+that exist in only one run are reported separately rather than compared:
+
+```python
+from bir.evals import compare_experiments
+
+diff = compare_experiments("baseline.jsonl", "candidate.jsonl", tolerance=0.01)
+print(diff.to_dict())
+if diff.has_regressions:
+    raise SystemExit(1)
+```
+
+The CLI provides the same CI gate. It prints the diff as JSON and exits `1`
+exactly when a shared evaluator drops by more than the tolerance:
+
+```console
+bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
+```
+
 `Dataset.to_jsonl()` redacts common secret-like values by default when exporting
 examples. If you intentionally need to preserve raw dataset payloads, opt out
 explicitly:

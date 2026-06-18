@@ -29,6 +29,7 @@ __all__ = [
     "DeterministicEvaluator",
     "EvaluationContext",
     "EvalResult",
+    "ExperimentDiff",
     "ExperimentExampleResult",
     "ExperimentResult",
     "ExperimentSummary",
@@ -36,6 +37,7 @@ __all__ = [
     "answer_contains_citation",
     "answer_context_overlap",
     "contains",
+    "compare_experiments",
     "cost_under",
     "custom_evaluator",
     "exact_match",
@@ -305,6 +307,39 @@ class ExperimentResult:
             "aggregate_scores": self.aggregate_scores,
             "path": self.path,
             "results": [result.to_dict() for result in self.results],
+        }
+
+
+@dataclass(frozen=True)
+class ExperimentDiff:
+    """Aggregate-score differences between two experiment runs."""
+
+    deltas: dict[str, float]
+    regressed: frozenset[str]
+    improved: frozenset[str]
+    unchanged: frozenset[str]
+    baseline_only: frozenset[str]
+    candidate_only: frozenset[str]
+    tolerance: float
+
+    @property
+    def has_regressions(self) -> bool:
+        """Return whether any shared evaluator regressed beyond tolerance."""
+
+        return bool(self.regressed)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a deterministic JSON-serializable representation of the diff."""
+
+        return {
+            "deltas": self.deltas,
+            "regressed": sorted(self.regressed),
+            "improved": sorted(self.improved),
+            "unchanged": sorted(self.unchanged),
+            "baseline_only": sorted(self.baseline_only),
+            "candidate_only": sorted(self.candidate_only),
+            "tolerance": self.tolerance,
+            "has_regressions": self.has_regressions,
         }
 
 
@@ -943,6 +978,54 @@ def load_experiment(path: str | Path) -> ExperimentResult:
         end_time=end_time,
         results=results,
         path=experiment_path,
+    )
+
+
+def compare_experiments(
+    baseline: ExperimentResult | str | Path,
+    candidate: ExperimentResult | str | Path,
+    *,
+    tolerance: float = 0.0,
+) -> ExperimentDiff:
+    """Compare shared aggregate evaluator scores from two experiment runs.
+
+    A shared evaluator regresses when ``candidate - baseline`` is strictly less
+    than ``-tolerance``. Evaluators found in only one run are reported but are
+    not treated as regressions because no aggregate score can be compared.
+    """
+
+    validated_tolerance = _validate_finite_number(tolerance, "tolerance")
+    if validated_tolerance < 0:
+        raise ValueError("tolerance must be non-negative")
+
+    baseline_result = baseline if isinstance(baseline, ExperimentResult) else load_experiment(baseline)
+    candidate_result = candidate if isinstance(candidate, ExperimentResult) else load_experiment(candidate)
+    baseline_scores = baseline_result.aggregate_scores
+    candidate_scores = candidate_result.aggregate_scores
+    shared = baseline_scores.keys() & candidate_scores.keys()
+    deltas = {name: candidate_scores[name] - baseline_scores[name] for name in sorted(shared)}
+
+    regressed = frozenset(
+        name
+        for name, delta in deltas.items()
+        if delta < -validated_tolerance
+        and not math.isclose(delta, -validated_tolerance, rel_tol=1e-12, abs_tol=1e-12)
+    )
+    improved = frozenset(
+        name
+        for name, delta in deltas.items()
+        if delta > validated_tolerance
+        and not math.isclose(delta, validated_tolerance, rel_tol=1e-12, abs_tol=1e-12)
+    )
+    unchanged = frozenset(shared - regressed - improved)
+    return ExperimentDiff(
+        deltas=deltas,
+        regressed=regressed,
+        improved=improved,
+        unchanged=unchanged,
+        baseline_only=frozenset(baseline_scores.keys() - candidate_scores.keys()),
+        candidate_only=frozenset(candidate_scores.keys() - baseline_scores.keys()),
+        tolerance=validated_tolerance,
     )
 
 

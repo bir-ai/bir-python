@@ -24,7 +24,7 @@ from unittest.mock import patch
 import bir
 from bir import cli
 from bir._sdk import _reset_config_for_tests
-from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
+from bir.evals import Dataset, DatasetExample, contains, custom_evaluator, exact_match, run_experiment
 
 
 @contextmanager
@@ -217,6 +217,46 @@ class ExperimentsCommandTests(CliBaseTest):
             self.assertEqual(code, 0)
             self.assertEqual(err, "")
             self.assertIn("No experiments found", out)
+
+
+class EvalGateCommandTests(CliBaseTest):
+    @staticmethod
+    def _run_experiment(path: Path, score: float) -> None:
+        run_experiment(
+            path.stem,
+            dataset=Dataset([DatasetExample(id="q1", input=score)]),
+            task=lambda value: value,
+            evaluators=[custom_evaluator("quality", lambda output, _expected: output)],
+            path=path,
+        )
+
+    def test_exits_nonzero_and_prints_json_for_regression(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--tolerance", "0.1")
+
+            self.assertEqual(code, 1)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertTrue(payload["has_regressions"])
+            self.assertEqual(payload["regressed"], ["quality"])
+
+    def test_exits_zero_at_tolerance_boundary(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.8)
+            self._run_experiment(candidate, 0.7)
+
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--tolerance", "0.1")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertFalse(json.loads(out)["has_regressions"])
 
 
 class SendCommandTests(CliBaseTest):

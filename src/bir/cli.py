@@ -17,7 +17,7 @@ from typing import Any, Callable, TextIO
 
 from . import __version__, _sdk
 from ._sdk import LoadedTrace, load_traces, send_events
-from .evals import ExperimentSummary, list_experiments, send_experiment
+from .evals import ExperimentSummary, compare_experiments, list_experiments, send_experiment
 
 _DEFAULT_SERVER = "http://127.0.0.1:8000"
 _DEFAULT_EXPERIMENT_DIR = ".bir/experiments"
@@ -86,6 +86,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     send_experiment_parser.set_defaults(func=_cmd_send_experiment)
 
+    eval_gate = subparsers.add_parser(
+        "eval-gate",
+        help="Compare two experiments and fail if an aggregate score regressed.",
+    )
+    eval_gate.add_argument("baseline", help="Baseline experiment result JSONL file.")
+    eval_gate.add_argument("candidate", help="Candidate experiment result JSONL file.")
+    eval_gate.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.0,
+        help="Maximum aggregate-score change treated as unchanged (default: 0).",
+    )
+    eval_gate.set_defaults(func=_cmd_eval_gate)
+
     return parser
 
 
@@ -152,6 +166,12 @@ def _cmd_send_experiment(args: argparse.Namespace) -> int:
     result = send_experiment(args.path, args.server)
     print(f"accepted={result.accepted} id={result.experiment_id}")
     return 0
+
+
+def _cmd_eval_gate(args: argparse.Namespace) -> int:
+    diff = compare_experiments(args.baseline, args.candidate, tolerance=args.tolerance)
+    _dump_json(diff.to_dict(), sys.stdout)
+    return 1 if diff.has_regressions else 0
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:

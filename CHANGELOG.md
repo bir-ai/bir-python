@@ -10,6 +10,9 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Aggregate-score experiment comparison through `compare_experiments()` and
+  `ExperimentDiff`, plus a stdlib-only `bir eval-gate` command that exits
+  non-zero when a candidate regression exceeds the configured tolerance.
 - A stdlib-only `bir` command-line interface, installed as a console script, for
   inspecting local traces and experiments and sending them to a server without
   writing a script. Subcommands: `bir traces`, `bir tail`, `bir experiments`,
