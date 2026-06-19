@@ -38,10 +38,12 @@ Run the repeatable release verification script from the repository root:
 The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
 wheel under the `bir-sdk` distribution name from the SDK package files and
 metadata, checks the wheel contents for obvious local/generated artifacts and
-for the PEP 561 `bir/py.typed` marker, installs the wheel into a fresh temporary
+for the complete `bir` package tree and PEP 561 `bir/py.typed` marker, validates
+RECORD hashes and sizes, installs the wheel into a fresh temporary
 virtual environment, and executes a smoke test that asserts the installed
 distribution resolves as `bir-sdk` at the project version (so distribution-name
-drift fails verification) and covers trace, span, retrieval, prompt metadata,
+drift fails verification), imports every integration without provider SDKs, and
+covers trace, span, retrieval, prompt metadata,
 generation, usage, cost, score events, deterministic evaluators, and local
 experiment writing.
 

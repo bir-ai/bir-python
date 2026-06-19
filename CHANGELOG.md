@@ -88,6 +88,9 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Release verification wheels now include and inspect the complete `bir` package
+  tree, including every `bir.integrations` module, and smoke-test those imports
+  in a clean environment without provider SDKs.
 - Made the Pyright release gate independent of interpreter discovery by keeping
   the checked offline example tests free of runtime Pytest imports. The same
   three smoke scenarios remain collectable by Pytest with per-test SDK and

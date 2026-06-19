@@ -62,6 +62,12 @@ pyright
 python scripts/verify_release.py
 ```
 
+Release verification builds the wheel without network access from the complete
+`bir` package tree, checks its contents and RECORD hashes, then installs it into
+a clean virtual environment. The installed-wheel smoke test imports `bir.evals`,
+`bir.cli`, and every optional integration module without installing provider
+SDKs.
+
 The checked example tests use only standard-library test utilities, so Pyright's
 release gate is hermetic whether tooling is installed in a repository `.venv` or
 in CI's active interpreter. Pytest remains optional development tooling.

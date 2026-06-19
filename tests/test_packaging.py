@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib.resources
 import importlib.util
+import base64
+import hashlib
 import tempfile
 import unittest
 import zipfile
@@ -65,14 +67,108 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
         # Should not raise: the wheel carries every required file.
         self.verify_release.inspect_wheel(wheel)
 
-    def test_inspect_wheel_rejects_missing_marker(self) -> None:
-        wheel = self.tmp_path / "missing-marker.whl"
-        with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr("bir/__init__.py", b"")
-            archive.writestr("bir/_sdk.py", b"")
+    def test_built_wheel_ships_complete_package_tree_with_valid_record(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+        expected_python = {
+            (Path("bir") / path.relative_to(REPO_ROOT / "src" / "bir")).as_posix()
+            for path in self.verify_release.package_python_files(REPO_ROOT / "src" / "bir")
+        }
 
-        with self.assertRaises(RuntimeError):
+        with zipfile.ZipFile(wheel) as archive:
+            names = set(archive.namelist())
+            record_text = archive.read(f"bir_sdk-{version}.dist-info/RECORD").decode("utf-8")
+
+        self.assertTrue(expected_python.issubset(names))
+        self.assertIn("bir/integrations/openai.py", names)
+        self.assertIn("bir/integrations/vertexai.py", names)
+        self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
+        self.assertFalse(any(name.startswith(("tests/", "docs/", ".bir/")) for name in names))
+        for name in expected_python | {"bir/py.typed"}:
+            data = (REPO_ROOT / "src" / name).read_bytes()
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+            self.assertIn(f"{name},sha256={digest},{len(data)}", record_text)
+
+    def test_inspect_wheel_rejects_missing_marker(self) -> None:
+        version = self.verify_release.package_version()
+        built = self.verify_release.build_wheel(self.tmp_path, version)
+        wheel = self.tmp_path / "missing-marker.whl"
+        self._copy_wheel_without(built, wheel, "bir/py.typed")
+
+        with self.assertRaisesRegex(RuntimeError, "missing expected SDK files"):
             self.verify_release.inspect_wheel(wheel)
+
+    def test_build_is_deterministic(self) -> None:
+        version = self.verify_release.package_version()
+        first_dir = self.tmp_path / "first"
+        second_dir = self.tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+
+        first = self.verify_release.build_wheel(first_dir, version)
+        second = self.verify_release.build_wheel(second_dir, version)
+
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_package_file_discovery_excludes_non_package_directories(self) -> None:
+        package = self.tmp_path / "sample"
+        subpackage = package / "included"
+        cache = package / "__pycache__"
+        non_package = package / "generated"
+        subpackage.mkdir(parents=True)
+        cache.mkdir()
+        non_package.mkdir()
+        for path in (
+            package / "__init__.py",
+            package / "module.py",
+            subpackage / "__init__.py",
+            subpackage / "nested.py",
+            cache / "cached.py",
+            non_package / "artifact.py",
+        ):
+            path.touch()
+
+        discovered = {
+            path.relative_to(package).as_posix()
+            for path in self.verify_release.package_python_files(package)
+        }
+
+        self.assertEqual(
+            discovered,
+            {"__init__.py", "module.py", "included/__init__.py", "included/nested.py"},
+        )
+
+    def test_inspect_wheel_rejects_missing_integrations_subpackage(self) -> None:
+        version = self.verify_release.package_version()
+        built = self.verify_release.build_wheel(self.tmp_path, version)
+        wheel = self.tmp_path / "missing-integrations.whl"
+        self._copy_wheel_without(built, wheel, "bir/integrations/")
+
+        with self.assertRaisesRegex(RuntimeError, "missing expected SDK files"):
+            self.verify_release.inspect_wheel(wheel)
+
+    def test_inspect_wheel_rejects_missing_required_package_module(self) -> None:
+        version = self.verify_release.package_version()
+        built = self.verify_release.build_wheel(self.tmp_path, version)
+        wheel = self.tmp_path / "missing-evals.whl"
+        self._copy_wheel_without(built, wheel, "bir/evals.py")
+
+        with self.assertRaisesRegex(RuntimeError, "missing expected SDK files"):
+            self.verify_release.inspect_wheel(wheel)
+
+    @staticmethod
+    def _copy_wheel_without(source: Path, destination: Path, prefix: str) -> None:
+        """Copy an archive while removing members and their RECORD rows."""
+
+        with zipfile.ZipFile(source) as original, zipfile.ZipFile(destination, "w") as changed:
+            for info in original.infolist():
+                data = original.read(info.filename)
+                if info.filename.startswith(prefix):
+                    continue
+                if info.filename.endswith(".dist-info/RECORD"):
+                    lines = data.decode("utf-8").splitlines()
+                    data = ("\n".join(line for line in lines if not line.startswith(prefix)) + "\n").encode()
+                changed.writestr(info, data)
 
     def test_built_wheel_resolves_as_bir_sdk_distribution(self) -> None:
         version = self.verify_release.package_version()

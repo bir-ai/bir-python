@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import re
 import base64
+import csv
 import hashlib
+import io
 import shutil
 import subprocess
 import sys
@@ -20,6 +22,26 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 # The SDK package now lives at the repository root, so the package root and the
 # repository root are the same directory.
 REPO_ROOT = PACKAGE_ROOT
+PACKAGE_SOURCE = PACKAGE_ROOT / "src" / "bir"
+REQUIRED_PACKAGE_FILES = {
+    "bir/__init__.py",
+    "bir/_sdk.py",
+    "bir/cli.py",
+    "bir/evals.py",
+    "bir/integrations/__init__.py",
+    "bir/integrations/_common.py",
+    "bir/integrations/anthropic.py",
+    "bir/integrations/bedrock.py",
+    "bir/integrations/cohere.py",
+    "bir/integrations/google.py",
+    "bir/integrations/langchain.py",
+    "bir/integrations/litellm.py",
+    "bir/integrations/llamaindex.py",
+    "bir/integrations/mistral.py",
+    "bir/integrations/openai.py",
+    "bir/integrations/vertexai.py",
+    "bir/py.typed",
+}
 
 
 def main() -> int:
@@ -82,13 +104,19 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
     records: list[tuple[str, str, int]] = []
 
     def write_file(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
-        archive.writestr(name, data)
+        # Fixed timestamps and permissions keep repeated builds byte-for-byte
+        # reproducible, in addition to the deterministic member ordering.
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o100644 << 16
+        archive.writestr(info, data)
         digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
         records.append((name, f"sha256={digest}", len(data)))
 
     with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for source in sorted((PACKAGE_ROOT / "src" / "bir").glob("*.py")):
-            write_file(archive, f"bir/{source.name}", source.read_bytes())
+        for source in package_python_files(PACKAGE_SOURCE):
+            archive_name = (Path("bir") / source.relative_to(PACKAGE_SOURCE)).as_posix()
+            write_file(archive, archive_name, source.read_bytes())
 
         # Ship the PEP 561 marker so downstream type checkers trust the inline
         # types. Carry the real marker bytes so RECORD reflects what we ship.
@@ -117,9 +145,37 @@ def build_wheel(wheelhouse: Path, version: str) -> Path:
 
         record_lines = [f"{name},{digest},{size}" for name, digest, size in records]
         record_lines.append(f"{dist_info}/RECORD,,")
-        archive.writestr(f"{dist_info}/RECORD", "\n".join(record_lines) + "\n")
+        write_record(archive, f"{dist_info}/RECORD", ("\n".join(record_lines) + "\n").encode("utf-8"))
 
     return wheel
+
+
+def package_python_files(package_root: Path) -> list[Path]:
+    """Return Python files from conventional package directories below root."""
+
+    if not (package_root / "__init__.py").is_file():
+        raise RuntimeError(f"package directory is missing __init__.py: {package_root}")
+
+    package_dirs = [package_root]
+    discovered: list[Path] = []
+    while package_dirs:
+        package_dir = package_dirs.pop(0)
+        discovered.extend(path for path in package_dir.glob("*.py") if path.is_file())
+        package_dirs.extend(
+            child
+            for child in sorted(package_dir.iterdir())
+            if child.is_dir() and (child / "__init__.py").is_file()
+        )
+    return sorted(discovered, key=lambda path: path.relative_to(package_root).as_posix())
+
+
+def write_record(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    """Write RECORD itself without adding a self-referential hash entry."""
+
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o100644 << 16
+    archive.writestr(info, data)
 
 
 def metadata(version: str) -> str:
@@ -154,16 +210,28 @@ def inspect_wheel(wheel: Path) -> None:
         "build",
         "dist",
     }
-    required_files = {
-        "bir/__init__.py",
-        "bir/_sdk.py",
-        "bir/py.typed",
-    }
-
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
+        if len(record_names) != 1:
+            raise RuntimeError("wheel must contain exactly one dist-info/RECORD")
+        record_rows = list(csv.reader(io.StringIO(archive.read(record_names[0]).decode("utf-8"))))
 
-    missing = required_files.difference(names)
+        recorded = {row[0]: row[1:] for row in record_rows if len(row) == 3}
+        if set(recorded) != names:
+            raise RuntimeError("wheel RECORD entries do not match archive contents")
+        for name in sorted(names - set(record_names)):
+            digest, size = recorded[name]
+            data = archive.read(name)
+            expected_digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+            if digest != f"sha256={expected_digest}" or size != str(len(data)):
+                raise RuntimeError(f"wheel RECORD hash or size is invalid for: {name}")
+
+    intended_python = {
+        (Path("bir") / source.relative_to(PACKAGE_SOURCE)).as_posix()
+        for source in package_python_files(PACKAGE_SOURCE)
+    }
+    missing = (REQUIRED_PACKAGE_FILES | intended_python).difference(names)
     if missing:
         raise RuntimeError(f"wheel is missing expected SDK files: {sorted(missing)}")
 
@@ -193,8 +261,23 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
     version_check = textwrap.dedent(
         f"""
         from importlib.metadata import version as _distribution_version
+        import importlib
+        import pkgutil
 
         import bir
+        import bir.cli
+        import bir.evals
+        import bir.integrations
+
+        integration_modules = sorted(
+            module.name
+            for module in pkgutil.iter_modules(
+                bir.integrations.__path__, bir.integrations.__name__ + "."
+            )
+        )
+        assert integration_modules, "installed wheel has no integration modules"
+        for module_name in integration_modules:
+            importlib.import_module(module_name)
 
         installed_version = _distribution_version("bir-sdk")
         assert installed_version == {version!r}, (
