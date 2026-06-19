@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+from bir import configure, load_events, load_traces, trace
+from bir._sdk import _reset_config_for_tests
+from bir.integrations.bedrock import trace_converse
+
+
+@contextmanager
+def temporary_workdir() -> Iterator[Path]:
+    previous = Path.cwd()
+    with tempfile.TemporaryDirectory() as directory:
+        workdir = Path(directory)
+        os.chdir(workdir)
+        try:
+            yield workdir
+        finally:
+            os.chdir(previous)
+
+
+class FakeUsage:
+    """Attribute-style Converse ``usage`` block (exercises the getattr path)."""
+
+    def __init__(
+        self,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
+    ) -> None:
+        self.inputTokens = input_tokens
+        self.outputTokens = output_tokens
+        self.totalTokens = total_tokens
+
+
+class FakeConverseResponse:
+    """Object-style Converse response exposing ``usage`` and a ``model_dump`` payload."""
+
+    def __init__(
+        self,
+        *,
+        usage: object | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        self.usage = usage
+        self._payload = payload or {}
+
+    def model_dump(self) -> dict[str, object]:
+        return dict(self._payload)
+
+
+def _converse_dict(*, usage: dict[str, object] | None) -> dict[str, object]:
+    """A realistic boto3 Converse response: a plain dict with a nested usage block."""
+
+    response: dict[str, object] = {
+        "output": {"message": {"role": "assistant", "content": [{"text": "Bir traces locally."}]}},
+        "stopReason": "end_turn",
+        "metrics": {"latencyMs": 42},
+    }
+    if usage is not None:
+        response["usage"] = usage
+    return response
+
+
+class BedrockIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_records_generation_with_model_from_request_and_usage_from_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            received: dict[str, object] = {}
+            created: list[dict[str, object]] = []
+
+            def fake_converse(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                response = _converse_dict(usage={"inputTokens": 12, "outputTokens": 6, "totalTokens": 18})
+                created.append(response)
+                return response
+
+            with trace("chat"):
+                response = trace_converse(
+                    fake_converse,
+                    modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+                    messages=[{"role": "user", "content": [{"text": "What is Bir?"}]}],
+                )
+                # The wrapper forwards the request and returns the unchanged response.
+                self.assertIs(response, created[0])
+
+            self.assertEqual(received["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(
+                received["messages"],
+                [{"role": "user", "content": [{"text": "What is Bir?"}]}],
+            )
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "bedrock.converse")
+            self.assertEqual(generation_event.status, "success")
+            # Converse responses omit a model, so it comes from the request keyword.
+            self.assertEqual(generation_event.model, "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.input["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(
+                generation_event.output["output"]["message"]["content"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_records_usage_from_object_response_and_computes_total(self) -> None:
+        with temporary_workdir():
+            # An attribute-style response without ``totalTokens``: the SDK derives
+            # the total from the two halves.
+            def fake_converse(**kwargs: object) -> FakeConverseResponse:
+                return FakeConverseResponse(usage=FakeUsage(input_tokens=7, output_tokens=3))
+
+            with trace("chat"):
+                trace_converse(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.model, "amazon.titan-text-premier-v1:0")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
+        with temporary_workdir():
+            def fake_converse(**kwargs: object) -> dict[str, object]:
+                return _converse_dict(usage=None)
+
+            with trace("chat"):
+                trace_converse(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.model, "amazon.titan-text-premier-v1:0")
+            self.assertIsNone(generation_event.usage)
+
+    def test_forwards_bedrock_arguments_and_applies_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            def fake_converse(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                return _converse_dict(usage=None)
+
+            with trace("chat"):
+                trace_converse(
+                    fake_converse,
+                    modelId="amazon.titan-text-premier-v1:0",
+                    messages=[],
+                    inferenceConfig={"temperature": 0.0},
+                    bir_name="chat.turn",
+                    bir_metadata={"feature": "qa"},
+                )
+
+            # Bedrock's own ``inferenceConfig`` kwarg is forwarded to ``converse``, not consumed.
+            self.assertEqual(received["inferenceConfig"], {"temperature": 0.0})
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+            self.assertEqual(generation_event.input["inferenceConfig"], {"temperature": 0.0})
+
+    def test_records_error_and_redacts_secret_when_converse_raises(self) -> None:
+        with temporary_workdir():
+            def fake_converse(**kwargs: object) -> dict[str, object]:
+                raise RuntimeError("request failed api_key=sk-secret123")
+
+            with trace("chat"):
+                with self.assertRaises(RuntimeError):
+                    trace_converse(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            def fake_converse(**kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                return _converse_dict(usage=None)
+
+            with self.assertRaises(RuntimeError):
+                trace_converse(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
+
+            # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

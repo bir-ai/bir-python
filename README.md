@@ -441,6 +441,58 @@ with trace("chat"):
         ...  # consume the stream as usual; chunks pass through unchanged
 ```
 
+## AWS Bedrock
+
+Use `trace_converse()` to record Amazon Bedrock Converse calls without adding
+`boto3` as a Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.bedrock import trace_converse
+
+with trace("chat"):
+    response = trace_converse(
+        client.converse,
+        modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        messages=[{"role": "user", "content": [{"text": "What is Bir?"}]}],
+    )
+```
+
+`client` is a `boto3` `bedrock-runtime` client. The wrapper forwards positional
+and keyword arguments unchanged, returns the Converse response untouched, records
+the request `modelId` (Converse responses carry no model), and reads token usage
+from the response `usage` block (`inputTokens`/`outputTokens`/`totalTokens`) when
+present.
+
+## Google Vertex AI
+
+Use `trace_generate_content()` to record Vertex AI generative-model calls without
+adding `vertexai` (the `google-cloud-aiplatform` package) as a Bir dependency:
+
+```python
+from bir import trace
+from bir.integrations.vertexai import trace_generate_content
+
+with trace("chat"):
+    response = trace_generate_content(
+        model.generate_content,
+        "What is Bir?",
+        bir_model="gemini-1.5-flash",
+    )
+```
+
+`model` is a `vertexai.generative_models.GenerativeModel`. Because Vertex binds
+the model to the `GenerativeModel` instance rather than passing it to
+`generate_content`, pass `bir_model` to record which model was used; when the
+response carries a resolved `model_version` it refines that value. The wrapper
+forwards positional and keyword arguments unchanged, returns the Vertex response
+untouched, and reads token usage from `response.usage_metadata`
+(`prompt_token_count`/`candidates_token_count`/`total_token_count`) when present.
+
+This wrapper is also exported from `bir.integrations` as
+`trace_vertex_generate_content` so it does not collide with the Google Gemini
+wrapper of the same name.
+
 ## Local Evals And Experiments
 
 Bir includes a small deterministic evaluation layer for local regression checks.

@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Dependency-free AWS Bedrock integration: `trace_converse()` wraps a
+  `bedrock-runtime` `converse` call, recording the request `modelId` and the
+  Converse `usage` block (`inputTokens`/`outputTokens`/`totalTokens`, deriving the
+  total when omitted) without importing `boto3`.
+- Dependency-free Google Vertex AI integration: `trace_generate_content()`
+  (exported from `bir.integrations` as `trace_vertex_generate_content`) wraps a
+  Vertex `GenerativeModel.generate_content` call, recording the model from
+  `bir_model` (refined by the response `model_version`) and `usage_metadata` token
+  counts without importing `vertexai`.
 - Aggregate-score experiment comparison through `compare_experiments()` and
   `ExperimentDiff`, plus a stdlib-only `bir eval-gate` command that exits
   non-zero when a candidate regression exceeds the configured tolerance.
