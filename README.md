@@ -56,6 +56,16 @@ mkdocs build --strict
 For local SDK development, install `.[dev]` and see the
 [release checklist](docs/SDK_RELEASE_CHECKLIST.md).
 
+```bash
+python -m pip install -e ".[dev]" pyright
+pyright
+python scripts/verify_release.py
+```
+
+The checked example tests use only standard-library test utilities, so Pyright's
+release gate is hermetic whether tooling is installed in a repository `.venv` or
+in CI's active interpreter. Pytest remains optional development tooling.
+
 ## License
 
 Bir is licensed under the [Apache License 2.0](LICENSE).

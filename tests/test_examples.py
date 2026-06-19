@@ -21,26 +21,15 @@ in CI.
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Iterator
+import tempfile
+import unittest
 from pathlib import Path
 from types import ModuleType
-
-import pytest
 
 import bir
 from bir import evals
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
-
-
-@pytest.fixture(autouse=True)
-def reset_sdk_state() -> Iterator[None]:
-    """Keep each test hermetic by resetting global SDK config afterwards."""
-
-    try:
-        yield
-    finally:
-        bir._sdk._reset_config_for_tests()
 
 
 def _load_demo(example_dir: str, module_name: str) -> ModuleType:
@@ -54,85 +43,99 @@ def _load_demo(example_dir: str, module_name: str) -> ModuleType:
     return module
 
 
-def test_openai_demo_records_offline_trace(tmp_path: Path) -> None:
-    """The simulated OpenAI demo records one trace with its real event types."""
+class ExampleSmokeTests(unittest.TestCase):
+    """Exercise the offline demos with isolated SDK state and filesystem paths."""
 
-    module = _load_demo("openai-demo", "bir_example_openai_demo")
-    trace_path = tmp_path / "traces.jsonl"
-    bir.configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+    def setUp(self) -> None:
+        bir._sdk._reset_config_for_tests()
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._temp_dir.name)
 
-    # Call the traced entry point directly; main() would parse pytest's argv.
-    module.answer_question("How does Bir help with LLM observability?")
+    def tearDown(self) -> None:
+        try:
+            bir._sdk._reset_config_for_tests()
+        finally:
+            self._temp_dir.cleanup()
 
-    traces = bir.load_traces(trace_path)
-    assert len(traces) == 1
-    recorded = traces[0]
+    def test_openai_demo_records_offline_trace(self) -> None:
+        """The simulated OpenAI demo records one trace with its real event types."""
 
-    roots = [event for event in recorded.events if event.type == "trace"]
-    assert len(roots) == 1
-    assert recorded.root.type == "trace"
+        module = _load_demo("openai-demo", "bir_example_openai_demo")
+        trace_path = self.tmp_path / "traces.jsonl"
+        bir.configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
 
-    # retrieve_context/draft_answer spans, a retrieval tool_call, an LLM
-    # generation, and a helpfulness score.
-    event_types = {event.type for event in recorded.events}
-    assert event_types == {"trace", "span", "generation", "tool_call", "score"}
+        # Call the traced entry point directly; main() would parse pytest's argv.
+        module.answer_question("How does Bir help with LLM observability?")
 
+        traces = bir.load_traces(trace_path)
+        self.assertEqual(len(traces), 1)
+        recorded = traces[0]
 
-def test_langchain_demo_records_offline_trace(tmp_path: Path) -> None:
-    """The dependency-free LangChain callback demo records one trace."""
+        roots = [event for event in recorded.events if event.type == "trace"]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(recorded.root.type, "trace")
 
-    module = _load_demo("langchain-demo", "bir_example_langchain_demo")
-    trace_path = tmp_path / "traces.jsonl"
-    bir.configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+        # retrieve_context/draft_answer spans, a retrieval tool_call, an LLM
+        # generation, and a helpfulness score.
+        event_types = {event.type for event in recorded.events}
+        self.assertEqual(event_types, {"trace", "span", "generation", "tool_call", "score"})
 
-    # Drive the callback lifecycle directly; main() would parse pytest's argv.
-    module.run_callback_lifecycle("How does Bir work with LangChain?")
+    def test_langchain_demo_records_offline_trace(self) -> None:
+        """The dependency-free LangChain callback demo records one trace."""
 
-    traces = bir.load_traces(trace_path)
-    assert len(traces) == 1
-    recorded = traces[0]
+        module = _load_demo("langchain-demo", "bir_example_langchain_demo")
+        trace_path = self.tmp_path / "traces.jsonl"
+        bir.configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
 
-    roots = [event for event in recorded.events if event.type == "trace"]
-    assert len(roots) == 1
-    assert recorded.root.type == "trace"
+        # Drive the callback lifecycle directly; main() would parse pytest's argv.
+        module.run_callback_lifecycle("How does Bir work with LangChain?")
 
-    # The chain root, retriever and tool tool_calls, and an LLM generation.
-    event_types = {event.type for event in recorded.events}
-    assert event_types == {"trace", "generation", "tool_call"}
+        traces = bir.load_traces(trace_path)
+        self.assertEqual(len(traces), 1)
+        recorded = traces[0]
 
-    # The retriever callback specifically records a retrieval-kind tool_call.
-    assert any(
-        event.type == "tool_call" and event.metadata.get("kind") == "retrieval"
-        for event in recorded.events
-    )
+        roots = [event for event in recorded.events if event.type == "trace"]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(recorded.root.type, "trace")
 
+        # The chain root, retriever and tool tool_calls, and an LLM generation.
+        event_types = {event.type for event in recorded.events}
+        self.assertEqual(event_types, {"trace", "generation", "tool_call"})
 
-def test_eval_demo_runs_offline_experiment(tmp_path: Path) -> None:
-    """The eval demo runs a deterministic experiment and persists scored results."""
+        # The retriever callback specifically records a retrieval-kind tool_call.
+        self.assertTrue(
+            any(
+                event.type == "tool_call" and event.metadata.get("kind") == "retrieval"
+                for event in recorded.events
+            )
+        )
 
-    module = _load_demo("eval-demo", "bir_example_eval_demo")
-    experiment_path = tmp_path / "faq-eval.jsonl"
+    def test_eval_demo_runs_offline_experiment(self) -> None:
+        """The eval demo runs a deterministic experiment and persists scored results."""
 
-    # Use the shipped dataset; redirect output into tmp_path to stay hermetic.
-    result = module.run_eval(experiment_path=experiment_path)
+        module = _load_demo("eval-demo", "bir_example_eval_demo")
+        experiment_path = self.tmp_path / "faq-eval.jsonl"
 
-    # Every dataset example runs without error.
-    assert result.status == "success"
-    assert len(result.results) == 5
-    assert all(example_result.status == "success" for example_result in result.results)
+        # Use the shipped dataset; redirect output into tmp_path to stay hermetic.
+        result = module.run_eval(experiment_path=experiment_path)
 
-    # Both built-in evaluators score every example; on the shipped dataset the
-    # task is exactly right 3/5 times but mentions the product 4/5 times.
-    assert set(result.aggregate_scores) == {"exact_match", "contains"}
-    assert result.aggregate_scores["exact_match"] == pytest.approx(0.6)
-    assert result.aggregate_scores["contains"] == pytest.approx(0.8)
+        # Every dataset example runs without error.
+        self.assertEqual(result.status, "success")
+        self.assertEqual(len(result.results), 5)
+        self.assertTrue(all(item.status == "success" for item in result.results))
 
-    # Results and the aggregate summary persist and reload cleanly.
-    reloaded = evals.load_experiment(experiment_path)
-    assert reloaded.id == result.id
-    assert len(reloaded.results) == 5
+        # Both built-in evaluators score every example; on the shipped dataset the
+        # task is exactly right 3/5 times but mentions the product 4/5 times.
+        self.assertEqual(set(result.aggregate_scores), {"exact_match", "contains"})
+        self.assertAlmostEqual(result.aggregate_scores["exact_match"], 0.6)
+        self.assertAlmostEqual(result.aggregate_scores["contains"], 0.8)
 
-    summary = evals.load_experiment_summary(experiment_path.with_suffix(".summary.json"))
-    assert summary.example_count == 5
-    assert summary.error_count == 0
-    assert summary.aggregate_scores["exact_match"] == pytest.approx(0.6)
+        # Results and the aggregate summary persist and reload cleanly.
+        reloaded = evals.load_experiment(experiment_path)
+        self.assertEqual(reloaded.id, result.id)
+        self.assertEqual(len(reloaded.results), 5)
+
+        summary = evals.load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+        self.assertEqual(summary.example_count, 5)
+        self.assertEqual(summary.error_count, 0)
+        self.assertAlmostEqual(summary.aggregate_scores["exact_match"], 0.6)

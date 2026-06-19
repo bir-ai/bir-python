@@ -88,6 +88,10 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Made the Pyright release gate independent of interpreter discovery by keeping
+  the checked offline example tests free of runtime Pytest imports. The same
+  three smoke scenarios remain collectable by Pytest with per-test SDK and
+  temporary-path isolation; Pytest remains a development-only dependency.
 - `bir.__version__` now reads the published `bir-sdk` distribution metadata
   instead of `bir`. Installed packages report their real version instead of
   silently falling back to a hardcoded string; the fallback applies only when
