@@ -112,6 +112,31 @@ ingested.
 Complete traces are sent root-first so the server receives the trace event before
 its spans, tool calls, generations, and scores.
 
+Transient failures are retried with exponential backoff. A network error,
+timeout, or HTTP 5xx response is retried up to `retries` times (default `2`),
+sleeping `backoff * 2**attempt` seconds between attempts (`backoff` defaults to
+`0.5`). A 4xx response is a permanent rejection and is raised immediately without
+retry. A healthy send still makes a single attempt, so the default behavior is
+unchanged:
+
+```python
+result = send_events("http://127.0.0.1:8000", retries=3, backoff=1.0)
+```
+
+Pass `mark_sent=True` to make re-sends cheap. The IDs the server accepts are
+recorded in a sidecar file next to the trace file (`<trace_path>.sent`, for
+example `.bir/traces.jsonl.sent`) and skipped on later sends, so `attempted`
+reflects only events not yet recorded as sent:
+
+```python
+send_events("http://127.0.0.1:8000", mark_sent=True)  # sends and records IDs
+send_events("http://127.0.0.1:8000", mark_sent=True)  # skips them, no request
+```
+
+The sidecar is SDK-local bookkeeping: it never modifies the trace JSONL or the
+event schema, and a missing or corrupt sidecar is treated as empty so it can
+never block a send. With the default `mark_sent=False` nothing is recorded.
+
 ## Command Line
 
 Installing the SDK adds a `bir` command (a console script) for inspecting local

@@ -1839,6 +1839,219 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(result.attempted, 1)
             self.assertEqual(result.skipped, 1)
 
+    def test_send_events_retries_transient_failure_then_succeeds(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            batch_attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch_attempts.append(request)
+                if len(batch_attempts) == 1:
+                    raise urllib.error.URLError("temporary network blip")
+                return batch_response_accepting(posted_request_batch(request))
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_events("http://server.test")
+
+            self.assertEqual(len(batch_attempts), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(result.accepted, 1)
+            self.assertEqual(result.attempted, 1)
+
+    def test_send_events_retries_server_5xx_then_succeeds(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            batch_attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch_attempts.append(request)
+                if len(batch_attempts) == 1:
+                    raise http_error(request, 503, b'{"detail":"Server Error"}')
+                return batch_response_accepting(posted_request_batch(request))
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_events("http://server.test")
+
+            self.assertEqual(len(batch_attempts), 2)
+            self.assertEqual(len(sleeps), 1)
+            self.assertEqual(result.accepted, 1)
+
+    def test_send_events_raises_after_exhausting_retries_with_backoff(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            batch_attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch_attempts.append(request)
+                raise urllib.error.URLError("network down")
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                    with self.assertRaisesRegex(RuntimeError, "could not send events"):
+                        send_events("http://server.test", retries=2, backoff=0.5)
+
+            # One initial attempt plus two retries, with exponential backoff between.
+            self.assertEqual(len(batch_attempts), 3)
+            self.assertEqual(sleeps, [0.5, 1.0])
+
+    def test_send_events_does_not_retry_client_error(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            batch_attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch_attempts.append(request)
+                raise http_error(request, 422, b'{"detail":"rejected"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                    with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
+                        send_events("http://server.test")
+
+            self.assertEqual(len(batch_attempts), 1)
+            self.assertEqual(sleeps, [])
+
+    def test_send_events_retries_transient_failure_on_per_event_path(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+            per_event_attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                if request_url(request).endswith("/v1/events/batch"):
+                    raise http_error(request, 404, b'{"detail":"Not Found"}')
+                per_event_attempts.append(request)
+                if len(per_event_attempts) == 1:
+                    raise urllib.error.URLError("temporary network blip")
+                return FakeHttpResponse()
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_events("http://server.test")
+
+            self.assertEqual(len(per_event_attempts), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(result.accepted, 1)
+
+    def test_send_events_mark_sent_skips_already_sent_events_on_resend(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer()
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            original_jsonl = trace_path.read_bytes()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return batch_response_accepting(posted_request_batch(request))
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                first = send_events("http://server.test", mark_sent=True)
+
+            self.assertEqual(first.accepted, 2)
+            self.assertEqual(first.attempted, 2)
+
+            sidecar = workdir / ".bir" / "traces.jsonl.sent"
+            self.assertTrue(sidecar.exists())
+            recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(set(recorded["event_ids"]), set(first.event_ids))
+            # Marking sent state must never rewrite the trace JSONL.
+            self.assertEqual(trace_path.read_bytes(), original_jsonl)
+
+            def must_not_post(request: object, timeout: float) -> FakeHttpResponse:
+                raise AssertionError("a re-send must not post already-sent events")
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=must_not_post):
+                second = send_events("http://server.test", mark_sent=True)
+
+            self.assertEqual(second.accepted, 0)
+            self.assertEqual(second.attempted, 0)
+            self.assertEqual(second.event_ids, [])
+            self.assertEqual(trace_path.read_bytes(), original_jsonl)
+
+    def test_send_events_mark_sent_sends_only_unsent_events(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer(value: str) -> str:
+                return value
+
+            answer("first")
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                first = send_events("http://server.test", mark_sent=True)
+            self.assertEqual(first.attempted, 1)
+
+            # A new trace is recorded; only it should be posted on the next send.
+            answer("second")
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                second = send_events("http://server.test", mark_sent=True)
+
+            self.assertEqual(second.attempted, 1)
+            self.assertEqual(second.accepted, 1)
+            self.assertEqual(len(posted_batches), 2)
+            self.assertEqual(len(posted_batches[1]), 1)
+            sent_ids = json.loads((workdir / ".bir" / "traces.jsonl.sent").read_text(encoding="utf-8"))
+            self.assertEqual(len(sent_ids["event_ids"]), 2)
+
+    def test_send_events_does_not_write_sidecar_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return batch_response_accepting(posted_request_batch(request))
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            self.assertEqual(result.accepted, 1)
+            self.assertFalse((workdir / ".bir" / "traces.jsonl.sent").exists())
+
     def test_load_events_rejects_invalid_jsonl(self) -> None:
         with temporary_workdir() as workdir:
             trace_path = workdir / "bad.jsonl"

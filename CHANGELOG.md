@@ -10,6 +10,19 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Bounded retry with exponential backoff for `send_events()`. New `retries`
+  (default `2`) and `backoff` (default `0.5`) keyword arguments retry transient
+  failures — network errors, timeouts, and HTTP 5xx — sleeping
+  `backoff * 2**attempt` seconds between attempts; HTTP 4xx is still raised
+  immediately without retry. A healthy send makes a single attempt, so the
+  default behavior is unchanged. Stdlib only (`time`).
+- Opt-in `send_events(mark_sent=True)` to make re-sends cheap. Accepted event IDs
+  are recorded in a sidecar file next to the trace file (`<trace_path>.sent`) and
+  skipped on later sends, so `attempted` reflects only events not yet recorded as
+  sent. The sidecar is SDK-local bookkeeping: it never modifies the trace JSONL or
+  the event schema, and a missing or corrupt sidecar is treated as empty so it can
+  never block a send. Defaults to `False` (nothing recorded), keeping re-sends
+  safe via the server's existing event-ID idempotency.
 - Opt-in size-based rotation for the local trace file via
   `configure(max_bytes=..., backup_count=...)`. When `max_bytes` is set, the
   active `.bir/traces.jsonl` is rotated on whole-line boundaries before a write

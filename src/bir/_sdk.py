@@ -10,6 +10,7 @@ import math
 import os
 import random
 import re
+import time
 import urllib.error
 import urllib.request
 from contextvars import ContextVar, Token
@@ -22,8 +23,13 @@ from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
 
 F = TypeVar("F", bound=Callable[..., Any])
+T = TypeVar("T")
 
 _DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")
+# Sidecar suffix appended to the trace file name to record the IDs the server has
+# already accepted, so an opt-in ``send_events(mark_sent=True)`` can cheaply skip
+# them on a later send. SDK-local bookkeeping only; never part of the event schema.
+_SENT_IDS_SUFFIX = ".sent"
 _SCHEMA_VERSION = "1.0"
 _MAX_CAPTURE_DEPTH = 6
 _MAX_DEPTH_REACHED = "[max_depth]"
@@ -364,27 +370,107 @@ def send_events(
     *,
     path: str | Path | None = None,
     timeout: float = 10.0,
+    retries: int = 2,
+    backoff: float = 0.5,
+    mark_sent: bool = False,
 ) -> SendEventsResult:
-    """Send local JSONL trace events to a Bir ingestion server."""
+    """Send local JSONL trace events to a Bir ingestion server.
+
+    Transient failures are retried with exponential backoff: a network error,
+    timeout, or HTTP 5xx is retried up to ``retries`` times (default ``2``),
+    sleeping ``backoff * 2**attempt`` seconds between tries (``backoff`` defaults to
+    ``0.5``). A 4xx response is a permanent rejection and is raised immediately
+    without retry, matching the un-retried behavior. A healthy send still makes a
+    single attempt, so the default behavior is unchanged.
+
+    ``mark_sent`` is opt-in bookkeeping for cheap re-sends. When ``True``, the IDs
+    the server accepts are recorded in a sidecar file next to the trace file
+    (``<trace_path>.sent``) and skipped on later sends, so ``attempted`` reflects
+    only events not yet recorded as sent. The sidecar is SDK-local: it never
+    modifies the trace JSONL or the event schema, and a missing or corrupt sidecar
+    is treated as empty so it can never block a send. With the default
+    ``mark_sent=False`` nothing is recorded and re-sending the whole file stays
+    safe because the server is idempotent on event IDs.
+    """
+
+    retries = _validate_non_negative_int(retries, "retries")
+    backoff = float(_validate_non_negative_number(backoff, "backoff"))
 
     events = _events_for_sending(path)
+    sent_ids_path = _sent_ids_path(path) if mark_sent else None
+    if sent_ids_path is not None:
+        already_sent = _load_sent_ids(sent_ids_path)
+        if already_sent:
+            events = [event for event in events if event.id not in already_sent]
+
     endpoint = _events_endpoint(server_url)
     if not events:
         return SendEventsResult(accepted=0, event_ids=[], attempted=0)
 
-    batch_result = _post_event_batch(f"{endpoint}/batch", [event.raw for event in events], timeout=timeout)
+    result = _post_loaded_events(events, endpoint, timeout=timeout, retries=retries, backoff=backoff)
+
+    if sent_ids_path is not None and result.event_ids:
+        _record_sent_ids(sent_ids_path, result.event_ids)
+    return result
+
+
+def _post_loaded_events(
+    events: list[TraceEvent],
+    endpoint: str,
+    *,
+    timeout: float,
+    retries: int,
+    backoff: float,
+) -> SendEventsResult:
+    """Post already-loaded events, batching first and falling back per-event.
+
+    Both the batch and per-event posts go through :func:`_send_with_retry` so a
+    transient failure on either path is retried before it surfaces.
+    """
+
+    batch_result = _send_with_retry(
+        lambda: _post_event_batch(f"{endpoint}/batch", [event.raw for event in events], timeout=timeout),
+        retries=retries,
+        backoff=backoff,
+    )
     if batch_result is not None:
         return batch_result
 
     accepted = 0
     event_ids: list[str] = []
     for event in events:
-        event_accepted = _post_event(endpoint, event.raw, timeout=timeout)
+        event_accepted = _send_with_retry(
+            lambda event=event: _post_event(endpoint, event.raw, timeout=timeout),
+            retries=retries,
+            backoff=backoff,
+        )
         accepted += event_accepted
         if event_accepted:
             event_ids.append(event.id)
 
     return SendEventsResult(accepted=accepted, event_ids=event_ids, attempted=len(events))
+
+
+def _send_with_retry(operation: Callable[[], T], *, retries: int, backoff: float) -> T:
+    """Run ``operation`` and retry transient send failures with exponential backoff.
+
+    A transient failure (network error, timeout, or HTTP 5xx) is raised by the
+    callers as :class:`_TransientSendError` and retried up to ``retries`` times,
+    sleeping ``backoff * 2**attempt`` seconds before each retry. Permanent failures
+    (HTTP 4xx, raised as ``RuntimeError``) propagate immediately. When the retries
+    are exhausted the failure is surfaced as ``RuntimeError`` so callers see the
+    same exception type a single failed attempt raises.
+    """
+
+    attempt = 0
+    while True:
+        try:
+            return operation()
+        except _TransientSendError as exc:
+            if attempt >= retries:
+                raise RuntimeError(str(exc)) from exc.cause
+            time.sleep(backoff * (2**attempt))
+            attempt += 1
 
 
 def _events_for_sending(path: str | Path | None = None) -> list[TraceEvent]:
@@ -1363,6 +1449,24 @@ def _events_endpoint(server_url: str) -> str:
     return f"{normalized_url}/v1/events"
 
 
+class _TransientSendError(Exception):
+    """Internal signal that a send attempt failed transiently and may be retried.
+
+    Carries the original cause so :func:`_send_with_retry` can chain it when the
+    retries are exhausted and the failure is re-raised as a ``RuntimeError``.
+    """
+
+    def __init__(self, message: str, *, cause: BaseException) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
+def _is_retryable_status(status: int) -> bool:
+    """Return True for HTTP 5xx, the only status codes worth retrying."""
+
+    return 500 <= status < 600
+
+
 def _post_event_batch(
     endpoint: str,
     events: list[dict[str, Any]],
@@ -1386,9 +1490,15 @@ def _post_event_batch(
         if exc.code == 404:
             return None
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"bir server rejected event batch with HTTP {exc.code}: {body}") from exc
+        message = f"bir server rejected event batch with HTTP {exc.code}: {body}"
+        if _is_retryable_status(exc.code):
+            raise _TransientSendError(message, cause=exc) from exc
+        raise RuntimeError(message) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"bir could not send events to {endpoint}: {exc.reason}") from exc
+        raise _TransientSendError(f"bir could not send events to {endpoint}: {exc.reason}", cause=exc) from exc
+    except TimeoutError as exc:
+        # A socket read timeout surfaces as TimeoutError rather than URLError.
+        raise _TransientSendError(f"bir could not send events to {endpoint}: {exc}", cause=exc) from exc
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {body}")
@@ -1425,9 +1535,15 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"bir server rejected event with HTTP {exc.code}: {body}") from exc
+        message = f"bir server rejected event with HTTP {exc.code}: {body}"
+        if _is_retryable_status(exc.code):
+            raise _TransientSendError(message, cause=exc) from exc
+        raise RuntimeError(message) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"bir could not send event to {endpoint}: {exc.reason}") from exc
+        raise _TransientSendError(f"bir could not send event to {endpoint}: {exc.reason}", cause=exc) from exc
+    except TimeoutError as exc:
+        # A socket read timeout surfaces as TimeoutError rather than URLError.
+        raise _TransientSendError(f"bir could not send event to {endpoint}: {exc}", cause=exc) from exc
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected event with HTTP {status}: {body}")
@@ -1445,6 +1561,61 @@ def _accepted_count_from_response(body: str) -> int:
     if isinstance(accepted, int) and not isinstance(accepted, bool):
         return accepted
     return 1
+
+
+def _sent_ids_path(path: str | Path | None) -> Path:
+    """Return the sidecar path that records IDs the server has already accepted.
+
+    The sidecar lives next to the trace file being sent (``<trace_path>.sent``).
+    ``path`` is resolved the same way :func:`load_events` resolves it so a custom
+    ``send_events(path=...)`` records against the matching file. The ``.sent``
+    suffix is non-numeric, so size-based rotation (which only shifts ``.1`` ..
+    ``.N`` siblings) never touches it.
+    """
+
+    trace_path = Path(path) if path is not None else _config.trace_path
+    return trace_path.with_name(trace_path.name + _SENT_IDS_SUFFIX)
+
+
+def _load_sent_ids(sent_ids_path: Path) -> set[str]:
+    """Load the set of already-sent event IDs from the sidecar.
+
+    Bookkeeping must never block a send, so a missing, unreadable, or malformed
+    sidecar is treated as empty: the worst case is re-sending events the
+    idempotent server already has, exactly as a send without ``mark_sent`` would.
+    """
+
+    try:
+        raw = sent_ids_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(payload, Mapping):
+        return set()
+    event_ids = payload.get("event_ids")
+    if not isinstance(event_ids, list):
+        return set()
+    return {event_id for event_id in event_ids if isinstance(event_id, str)}
+
+
+def _record_sent_ids(sent_ids_path: Path, event_ids: list[str]) -> None:
+    """Merge ``event_ids`` into the sidecar of already-sent IDs.
+
+    Writes the union of the previously recorded IDs and the newly accepted ones
+    through a temp-file replace so a crash mid-write cannot corrupt the sidecar.
+    Only ever touches ``<trace_path>.sent`` — the trace JSONL is never modified.
+    """
+
+    merged = _load_sent_ids(sent_ids_path)
+    merged.update(event_ids)
+    sent_ids_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"event_ids": sorted(merged)}, separators=(",", ":")) + "\n"
+    temp_path = sent_ids_path.with_name(sent_ids_path.name + ".tmp")
+    temp_path.write_text(payload, encoding="utf-8")
+    temp_path.replace(sent_ids_path)
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:
