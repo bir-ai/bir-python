@@ -72,6 +72,12 @@ class _Config:
     service_name: str | None = None
     environment: str | None = None
     sample_rate: float = 1.0
+    # ``max_bytes is None`` keeps the historical behavior of a single trace file
+    # that grows without bound. When set, the active file is rotated before a
+    # write that would push it past the cap, keeping at most ``backup_count``
+    # rotated siblings (``traces.jsonl.1`` .. ``traces.jsonl.N``).
+    max_bytes: int | None = None
+    backup_count: int = 3
 
 
 @dataclass(frozen=True)
@@ -197,6 +203,8 @@ def configure(
     service_name: str | None = None,
     environment: str | None = None,
     sample_rate: float | None = None,
+    max_bytes: int | None = None,
+    backup_count: int | None = None,
 ) -> None:
     """Configure local SDK behavior.
 
@@ -207,6 +215,21 @@ def configure(
     recorded. It is decided once per trace root; when a trace is sampled out the
     function still runs and still raises, but the trace and every event under it
     write nothing. The default ``1.0`` records every trace.
+
+    ``max_bytes`` enables opt-in size-based rotation of the local trace file. It
+    defaults to ``None`` (unlimited), which keeps the historical single-file
+    behavior. When set to a non-negative integer, the active file is rotated
+    before any write that would push it past the cap: ``traces.jsonl`` becomes
+    ``traces.jsonl.1``, the previous ``.1`` becomes ``.2``, and so on, keeping at
+    most ``backup_count`` rotated files and dropping the oldest. Rotation always
+    happens on whole-line boundaries, so every file stays valid JSONL and a JSON
+    object is never split across files (a single line larger than ``max_bytes``
+    is still written whole). ``backup_count`` defaults to ``3``; ``0`` keeps no
+    rotated files and simply drops the active file when it fills.
+
+    Note that a single logical trace may be split across rotated files when
+    rotation happens mid-trace, so reading with ``include_rotated=True`` can
+    surface incomplete traces near a rotation boundary.
 
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
@@ -231,14 +254,36 @@ def configure(
         updates["environment"] = _validate_event_name(environment, "environment")
     if sample_rate is not None:
         updates["sample_rate"] = _validate_sample_rate(sample_rate)
+    if max_bytes is not None:
+        updates["max_bytes"] = _validate_non_negative_int(max_bytes, "max_bytes")
+    if backup_count is not None:
+        updates["backup_count"] = _validate_non_negative_int(backup_count, "backup_count")
 
     _config = replace(_config, **updates)
 
 
-def load_events(path: str | Path | None = None) -> list[TraceEvent]:
-    """Load local JSONL trace events."""
+def load_events(path: str | Path | None = None, *, include_rotated: bool = False) -> list[TraceEvent]:
+    """Load local JSONL trace events.
+
+    By default only the active trace file is read. Pass ``include_rotated=True``
+    to also read size-rotated siblings (``traces.jsonl.1`` ..) created by
+    ``configure(max_bytes=...)``. Rotated files are read oldest-first so the
+    returned events stay in the same chronological order they were written,
+    matching how a single never-rotated file would read. Because rotation can
+    occur mid-trace, a single logical trace may be split across files.
+    """
 
     trace_path = Path(path) if path is not None else _config.trace_path
+    if not include_rotated:
+        return _load_events_from_file(trace_path)
+
+    events: list[TraceEvent] = []
+    for file_path in _trace_files_oldest_first(trace_path):
+        events.extend(_load_events_from_file(file_path))
+    return events
+
+
+def _load_events_from_file(trace_path: Path) -> list[TraceEvent]:
     if not trace_path.exists():
         return []
 
@@ -258,10 +303,38 @@ def load_events(path: str | Path | None = None) -> list[TraceEvent]:
     return events
 
 
-def load_traces(path: str | Path | None = None) -> list[LoadedTrace]:
-    """Load local traces grouped by trace_id."""
+def _trace_files_oldest_first(trace_path: Path) -> list[Path]:
+    """Return rotated trace files then the active file, oldest event first.
 
-    events = load_events(path)
+    Rotated siblings are named ``<trace_path>.<n>`` where a higher ``n`` is
+    older, so the original write order is reconstructed by reading the
+    highest-numbered backup first, down to ``.1``, and the active file last.
+    """
+
+    rotated: list[tuple[int, Path]] = []
+    prefix = f"{trace_path.name}."
+    try:
+        entries = list(trace_path.parent.iterdir())
+    except FileNotFoundError:
+        entries = []
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        suffix = entry.name[len(prefix):]
+        if suffix.isdigit() and int(suffix) >= 1:
+            rotated.append((int(suffix), entry))
+    rotated.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in rotated] + [trace_path]
+
+
+def load_traces(path: str | Path | None = None, *, include_rotated: bool = False) -> list[LoadedTrace]:
+    """Load local traces grouped by trace_id.
+
+    ``include_rotated`` is forwarded to :func:`load_events`; see its note about
+    traces possibly being split across rotated files.
+    """
+
+    events = load_events(path, include_rotated=include_rotated)
     events_by_trace_id: dict[str, list[TraceEvent]] = {}
     for event in events:
         events_by_trace_id.setdefault(event.trace_id, []).append(event)
@@ -1232,9 +1305,55 @@ def _write_event(event: dict[str, Any]) -> None:
         return
     payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     with _write_lock:
-        _config.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with _config.trace_path.open("a", encoding="utf-8") as trace_file:
+        trace_path = _config.trace_path
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_trace_file_if_needed(trace_path, payload)
+        with trace_path.open("a", encoding="utf-8") as trace_file:
             trace_file.write(payload)
+
+
+def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
+    """Rotate the active trace file before a write that would exceed ``max_bytes``.
+
+    A no-op unless ``max_bytes`` is configured. Rotation is decided on the
+    already-complete active file (every prior write ended on a newline), so files
+    only ever break on whole-line boundaries. The incoming line is never split:
+    when an empty active file is about to receive a line larger than the cap, the
+    line is still written whole rather than rotated away. Must be called while
+    holding ``_write_lock``.
+    """
+
+    max_bytes = _config.max_bytes
+    if max_bytes is None:
+        return
+    try:
+        current_size = trace_path.stat().st_size
+    except FileNotFoundError:
+        return
+    if current_size == 0:
+        return
+    if current_size + len(payload.encode("utf-8")) <= max_bytes:
+        return
+    _rotate_trace_files(trace_path, _config.backup_count)
+
+
+def _rotate_trace_files(trace_path: Path, backup_count: int) -> None:
+    """Shift ``traces.jsonl`` -> ``.1`` -> ``.2`` .., dropping the oldest.
+
+    ``Path.replace`` overwrites its destination atomically, so shifting ``.k``
+    onto ``.k+1`` discards the previous oldest backup and keeps at most
+    ``backup_count`` rotated files. ``backup_count == 0`` keeps none and just
+    drops the filled active file.
+    """
+
+    if backup_count <= 0:
+        trace_path.unlink(missing_ok=True)
+        return
+    for index in range(backup_count - 1, 0, -1):
+        source = trace_path.with_name(f"{trace_path.name}.{index}")
+        if source.exists():
+            source.replace(trace_path.with_name(f"{trace_path.name}.{index + 1}"))
+    trace_path.replace(trace_path.with_name(f"{trace_path.name}.1"))
 
 
 def _events_endpoint(server_url: str) -> str:

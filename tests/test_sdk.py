@@ -1868,6 +1868,152 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(sum(1 for event in events if event.type == "trace"), 50)
             self.assertEqual(sum(1 for event in events if event.type == "score"), 50)
 
+    def _probe_trace_line_bytes(self, trace_path: Path) -> int:
+        """Write one representative trace line, measure its size, then remove it.
+
+        Rotation tests size ``max_bytes`` as a multiple of a real line so they do
+        not hardcode the serialized event length. The probe uses the same
+        ``trace-XXX`` name shape as the events written afterward.
+        """
+
+        with trace("trace-probe"):
+            pass
+        line_bytes = trace_path.stat().st_size
+        trace_path.unlink()
+        return line_bytes
+
+    def test_rotation_is_disabled_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+            for index in range(20):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            # With no max_bytes configured the file grows without rotating.
+            self.assertEqual(list((workdir / ".bir").glob("traces.jsonl.*")), [])
+            self.assertEqual(len(load_events()), 20)
+            # The opt-in read path is a harmless no-op when nothing has rotated.
+            self.assertEqual(len(load_events(include_rotated=True)), 20)
+
+    def test_rotation_retains_every_event_across_files_in_order(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+
+            # A generous backup_count keeps every rotated file so no event is dropped.
+            configure(max_bytes=max_bytes, backup_count=50)
+            for index in range(12):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            # Rotation happened, and the active file is kept under the cap.
+            self.assertTrue((workdir / ".bir" / "traces.jsonl.1").exists())
+            self.assertLessEqual(trace_path.stat().st_size, max_bytes)
+
+            # Reading rotated files reconstructs the full chronological sequence.
+            names = [event.name for event in load_events(include_rotated=True)]
+            self.assertEqual(names, [f"trace-{index:03d}" for index in range(12)])
+
+            # The default read sees only the active file: a strict, newest suffix.
+            active_names = [event.name for event in load_events()]
+            self.assertLess(len(active_names), len(names))
+            self.assertEqual(active_names, names[len(names) - len(active_names):])
+            self.assertEqual(load_traces(include_rotated=True)[0].name, "trace-000")
+
+    def test_rotation_respects_backup_count_and_drops_oldest(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+
+            configure(max_bytes=max_bytes, backup_count=2)
+            for index in range(15):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            # At most backup_count rotated files are retained; nothing beyond it.
+            rotated = list((workdir / ".bir").glob("traces.jsonl.*"))
+            self.assertLessEqual(len(rotated), 2)
+            self.assertFalse((workdir / ".bir" / "traces.jsonl.3").exists())
+
+            names = [event.name for event in load_events(include_rotated=True)]
+            all_names = [f"trace-{index:03d}" for index in range(15)]
+            # The oldest events were dropped, leaving the newest contiguous suffix.
+            self.assertLess(len(names), len(all_names))
+            self.assertEqual(names, sorted(names))
+            self.assertEqual(names[-1], "trace-014")
+            self.assertEqual(names, all_names[len(all_names) - len(names):])
+
+    def test_each_rotated_file_is_valid_jsonl_on_its_own(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+
+            configure(max_bytes=max_bytes, backup_count=50)
+            for index in range(12):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            rotated = list((workdir / ".bir").glob("traces.jsonl.*"))
+            self.assertGreaterEqual(len(rotated), 1)
+            # Each rotated file parses independently and holds at least one line.
+            total = len(load_events(trace_path))
+            for rotated_path in rotated:
+                file_events = load_events(rotated_path)
+                self.assertGreaterEqual(len(file_events), 1)
+                total += len(file_events)
+            self.assertEqual(total, 12)
+
+    def test_rotation_with_zero_backups_keeps_only_active_file(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+
+            configure(max_bytes=max_bytes, backup_count=0)
+            for index in range(10):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            # No backups are kept; the filled file is simply dropped on rotation.
+            self.assertEqual(list((workdir / ".bir").glob("traces.jsonl.*")), [])
+            self.assertLessEqual(trace_path.stat().st_size, max_bytes)
+            names = [event.name for event in load_events()]
+            self.assertLess(len(names), 10)
+            self.assertEqual(names[-1], "trace-009")
+
+    def test_configure_rejects_invalid_rotation_settings(self) -> None:
+        with self.assertRaisesRegex(TypeError, "max_bytes"):
+            configure(max_bytes=cast(Any, "big"))
+        with self.assertRaisesRegex(TypeError, "max_bytes"):
+            configure(max_bytes=cast(Any, True))
+        with self.assertRaisesRegex(ValueError, "max_bytes"):
+            configure(max_bytes=-1)
+        with self.assertRaisesRegex(TypeError, "backup_count"):
+            configure(backup_count=cast(Any, True))
+        with self.assertRaisesRegex(ValueError, "backup_count"):
+            configure(backup_count=-1)
+
+    def test_concurrent_writes_with_rotation_produce_valid_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 3
+
+            # backup_count comfortably exceeds the number of files so the run keeps
+            # every event while still rotating under contention.
+            configure(max_bytes=max_bytes, backup_count=1000)
+
+            @observe()
+            def answer(index: int) -> str:
+                return str(index)
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(answer, range(200)))
+
+            self.assertEqual(results, [str(index) for index in range(200)])
+            self.assertGreaterEqual(len(list((workdir / ".bir").glob("traces.jsonl.*"))), 1)
+
+            events = load_events(include_rotated=True)
+            self.assertEqual(len(events), 200)
+            self.assertTrue(all(event.type == "trace" for event in events))
+
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:
 

@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Opt-in size-based rotation for the local trace file via
+  `configure(max_bytes=..., backup_count=...)`. When `max_bytes` is set, the
+  active `.bir/traces.jsonl` is rotated on whole-line boundaries before a write
+  would exceed the cap (`traces.jsonl` -> `traces.jsonl.1` -> ..), keeping at
+  most `backup_count` rotated files (default `3`) and dropping the oldest, so
+  every file stays valid JSONL. `load_events()` and `load_traces()` gain an
+  additive `include_rotated=True` flag that also reads rotated files oldest-first;
+  the default still reads only the active file. `max_bytes` defaults to `None`
+  (unlimited), keeping the previous single-file behavior unchanged. Stdlib only.
 - Dependency-free AWS Bedrock integration: `trace_converse()` wraps a
   `bedrock-runtime` `converse` call, recording the request `modelId` and the
   Converse `usage` block (`inputTokens`/`outputTokens`/`totalTokens`, deriving the

@@ -233,6 +233,47 @@ precedence.
 export BIR_SAMPLE_RATE=0.1  # record about 10% of traces
 ```
 
+## Trace File Rotation
+
+By default the local trace file grows without bound. To keep `.bir/traces.jsonl`
+under a fixed size, opt in to size-based rotation with `configure()`:
+
+```python
+from bir import configure
+
+configure(max_bytes=5_000_000, backup_count=3)  # cap the active file near 5 MB
+```
+
+`max_bytes` is the size cap for the active file and defaults to `None`
+(unlimited), which keeps the historical single-file behavior byte-for-byte.
+When it is set, the active file is rotated *before* any write that would push it
+past the cap: `traces.jsonl` is renamed to `traces.jsonl.1`, the previous `.1`
+becomes `.2`, and so on, keeping at most `backup_count` rotated files (default
+`3`) and dropping the oldest. `backup_count=0` keeps no rotated files and simply
+drops the active file when it fills.
+
+Rotation always happens on whole-line boundaries, so every file — active and
+rotated — stays valid line-delimited JSON and a single JSON event is never split
+across two files. A line that is itself larger than `max_bytes` is still written
+whole rather than discarded. Rotation runs under the same lock as writes, so it
+is safe for multi-threaded applications. Like the rest of the SDK, it uses only
+the standard library and adds no dependencies.
+
+Reads default to the active file only, so `load_events()` and `load_traces()`
+behave exactly as before. Pass `include_rotated=True` to also read rotated files,
+oldest event first, reconstructing the original write order:
+
+```python
+from bir import load_events, load_traces
+
+recent = load_traces()                       # active file only (default)
+everything = load_events(include_rotated=True)  # active + rotated, oldest first
+```
+
+Because rotation can occur in the middle of a trace, a single logical trace may
+be split across rotated files; reading with `include_rotated=True` can therefore
+surface a partial trace near a rotation boundary.
+
 ## Retrieval
 
 Use `retrieval()` to record RAG lookups with the existing `tool_call` event
