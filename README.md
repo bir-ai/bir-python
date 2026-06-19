@@ -53,6 +53,10 @@ python -m pip install -e ".[docs]"
 mkdocs build --strict
 ```
 
+CI installs the same `docs` extra and runs the strict build once on every pull
+request and push to `main`, so invalid navigation, links reported by MkDocs,
+and build warnings block the change.
+
 For local SDK development, install `.[dev]` and see the
 [release checklist](docs/SDK_RELEASE_CHECKLIST.md).
 

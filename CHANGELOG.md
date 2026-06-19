@@ -74,6 +74,9 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- CI now installs the optional `docs` extra and runs `mkdocs build --strict`
+  once per pull request and push to `main`, catching documentation navigation,
+  link, and warning regressions without adding runtime dependencies.
 - `scripts/verify_release.py` now builds and installs its verification wheel
   under the `bir-sdk` distribution name and asserts that
   `importlib.metadata.version("bir-sdk")` matches the project version, so
