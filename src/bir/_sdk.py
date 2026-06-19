@@ -431,6 +431,7 @@ def send_events(
     retries: int = 2,
     backoff: float = 0.5,
     mark_sent: bool = False,
+    include_rotated: bool = False,
 ) -> SendEventsResult:
     """Send local JSONL trace events to a Bir ingestion server.
 
@@ -449,12 +450,21 @@ def send_events(
     is treated as empty so it can never block a send. With the default
     ``mark_sent=False`` nothing is recorded and re-sending the whole file stays
     safe because the server is idempotent on event IDs.
+
+    ``include_rotated`` is opt-in upload of size-rotated trace files. The default
+    ``False`` uploads only the active trace file, matching the historical
+    behavior. When ``True``, retained rotated siblings (``traces.jsonl.1`` ..)
+    created by ``configure(max_bytes=...)`` are uploaded oldest-first followed by
+    the active file, so rotation can no longer strand unsent events. Events are
+    deduplicated by ID when a rotated file overlaps the active file, and the
+    ``mark_sent`` sidecar still anchors to the active trace path so recorded IDs
+    are skipped across the whole selected file set.
     """
 
     retries = _validate_non_negative_int(retries, "retries")
     backoff = float(_validate_non_negative_number(backoff, "backoff"))
 
-    events = _events_for_sending(path)
+    events = _events_for_sending(path, include_rotated=include_rotated)
     sent_ids_path = _sent_ids_path(path) if mark_sent else None
     if sent_ids_path is not None:
         already_sent = _load_sent_ids(sent_ids_path)
@@ -531,18 +541,33 @@ def _send_with_retry(operation: Callable[[], T], *, retries: int, backoff: float
             attempt += 1
 
 
-def _events_for_sending(path: str | Path | None = None) -> list[TraceEvent]:
-    events = load_events(path)
-    traces = load_traces(path)
+def _events_for_sending(path: str | Path | None = None, *, include_rotated: bool = False) -> list[TraceEvent]:
+    """Order local events for upload: complete traces root-first, then orphans.
+
+    Events are deduplicated by ID, so a rotated file that overlaps the active file
+    (for example a copied backup) still uploads each event once. Orphan events
+    whose trace root is missing are kept rather than dropped. With
+    ``include_rotated=True`` the active file and its size-rotated siblings are read
+    oldest-first, preserving write-order chronology across files.
+    """
+
+    events = load_events(path, include_rotated=include_rotated)
+    traces = load_traces(path, include_rotated=include_rotated)
     ordered_events: list[TraceEvent] = []
     ordered_event_ids: set[str] = set()
 
     for trace in traces:
         for event in trace.events:
+            if event.id in ordered_event_ids:
+                continue
             ordered_events.append(event)
             ordered_event_ids.add(event.id)
 
-    ordered_events.extend(event for event in events if event.id not in ordered_event_ids)
+    for event in events:
+        if event.id in ordered_event_ids:
+            continue
+        ordered_events.append(event)
+        ordered_event_ids.add(event.id)
     return ordered_events
 
 

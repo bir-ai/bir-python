@@ -50,12 +50,31 @@ Accepted IDs are recorded in `<trace_path>.sent`, such as
 schema. A missing or corrupt sidecar is treated as empty. With the default
 `mark_sent=False`, no local bookkeeping is written.
 
+## Upload size-rotated files
+
+By default `send_events()` uploads only the active trace file, so events stranded
+in size-rotated siblings created by `configure(max_bytes=...)` are left behind.
+Pass `include_rotated=True` to also upload the retained rotated files:
+
+```python
+send_events("http://127.0.0.1:8000", include_rotated=True)
+```
+
+Rotated files (`traces.jsonl.1` ..) are uploaded oldest-first, followed by the
+active file, preserving write-order chronology. Complete traces are still sent
+root-first, and events are deduplicated by ID when a rotated file overlaps the
+active one, so each event is sent once. `mark_sent=True` keeps anchoring its
+sidecar to the active trace path, so recorded IDs are skipped across the whole
+selected file set. The default stays `False` (active file only), leaving existing
+behavior unchanged.
+
 ## CLI upload
 
 The same operations are available without writing Python:
 
 ```bash
 bir send --server http://127.0.0.1:8000
+bir send --include-rotated --server http://127.0.0.1:8000
 bir send-experiment .bir/experiments/<name>-<id>.jsonl \
   --server http://127.0.0.1:8000
 ```

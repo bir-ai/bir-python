@@ -54,6 +54,11 @@ def _build_parser() -> argparse.ArgumentParser:
     traces.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
     traces.add_argument("--limit", type=_positive_int, metavar="N", help="Show at most N most recent traces.")
     traces.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
+    traces.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also read size-rotated trace files (oldest first) alongside the active file.",
+    )
     traces.set_defaults(func=_cmd_traces)
 
     tail = subparsers.add_parser("tail", help="Follow the trace file and print new events as they are written.")
@@ -72,6 +77,11 @@ def _build_parser() -> argparse.ArgumentParser:
     send = subparsers.add_parser("send", help="Send local events to a Bir server.")
     send.add_argument("--path", help="Trace JSONL file to send (default: .bir/traces.jsonl).")
     send.add_argument("--server", default=_DEFAULT_SERVER, help=f"Bir server URL (default: {_DEFAULT_SERVER}).")
+    send.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also send size-rotated trace files (oldest first) alongside the active file.",
+    )
     send.set_defaults(func=_cmd_send)
 
     send_experiment_parser = subparsers.add_parser(
@@ -104,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_traces(args: argparse.Namespace) -> int:
-    traces = list(reversed(load_traces(args.path)))
+    traces = list(reversed(load_traces(args.path, include_rotated=args.include_rotated)))
     if args.limit is not None:
         traces = traces[: args.limit]
 
@@ -157,7 +167,7 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
 
 
 def _cmd_send(args: argparse.Namespace) -> int:
-    result = send_events(args.server, path=args.path)
+    result = send_events(args.server, path=args.path, include_rotated=args.include_rotated)
     print(f"accepted={result.accepted} attempted={result.attempted} skipped={result.skipped}")
     return 0
 

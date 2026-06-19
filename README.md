@@ -52,6 +52,11 @@ advisory-lock semantics are not supported; use one local trace path per host in
 those deployments. Lock files may remain on disk and must not be deleted while
 Bir processes are active.
 
+By default `send_events()` and `bir send` upload only the active trace file. Pass
+`include_rotated=True` (or `bir send --include-rotated`) to also upload retained
+size-rotated files oldest-first, deduplicated by event ID, so rotation does not
+strand unsent events. See [server uploads](docs/site/sending.md).
+
 ## Documentation
 
 The documentation site covers the [quickstart](docs/site/quickstart.md),

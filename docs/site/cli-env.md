@@ -17,16 +17,22 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 
 | Command | What it does |
 | --- | --- |
-| `bir traces [--path P] [--limit N] [--json]` | List trace time, status, duration, event count, and name. |
+| `bir traces [--path P] [--limit N] [--json] [--include-rotated]` | List trace time, status, duration, event count, and name. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
-| `bir send [--path P] [--server URL]` | Send local events and print the upload result. |
+| `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL]` | Send a saved experiment and summary. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
 default; experiment listing uses `.bir/experiments`; send commands target
 `http://127.0.0.1:8000`.
+
+`--include-rotated` on `bir traces` and `bir send` also reads size-rotated trace
+files (`traces.jsonl.1` ..) created by `configure(max_bytes=...)`, oldest-first
+alongside the active file. It is off by default, so both commands operate on the
+active file only unless the flag is passed. `bir send --include-rotated`
+deduplicates events by ID when a rotated file overlaps the active one.
 
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces` and

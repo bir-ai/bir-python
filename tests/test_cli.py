@@ -80,6 +80,25 @@ def write_two_traces(trace_path: Path) -> None:
     answer("second")
 
 
+def write_active_and_rotated_trace(trace_path: Path) -> None:
+    """Record one trace into a ``.1`` rotated sibling and one into the active file.
+
+    Simulates a prior size-based rotation: the older trace lives in
+    ``<trace_path>.1`` and the newer one in the active ``<trace_path>``, so a
+    default read sees one trace and an ``include_rotated`` read sees both.
+    """
+
+    bir.configure(trace_path=trace_path)
+
+    @bir.observe()
+    def answer(value: str) -> str:
+        return value
+
+    answer("first")
+    trace_path.rename(trace_path.with_name(trace_path.name + ".1"))
+    answer("second")
+
+
 def run_faq_experiment(directory: Path) -> str:
     """Run a small deterministic experiment under ``directory`` and return its id."""
 
@@ -176,6 +195,21 @@ class TracesCommandTests(CliBaseTest):
             with self.assertRaises(SystemExit) as raised:
                 run_cli("traces", "--path", str(workdir / "traces.jsonl"), "--limit", "0")
             self.assertEqual(raised.exception.code, 2)
+
+    def test_include_rotated_reads_rotated_siblings(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+
+            # The default read sees only the active file's single trace.
+            code, out, err = run_cli("traces", "--path", str(trace_path), "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(out)), 1)
+
+            # include_rotated also reads the rotated sibling, surfacing both traces.
+            code, out, err = run_cli("traces", "--path", str(trace_path), "--include-rotated", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(out)), 2)
 
 
 class ExperimentsCommandTests(CliBaseTest):
@@ -290,6 +324,56 @@ class SendCommandTests(CliBaseTest):
             self.assertEqual(code, 1)
             self.assertEqual(out, "")
             self.assertIn("bir:", err)
+
+    def test_send_omits_rotated_files_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # Only the active file's single trace is uploaded by default.
+            self.assertEqual(out.strip(), "accepted=1 attempted=1 skipped=0")
+
+    def test_send_include_rotated_uploads_rotated_and_active(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+            posted_batches: list[list[dict[str, Any]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                posted_batches.append(events)
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                code, out, err = run_cli(
+                    "send",
+                    "--path",
+                    str(trace_path),
+                    "--include-rotated",
+                    "--server",
+                    "http://server.test",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # The rotated trace plus the active trace are both uploaded.
+            self.assertEqual(out.strip(), "accepted=2 attempted=2 skipped=0")
+            # Oldest-first: the rotated trace precedes the active one in the batch.
+            posted_starts = [event["start_time"] for event in posted_batches[0]]
+            self.assertEqual(posted_starts, sorted(posted_starts))
 
 
 class SendExperimentCommandTests(CliBaseTest):

@@ -2097,6 +2097,186 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(result.accepted, 1)
             self.assertFalse((workdir / ".bir" / "traces.jsonl.sent").exists())
 
+    def test_send_events_uploads_only_active_file_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+            configure(max_bytes=max_bytes, backup_count=50)
+            for index in range(12):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            # Rotation stranded older events in .1 .. siblings the default ignores.
+            self.assertTrue((workdir / ".bir" / "traces.jsonl.1").exists())
+            active_ids = {event.id for event in load_events()}
+            all_ids = {event.id for event in load_events(include_rotated=True)}
+            self.assertLess(len(active_ids), len(all_ids))
+
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test")
+
+            posted_ids = {event["id"] for event in posted_batches[0]}
+            self.assertEqual(posted_ids, active_ids)
+            self.assertEqual(result.attempted, len(active_ids))
+            self.assertEqual(result.accepted, len(active_ids))
+
+    def test_send_events_include_rotated_uploads_rotated_files_oldest_first(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            max_bytes = self._probe_trace_line_bytes(trace_path) * 2
+            configure(max_bytes=max_bytes, backup_count=50)
+            for index in range(12):
+                with trace(f"trace-{index:03d}"):
+                    pass
+
+            self.assertTrue((workdir / ".bir" / "traces.jsonl.1").exists())
+            self.assertLess(len(load_events()), 12)
+
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test", include_rotated=True)
+
+            posted_names = [event["name"] for event in posted_batches[0]]
+            self.assertEqual(posted_names, [f"trace-{index:03d}" for index in range(12)])
+            self.assertEqual(result.attempted, 12)
+            self.assertEqual(result.accepted, 12)
+            self.assertEqual(result.skipped, 0)
+
+    def test_send_events_include_rotated_deduplicates_overlapping_event_ids(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer()
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            # A rotated sibling that overlaps the active file (e.g. a copied
+            # backup) must not upload the shared events twice.
+            (workdir / ".bir" / "traces.jsonl.1").write_bytes(trace_path.read_bytes())
+            active_ids = [event.id for event in load_events()]
+            self.assertEqual(len(active_ids), 2)
+
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test", include_rotated=True)
+
+            posted = posted_batches[0]
+            posted_ids = [str(event["id"]) for event in posted]
+            self.assertEqual(len(posted_ids), len(set(posted_ids)))
+            self.assertEqual(sorted(posted_ids), sorted(active_ids))
+            self.assertEqual([event["type"] for event in posted], ["trace", "score"])
+            self.assertEqual(result.attempted, 2)
+            self.assertEqual(result.accepted, 2)
+
+    def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
+        with temporary_workdir() as workdir:
+            with trace("complete"):
+                with span("complete-span"):
+                    pass
+            with trace("orphan"):
+                with span("orphan-span"):
+                    pass
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            lines = trace_path.read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in lines]
+            by_trace: dict[str, dict[str, str]] = {}
+            for line, payload in zip(lines, payloads):
+                by_trace.setdefault(str(payload["trace_id"]), {})[str(payload["type"])] = line
+            complete_tid = next(p["trace_id"] for p in payloads if p["type"] == "trace" and p["name"] == "complete")
+            orphan_tid = next(p["trace_id"] for p in payloads if p["type"] == "trace" and p["name"] == "orphan")
+
+            # The rotated sibling holds a whole trace; the active file keeps only
+            # an orphaned span whose root is in no selected file.
+            (workdir / ".bir" / "traces.jsonl.1").write_text(
+                by_trace[complete_tid]["trace"] + "\n" + by_trace[complete_tid]["span"] + "\n",
+                encoding="utf-8",
+            )
+            trace_path.write_text(by_trace[orphan_tid]["span"] + "\n", encoding="utf-8")
+
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test", include_rotated=True)
+
+            posted = posted_batches[0]
+            self.assertEqual([event["type"] for event in posted], ["trace", "span", "span"])
+            self.assertEqual(
+                [event["name"] for event in posted],
+                ["complete", "complete-span", "orphan-span"],
+            )
+            self.assertEqual(result.attempted, 3)
+            self.assertEqual(result.accepted, 3)
+
+    def test_send_events_include_rotated_mark_sent_skips_recorded_ids_across_files(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer(value: str) -> str:
+                return value
+
+            answer("first")
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            # Overlap the active file into a rotated sibling so the first trace
+            # lives in both files at once.
+            (workdir / ".bir" / "traces.jsonl.1").write_bytes(trace_path.read_bytes())
+
+            posted_batches: list[list[dict[str, object]]] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batches.append(batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                first = send_events("http://server.test", include_rotated=True, mark_sent=True)
+
+            self.assertEqual(first.attempted, 1)
+            self.assertEqual(first.accepted, 1)
+            sidecar = workdir / ".bir" / "traces.jsonl.sent"
+            self.assertTrue(sidecar.exists())
+
+            # A new trace is appended only to the active file.
+            answer("second")
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                second = send_events("http://server.test", include_rotated=True, mark_sent=True)
+
+            self.assertEqual(second.attempted, 1)
+            self.assertEqual(second.accepted, 1)
+            first_ids = {event["id"] for event in posted_batches[0]}
+            second_ids = [event["id"] for event in posted_batches[1]]
+            self.assertEqual(len(second_ids), 1)
+            self.assertNotIn(second_ids[0], first_ids)
+            # The sidecar now records both traces' IDs across the file set.
+            recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(len(recorded["event_ids"]), 2)
+
     def test_load_events_rejects_invalid_jsonl(self) -> None:
         with temporary_workdir() as workdir:
             trace_path = workdir / "bad.jsonl"

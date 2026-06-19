@@ -45,6 +45,16 @@ Before publishing, verify the release with the SDK release checklist in
   additive `include_rotated=True` flag that also reads rotated files oldest-first;
   the default still reads only the active file. `max_bytes` defaults to `None`
   (unlimited), keeping the previous single-file behavior unchanged. Stdlib only.
+- Opt-in `send_events(include_rotated=True)` and `bir send --include-rotated` to
+  upload size-rotated trace files so rotation can no longer strand unsent events.
+  Retained rotated siblings (`traces.jsonl.1` ..) are uploaded oldest-first
+  followed by the active file, complete traces stay root-first, and events are
+  deduplicated by ID when a rotated file overlaps the active one. `mark_sent`
+  keeps anchoring its sidecar to the active trace path, so recorded IDs are
+  skipped across the whole selected file set. `bir traces --include-rotated`
+  reuses the same flag on the public loader. Defaults to `False` (active file
+  only), so existing `send_events()` calls and `bir send` invocations upload only
+  the active file as before. Stdlib only.
 - Dependency-free AWS Bedrock integration: `trace_converse()` wraps a
   `bedrock-runtime` `converse` call, recording the request `modelId` and the
   Converse `usage` block (`inputTokens`/`outputTokens`/`totalTokens`, deriving the
