@@ -23,7 +23,9 @@ from bir._sdk import (
     _config_from_env,
     _parse_env_bool,
     _parse_env_sample_rate,
+    _redact_secret_text,
     _reset_config_for_tests,
+    _safe_capture,
 )
 
 _BIR_ENV_VARS = (
@@ -2558,6 +2560,42 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(generation_event["output"], "Authorization=Bearer [redacted]")
             self.assertEqual(tool_event["metadata"], {"note": "client_secret=[redacted]"})
             self.assertEqual(tool_event["output"], "token: [redacted]")
+
+    def test_capture_redacts_high_signal_secret_formats(self) -> None:
+        secrets = {
+            "jwt_value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
+            "aws_key": "AKIA1234567890ABCDEF",
+            "aws_session_key": "ASIA1234567890ABCDEF",
+            "google_key": "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "google_key_ending_in_dash": "AIza" + ("A" * 34) + "-",
+            "slack_value": "xoxb-fake-redaction-test",
+            "github_value": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "github_oauth": "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        }
+
+        for name, secret in secrets.items():
+            with self.subTest(secret=name):
+                self.assertEqual(_redact_secret_text(secret), "[redacted]")
+
+        self.assertEqual(_safe_capture({"payload": list(secrets.values())}), {"payload": ["[redacted]"] * 8})
+
+    def test_capture_does_not_redact_secret_format_near_misses(self) -> None:
+        ordinary_text = [
+            "JWTs have three dot-separated segments.",
+            "eyJheader.payload",
+            "The example domain eyJ.example.com is not a JWT.",
+            "Order AKIA1234567890ABCDE has a 15-character suffix.",
+            "Temporary reference ASIA1234567890ABCDE is not an access key ID.",
+            "Google API keys start with AIza, but this is documentation.",
+            "Slack token families include xoxb and xoxp.",
+            "GitHub token prefixes include ghp_ and gho_ but need a long value.",
+            "The ordinary number 12345678901234567890 is not a credential.",
+        ]
+
+        for value in ordinary_text:
+            with self.subTest(value=value):
+                self.assertEqual(_redact_secret_text(value), value)
+        self.assertEqual(_safe_capture({"notes": ordinary_text}), {"notes": ordinary_text})
 
     def test_capture_redacts_secret_like_text_values_and_reprs(self) -> None:
         class SecretRepr:

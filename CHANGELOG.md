@@ -8,6 +8,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Security
+
+- Expanded best-effort capture redaction to recognize JWTs, AWS access key IDs,
+  Google API keys, Slack tokens, and GitHub provider tokens. **CROSS-REPO CONTRACT:
+  bir-app's independently maintained redactor and its copy of
+  `redaction-cases.json` must be updated to match before or with this change. Do
+  not release this SDK change while the bir-app redactor or fixture is out of
+  sync.**
+
 ### Added
 
 - Bounded retry with exponential backoff for `send_events()`. New `retries`

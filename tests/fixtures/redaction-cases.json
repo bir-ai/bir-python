@@ -23,5 +23,50 @@
     "name": "nested-secret-key",
     "input": { "api_key": "abc" },
     "expected": { "api_key": "[redacted]" }
+  },
+  {
+    "name": "jwt-token",
+    "input": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
+    "expected": "[redacted]"
+  },
+  {
+    "name": "aws-access-key-id",
+    "input": "AWS key AKIA1234567890ABCDEF",
+    "expected": "AWS key [redacted]"
+  },
+  {
+    "name": "google-api-key",
+    "input": "Google key AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "expected": "Google key [redacted]"
+  },
+  {
+    "name": "slack-token",
+    "input": "Slack value xoxp-1234567890-abcdefghijklmnop",
+    "expected": "Slack value [redacted]"
+  },
+  {
+    "name": "github-token",
+    "input": "GitHub value ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "expected": "GitHub value [redacted]"
+  },
+  {
+    "name": "nested-high-signal-secret-formats",
+    "input": {
+      "values": [
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
+        "ASIA1234567890ABCDEF",
+        "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "xoxb-fake-redaction-test",
+        "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      ]
+    },
+    "expected": {
+      "values": ["[redacted]", "[redacted]", "[redacted]", "[redacted]", "[redacted]"]
+    }
+  },
+  {
+    "name": "high-signal-format-near-misses",
+    "input": "JWT eyJheader.payload and eyJ.example.com; AWS AKIA1234567890ABCDE; Google AIza-short; Slack xoxb; GitHub ghp_short; number 12345678901234567890",
+    "expected": "JWT eyJheader.payload and eyJ.example.com; AWS AKIA1234567890ABCDE; Google AIza-short; Slack xoxb; GitHub ghp_short; number 12345678901234567890"
   }
 ]

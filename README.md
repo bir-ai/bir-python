@@ -177,9 +177,12 @@ or for a single function with `@observe(capture_inputs=True, capture_outputs=Tru
 Common secret-like fields such as `api_key`, `authorization`, `password`, `secret`,
 and `token` are redacted before events are written.
 Captured strings, fallback object representations, and captured error messages
-are also scanned for common secret-like text patterns before events are written.
-Redaction is best-effort, so keep capture opt-in for sensitive payloads and review
-what your application records.
+are also scanned for common secret-like text patterns before events are written,
+including labeled and Bearer secrets, `sk-...` tokens, JWTs, AWS access key IDs
+(`AKIA...` and `ASIA...`), Google API keys (`AIza...`), Slack `xox*` tokens,
+and GitHub `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_` tokens. Redaction is best-effort,
+not a guarantee that every credential or sensitive value will be recognized, so
+keep capture opt-in for sensitive payloads and review what your application records.
 
 ```python
 from bir import configure
