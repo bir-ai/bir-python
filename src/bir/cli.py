@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -94,6 +95,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_SERVER,
         help=f"Bir server URL (default: {_DEFAULT_SERVER}).",
     )
+    send_experiment_parser.add_argument(
+        "--retries",
+        type=_non_negative_int,
+        default=2,
+        metavar="N",
+        help="Retry transient send failures (network errors, timeouts, HTTP 5xx) up to N times (default: 2).",
+    )
+    send_experiment_parser.add_argument(
+        "--backoff",
+        type=_non_negative_float,
+        default=0.5,
+        metavar="SECONDS",
+        help="Base seconds for exponential backoff between retries; the delay is backoff * 2**attempt (default: 0.5).",
+    )
     send_experiment_parser.set_defaults(func=_cmd_send_experiment)
 
     eval_gate = subparsers.add_parser(
@@ -173,7 +188,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 
 def _cmd_send_experiment(args: argparse.Namespace) -> int:
-    result = send_experiment(args.path, args.server)
+    result = send_experiment(args.path, args.server, retries=args.retries, backoff=args.backoff)
     print(f"accepted={result.accepted} id={result.experiment_id}")
     return 0
 
@@ -335,6 +350,26 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
     if number <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return number
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}")
+    return number
+
+
+def _non_negative_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}") from None
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
     return number
 
 

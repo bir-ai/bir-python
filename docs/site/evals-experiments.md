@@ -212,3 +212,23 @@ send_experiment(result.path, "http://127.0.0.1:8000")
 ```
 
 The server can then display the experiment list and per-example details.
+
+Like [`send_events()`](sending.md#retry-behavior), `send_experiment()` retries
+transient failures — network errors, timeouts, and HTTP 5xx responses — with
+exponential backoff. HTTP 4xx responses, a missing experiment or summary file,
+and an invalid success body are permanent and raised immediately.
+
+```python
+send_experiment(
+    result.path,
+    "http://127.0.0.1:8000",
+    retries=3,
+    backoff=1.0,
+    timeout=10.0,
+)
+```
+
+The delay is `backoff * 2**attempt`. Defaults are two retries, a 0.5-second
+backoff, and a 10-second timeout. A healthy send makes one request attempt. The
+CLI exposes the same controls as `bir send-experiment --retries N --backoff
+SECONDS`.

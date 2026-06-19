@@ -29,6 +29,14 @@ Before publishing, verify the release with the SDK release checklist in
   `backoff * 2**attempt` seconds between attempts; HTTP 4xx is still raised
   immediately without retry. A healthy send makes a single attempt, so the
   default behavior is unchanged. Stdlib only (`time`).
+- Matching bounded retry with exponential backoff for `send_experiment()` and
+  `bir send-experiment`. New `retries` (default `2`) and `backoff` (default `0.5`)
+  keyword arguments — and non-negative `--retries`/`--backoff` CLI options — retry
+  the same transient failures (network errors, timeouts, and HTTP 5xx) sleeping
+  `backoff * 2**attempt` seconds between attempts. HTTP 4xx, a missing experiment
+  or summary file, and an invalid success response body are still raised
+  immediately without retry, and a healthy send still makes one request with no
+  sleep, so the default behavior is unchanged. Stdlib only.
 - Opt-in `send_events(mark_sent=True)` to make re-sends cheap. Accepted event IDs
   are recorded in a sidecar file next to the trace file (`<trace_path>.sent`) and
   skipped on later sends, so `attempted` reflects only events not yet recorded as

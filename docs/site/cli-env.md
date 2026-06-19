@@ -21,7 +21,7 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
-| `bir send-experiment PATH [--server URL]` | Send a saved experiment and summary. |
+| `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
@@ -33,6 +33,13 @@ files (`traces.jsonl.1` ..) created by `configure(max_bytes=...)`, oldest-first
 alongside the active file. It is off by default, so both commands operate on the
 active file only unless the flag is passed. `bir send --include-rotated`
 deduplicates events by ID when a rotated file overlaps the active one.
+
+`bir send-experiment` retries transient upload failures (network errors,
+timeouts, and HTTP 5xx) with exponential backoff. `--retries` (default `2`) and
+`--backoff` seconds (default `0.5`) accept non-negative values only, and the
+delay between attempts is `backoff * 2**attempt`. HTTP 4xx, a missing file, and
+an invalid server response fail immediately. See
+[Sending to a Server](sending.md#retry-behavior).
 
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces` and

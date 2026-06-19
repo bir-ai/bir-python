@@ -14,7 +14,17 @@ from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
-from ._sdk import _record_score_event, _safe_capture, _safe_error, _trace_context
+from ._sdk import (
+    _TransientSendError,
+    _is_retryable_status,
+    _record_score_event,
+    _safe_capture,
+    _safe_error,
+    _send_with_retry,
+    _trace_context,
+    _validate_non_negative_int,
+)
+from ._sdk import _validate_non_negative_number as _validate_non_negative_send_number
 
 _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
@@ -1061,8 +1071,22 @@ def send_experiment(
     server_url: str = "http://127.0.0.1:8000",
     *,
     timeout: float = 10.0,
+    retries: int = 2,
+    backoff: float = 0.5,
 ) -> SendExperimentResult:
-    """Send a persisted experiment and its summary to a Bir server."""
+    """Send a persisted experiment and its summary to a Bir server.
+
+    Transient failures are retried with exponential backoff, matching
+    ``send_events``: a network error, timeout, or HTTP 5xx is retried up to
+    ``retries`` times (default ``2``), sleeping ``backoff * 2**attempt`` seconds
+    between tries (``backoff`` defaults to ``0.5``). A 4xx response is a permanent
+    rejection raised immediately without retry, as are a missing experiment or
+    summary file and an invalid success response body. A healthy send still makes
+    a single attempt with no sleep, so the default behavior is unchanged.
+    """
+
+    retries = _validate_non_negative_int(retries, "retries")
+    backoff = float(_validate_non_negative_send_number(backoff, "backoff"))
 
     experiment_path = Path(path)
     if not experiment_path.exists():
@@ -1076,7 +1100,12 @@ def send_experiment(
         "summary": summary.to_dict(),
         "results": [result.to_dict() for result in experiment.results],
     }
-    return _post_experiment(_experiments_endpoint(server_url), payload, timeout=timeout)
+    endpoint = _experiments_endpoint(server_url)
+    return _send_with_retry(
+        lambda: _post_experiment(endpoint, payload, timeout=timeout),
+        retries=retries,
+        backoff=backoff,
+    )
 
 
 def _run_example(
@@ -1360,6 +1389,13 @@ def _experiments_endpoint(server_url: str) -> str:
 
 
 def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: float) -> SendExperimentResult:
+    """Post the experiment once, raising :class:`_TransientSendError` for retryable failures.
+
+    Network errors, timeouts, and HTTP 5xx are surfaced as ``_TransientSendError``
+    so :func:`_send_with_retry` can retry them; HTTP 4xx and an invalid success
+    body are permanent ``RuntimeError`` failures that propagate immediately.
+    """
+
     payload = json.dumps(experiment, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
@@ -1373,9 +1409,15 @@ def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: f
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"bir server rejected experiment with HTTP {exc.code}: {body}") from exc
+        message = f"bir server rejected experiment with HTTP {exc.code}: {body}"
+        if _is_retryable_status(exc.code):
+            raise _TransientSendError(message, cause=exc) from exc
+        raise RuntimeError(message) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"bir could not send experiment to {endpoint}: {exc.reason}") from exc
+        raise _TransientSendError(f"bir could not send experiment to {endpoint}: {exc.reason}", cause=exc) from exc
+    except TimeoutError as exc:
+        # A socket read timeout surfaces as TimeoutError rather than URLError.
+        raise _TransientSendError(f"bir could not send experiment to {endpoint}: {exc}", cause=exc) from exc
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected experiment with HTTP {status}: {body}")

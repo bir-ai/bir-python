@@ -77,6 +77,13 @@ bir send --server http://127.0.0.1:8000
 bir send --include-rotated --server http://127.0.0.1:8000
 bir send-experiment .bir/experiments/<name>-<id>.jsonl \
   --server http://127.0.0.1:8000
+bir send-experiment .bir/experiments/<name>-<id>.jsonl \
+  --retries 3 --backoff 1.0
 ```
 
-See [CLI & Environment Config](cli-env.md) for all commands.
+`bir send-experiment` shares the same bounded retry behavior described above:
+`--retries` (default `2`) and `--backoff` (default `0.5`) retry transient
+failures and accept non-negative values only. See
+[CLI & Environment Config](cli-env.md) for all commands and
+[local evals and experiments](evals-experiments.md#upload-an-experiment) for the
+Python API.

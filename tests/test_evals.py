@@ -1309,13 +1309,205 @@ class EvalTests(unittest.TestCase):
                 HTTPMessage(),
                 BytesIO(b'{"detail":"failed"}'),
             )
+            # retries=0 keeps this a single-attempt check (the retry paths are
+            # covered by the dedicated tests below) so it stays fast and never sleeps.
             with patch("urllib.request.urlopen", side_effect=http_error):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
-                    send_experiment(experiment_path)
+                    send_experiment(experiment_path, retries=0)
 
             with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
                 with self.assertRaisesRegex(RuntimeError, "could not send experiment"):
-                    send_experiment(experiment_path)
+                    send_experiment(experiment_path, retries=0)
+
+    def test_send_experiment_succeeds_on_first_attempt_without_sleeping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_experiment(experiment_path)
+
+            # A healthy send is one request with no backoff sleep.
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(sleeps, [])
+            self.assertEqual(result.accepted, 1)
+            self.assertEqual(result.experiment_id, "experiment-1")
+
+    def test_send_experiment_retries_network_error_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                if len(attempts) == 1:
+                    raise urllib.error.URLError("temporary network blip")
+                return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_experiment(experiment_path)
+
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(result.accepted, 1)
+            self.assertEqual(result.experiment_id, "experiment-1")
+
+    def test_send_experiment_retries_timeout_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                if len(attempts) == 1:
+                    raise TimeoutError("read timed out")
+                return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_experiment(experiment_path)
+
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(result.accepted, 1)
+
+    def test_send_experiment_retries_server_5xx_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                if len(attempts) == 1:
+                    raise http_error(503, b'{"detail":"Server Error"}')
+                return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    result = send_experiment(experiment_path)
+
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(result.accepted, 1)
+
+    def test_send_experiment_raises_after_exhausting_retries_with_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                raise urllib.error.URLError("network down")
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    with self.assertRaisesRegex(RuntimeError, "could not send experiment"):
+                        send_experiment(experiment_path, retries=2, backoff=0.5)
+
+            # One initial attempt plus two retries, with exponential backoff between.
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(sleeps, [0.5, 1.0])
+
+    def test_send_experiment_does_not_retry_client_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                raise http_error(422, b'{"detail":"rejected"}')
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
+                        send_experiment(experiment_path)
+
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(sleeps, [])
+
+    def test_send_experiment_does_not_retry_invalid_response_body(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                return FakeHttpResponse(b"not json")
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    with self.assertRaisesRegex(RuntimeError, "invalid experiment response"):
+                        send_experiment(experiment_path)
+
+            # A malformed 2xx body is a permanent failure: one request, no sleep.
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(sleeps, [])
+
+    def test_send_experiment_does_not_retry_malformed_local_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            # Build a valid experiment (so the summary sidecar exists), then
+            # corrupt the result file: loading must fail before any network call.
+            build_sendable_experiment(experiment_path)
+            experiment_path.write_text("{not valid json\n", encoding="utf-8")
+            sleeps: list[float] = []
+
+            def must_not_send(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("a malformed local file must fail before any request")
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=must_not_send):
+                    with self.assertRaisesRegex(ValueError, "Invalid JSON in experiment"):
+                        send_experiment(experiment_path)
+
+            self.assertEqual(sleeps, [])
+
+    def test_send_experiment_validates_retries_and_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            build_sendable_experiment(experiment_path)
+
+            def must_not_send(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid retry/backoff must fail before any request")
+
+            with patch("urllib.request.urlopen", side_effect=must_not_send):
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, retries=-1)
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, retries=True)
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, retries=1.5)  # type: ignore[arg-type]
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, backoff=-0.5)
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, backoff=float("nan"))
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, backoff=float("inf"))
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, backoff=True)
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, backoff="fast")  # type: ignore[arg-type]
+
 
 class FakeHttpResponse:
     status = 201
@@ -1348,6 +1540,28 @@ def request_url(request: object) -> str:
     if not isinstance(url, str):
         raise TypeError("expected request to have a full_url")
     return url
+
+
+def build_sendable_experiment(path: Path) -> ExperimentResult:
+    """Run a tiny deterministic experiment so its result and summary files exist on disk."""
+
+    return run_experiment(
+        "retrying",
+        dataset=Dataset([DatasetExample(id="q1", input={"question": "hello"})]),
+        task=lambda question: question,
+        evaluators=[json_valid()],
+        path=path,
+    )
+
+
+def http_error(code: int, body: bytes = b"{}") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "http://127.0.0.1:8000/v1/experiments",
+        code,
+        "error",
+        HTTPMessage(),
+        BytesIO(body),
+    )
 
 
 if __name__ == "__main__":

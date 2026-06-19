@@ -404,6 +404,67 @@ class SendExperimentCommandTests(CliBaseTest):
             self.assertEqual(out, "")
             self.assertIn("bir:", err)
 
+    def test_send_experiment_forwards_retries_and_backoff(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+            experiment_file = workdir / "faq.jsonl"
+            attempts: list[object] = []
+            sleeps: list[float] = []
+            success = FakeHttpResponse(json.dumps({"accepted": 1, "id": "experiment-1"}).encode("utf-8"))
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                if len(attempts) <= 3:
+                    raise urllib.error.URLError("temporary network blip")
+                return success
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    code, out, err = run_cli(
+                        "send-experiment",
+                        str(experiment_file),
+                        "--server",
+                        "http://server.test",
+                        "--retries",
+                        "3",
+                        "--backoff",
+                        "0.25",
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(out.strip(), "accepted=1 id=experiment-1")
+            # retries=3 allows four attempts; backoff=0.25 sets the first delay,
+            # confirming both CLI options reach send_experiment.
+            self.assertEqual(len(attempts), 4)
+            self.assertEqual(sleeps, [0.25, 0.5, 1.0])
+
+    def test_send_experiment_rejects_negative_retries(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+            experiment_file = workdir / "faq.jsonl"
+
+            def fail(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid --retries must be rejected before any request")
+
+            with patch("urllib.request.urlopen", side_effect=fail):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli("send-experiment", str(experiment_file), "--retries", "-1")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_send_experiment_rejects_non_finite_backoff(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+            experiment_file = workdir / "faq.jsonl"
+
+            def fail(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid --backoff must be rejected before any request")
+
+            with patch("urllib.request.urlopen", side_effect=fail):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli("send-experiment", str(experiment_file), "--backoff", "inf")
+            self.assertEqual(raised.exception.code, 2)
+
 
 class TailCommandTests(CliBaseTest):
     def test_follow_trace_emits_only_new_events(self) -> None:
