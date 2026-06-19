@@ -61,6 +61,41 @@ errors, timeouts, and HTTP 5xx) with bounded exponential backoff via `retries`
 and `backoff`, while HTTP 4xx and malformed inputs fail immediately. See
 [server uploads](docs/site/sending.md).
 
+## Evaluations and experiments
+
+Bir ships deterministic, local-first evaluators and an experiment runner that
+scores a task over a dataset and persists per-example results and a summary under
+`.bir/experiments/`. Use `run_experiment()` for synchronous tasks, or
+`run_experiment_async()` when your task is a coroutine such as an async provider
+client:
+
+```python
+import asyncio
+
+from bir.evals import Dataset, DatasetExample, contains, run_experiment_async
+
+
+async def answer(question: str) -> str:
+    ...  # await your async model client
+
+
+result = asyncio.run(
+    run_experiment_async(
+        "prompt-v1",
+        dataset=Dataset([DatasetExample(id="q1", input={"question": "Hi"})]),
+        task=answer,
+        evaluators=[contains("Hi")],
+        max_concurrency=8,
+    )
+)
+```
+
+`run_experiment_async()` runs up to `max_concurrency` examples concurrently while
+keeping results, JSONL rows, and summary aggregates in dataset order. It accepts
+async tasks, plain sync callables, and sync callables that return an awaitable,
+and otherwise matches `run_experiment()`. See
+[local evals and experiments](docs/site/evals-experiments.md).
+
 ## Documentation
 
 The documentation site covers the [quickstart](docs/site/quickstart.md),

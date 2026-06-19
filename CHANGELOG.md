@@ -19,6 +19,18 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `run_experiment_async()`, an asynchronous experiment runner for async or sync
+  tasks. It accepts coroutine functions, plain sync callables, and sync callables
+  that return an awaitable (decided per call with `inspect.isawaitable`), runs up
+  to `max_concurrency` examples at once (a positive integer, default `1`), and
+  always persists results, JSONL rows, and summary aggregates in dataset order
+  regardless of completion order. Evaluator execution, task input binding,
+  redaction, `raise_on_error` semantics, `record_traces` trace trees, and the
+  persisted JSONL/summary schema match `run_experiment()`. Each example runs in
+  its own asyncio task, so concurrent `record_traces=True` runs keep isolated
+  trace trees; cancelling the runner cancels and awaits the in-flight example
+  tasks and re-raises `CancelledError` without writing a misleading success
+  summary. Stdlib only (`asyncio`, `inspect`).
 - A structured MkDocs documentation site covering the quickstart, core API,
   privacy and capture, sampling and service metadata, server uploads,
   integrations, evals, CLI, and environment configuration. The documentation

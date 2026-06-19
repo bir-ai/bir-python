@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import math
 import re
@@ -62,6 +64,7 @@ __all__ = [
     "regex_match",
     "retrieved_context_contains",
     "run_experiment",
+    "run_experiment_async",
     "send_experiment",
 ]
 
@@ -929,6 +932,115 @@ def run_experiment(
     return experiment_result
 
 
+async def run_experiment_async(
+    name: str,
+    *,
+    dataset: Dataset | Iterable[DatasetExample],
+    task: Callable[..., Any],
+    evaluators: Iterable[DeterministicEvaluator],
+    path: str | Path | None = None,
+    raise_on_error: bool = True,
+    record_traces: bool = False,
+    max_concurrency: int = 1,
+) -> ExperimentResult:
+    """Run a task over a dataset with bounded concurrency and persist results.
+
+    This is the asynchronous counterpart to :func:`run_experiment`. The ``task``
+    may be a coroutine function, a plain sync callable, or a sync callable that
+    returns an awaitable; the return value is awaited only when
+    :func:`inspect.isawaitable` reports it is awaitable, so the callable itself is
+    never inspected. Up to ``max_concurrency`` examples run concurrently, but the
+    returned results, the persisted JSONL rows, and the summary aggregates always
+    follow dataset order regardless of completion order.
+
+    Every other behavior matches :func:`run_experiment`: evaluator execution,
+    task input binding, redaction, ``raise_on_error`` semantics, and the
+    persisted JSONL/summary schema are identical. Each example runs in its own
+    asyncio task, whose copied context isolates the trace contextvars, so
+    ``record_traces=True`` produces a separate trace tree per example even while
+    they run concurrently.
+
+    Like :func:`run_experiment`, ``raise_on_error=True`` persists results through
+    the first failing example in dataset order, writes the matching error
+    summary, and re-raises that example's exception. Because examples run
+    concurrently, later examples may already have executed when the failure is
+    detected; their results are simply not persisted. If the surrounding
+    coroutine is cancelled, the in-flight example tasks are cancelled and awaited
+    and ``CancelledError`` propagates without writing a misleading success
+    summary.
+    """
+
+    if not name:
+        raise ValueError("experiment name must not be empty")
+    max_concurrency = _validate_positive_int(max_concurrency, "max_concurrency")
+
+    experiment_id = str(uuid4())
+    examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
+    evaluator_list = list(evaluators)
+    start_time = _now()
+    output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+    results_by_index: dict[int, ExperimentExampleResult] = {}
+    errors_by_index: dict[int, Exception] = {}
+
+    async def run_one(index: int, example: DatasetExample) -> None:
+        async with semaphore:
+            if record_traces:
+                result, error = await _run_traced_example_async(
+                    experiment_id=experiment_id,
+                    experiment_name=name,
+                    example=example,
+                    task=task,
+                    evaluators=evaluator_list,
+                )
+            else:
+                try:
+                    result = await _run_example_async(example, task, evaluator_list)
+                    error = None
+                except Exception as exc:
+                    result = _error_example_result(example, exc)
+                    error = exc
+            results_by_index[index] = result
+            if error is not None:
+                errors_by_index[index] = error
+
+    tasks = [asyncio.create_task(run_one(index, example)) for index, example in enumerate(examples)]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        # Includes CancelledError: cancel and await the in-flight example tasks so
+        # they clean up, then re-raise without persisting a misleading summary.
+        for pending in tasks:
+            pending.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    ordered_results = [results_by_index[index] for index in range(len(examples))]
+    end_time = _now()
+
+    if raise_on_error and errors_by_index:
+        first_error_index = min(errors_by_index)
+        _persist_experiment(
+            output_path=output_path,
+            experiment_id=experiment_id,
+            name=name,
+            start_time=start_time,
+            end_time=end_time,
+            results=ordered_results[: first_error_index + 1],
+        )
+        raise errors_by_index[first_error_index]
+
+    return _persist_experiment(
+        output_path=output_path,
+        experiment_id=experiment_id,
+        name=name,
+        start_time=start_time,
+        end_time=end_time,
+        results=ordered_results,
+    )
+
+
 def load_experiment(path: str | Path) -> ExperimentResult:
     """Load an experiment result JSONL file."""
 
@@ -1116,6 +1228,40 @@ def _run_example(
     start_time = _now()
     output = _call_task(task, example.input)
     task_end_time = _now()
+    return _evaluate_example_output(
+        example,
+        output,
+        start_time=start_time,
+        task_end_time=task_end_time,
+        evaluators=evaluators,
+    )
+
+
+async def _run_example_async(
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+) -> ExperimentExampleResult:
+    start_time = _now()
+    output = await _call_task_async(task, example.input)
+    task_end_time = _now()
+    return _evaluate_example_output(
+        example,
+        output,
+        start_time=start_time,
+        task_end_time=task_end_time,
+        evaluators=evaluators,
+    )
+
+
+def _evaluate_example_output(
+    example: DatasetExample,
+    output: Any,
+    *,
+    start_time: str,
+    task_end_time: str,
+    evaluators: list[DeterministicEvaluator],
+) -> ExperimentExampleResult:
     context = EvaluationContext(
         example=example,
         output=output,
@@ -1162,15 +1308,7 @@ def _run_traced_example(
     task: Callable[..., Any],
     evaluators: list[DeterministicEvaluator],
 ) -> tuple[ExperimentExampleResult, Exception | None]:
-    trace = _trace_context(
-        name=f"experiment.{experiment_name}.{example.id}",
-        metadata={
-            "kind": "experiment",
-            "experiment_id": experiment_id,
-            "experiment_name": experiment_name,
-            "example_id": example.id,
-        },
-    )
+    trace = _experiment_trace_context(experiment_id, experiment_name, example)
     trace.__enter__()
     if trace.id is None:
         raise RuntimeError("bir experiment trace context did not provide a trace id")
@@ -1184,6 +1322,49 @@ def _run_traced_example(
 
     trace.__exit__(None, None, None)
     return replace(result, trace_id=trace.id), None
+
+
+async def _run_traced_example_async(
+    *,
+    experiment_id: str,
+    experiment_name: str,
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+) -> tuple[ExperimentExampleResult, Exception | None]:
+    # ``asyncio.create_task`` copies the current context for each example, so the
+    # trace contextvars set here stay isolated from concurrently running examples
+    # and the task's nested observations attach to this trace tree only.
+    trace = _experiment_trace_context(experiment_id, experiment_name, example)
+    trace.__enter__()
+    if trace.id is None:
+        raise RuntimeError("bir experiment trace context did not provide a trace id")
+
+    try:
+        result = await _run_example_async(example, task, evaluators)
+        _record_experiment_scores(trace.id, result)
+    except Exception as exc:
+        trace.__exit__(type(exc), exc, exc.__traceback__)
+        return replace(_error_example_result(example, exc), trace_id=trace.id), exc
+
+    trace.__exit__(None, None, None)
+    return replace(result, trace_id=trace.id), None
+
+
+def _experiment_trace_context(
+    experiment_id: str,
+    experiment_name: str,
+    example: DatasetExample,
+) -> Any:
+    return _trace_context(
+        name=f"experiment.{experiment_name}.{example.id}",
+        metadata={
+            "kind": "experiment",
+            "experiment_id": experiment_id,
+            "experiment_name": experiment_name,
+            "example_id": example.id,
+        },
+    )
 
 
 def _record_experiment_scores(trace_id: str, result: ExperimentExampleResult) -> None:
@@ -1202,6 +1383,15 @@ def _call_task(task: Callable[..., Any], input_value: Any) -> Any:
     if isinstance(input_value, Mapping):
         return task(**input_value)
     return task(input_value)
+
+
+async def _call_task_async(task: Callable[..., Any], input_value: Any) -> Any:
+    # Reuse the same input binding as the sync runner, then await only when the
+    # call returns an awaitable so plain sync tasks work unchanged.
+    result = _call_task(task, input_value)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _dataset_example_from_payload(
@@ -1237,6 +1427,37 @@ def _write_experiment_result(
         **result.to_dict(),
     }
     experiment_file.write(_json_line(record))
+
+
+def _persist_experiment(
+    *,
+    output_path: Path,
+    experiment_id: str,
+    name: str,
+    start_time: str,
+    end_time: str,
+    results: list[ExperimentExampleResult],
+) -> ExperimentResult:
+    """Write ordered result rows and the summary, returning the experiment result.
+
+    Used by :func:`run_experiment_async`, which collects results by dataset index
+    and persists them in one pass once every example has finished.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as experiment_file:
+        for result in results:
+            _write_experiment_result(experiment_file, experiment_id, name, result)
+    experiment_result = _experiment_result(
+        experiment_id=experiment_id,
+        name=name,
+        start_time=start_time,
+        end_time=end_time,
+        results=results,
+        path=output_path,
+    )
+    _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
+    return experiment_result
 
 
 def _experiment_result(
@@ -1540,6 +1761,14 @@ def _validate_non_negative_number(value: Any, field: str) -> float:
     if numeric_value < 0:
         raise ValueError(f"{field} must be non-negative")
     return numeric_value
+
+
+def _validate_positive_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be an int")
+    if value < 1:
+        raise ValueError(f"{field} must be a positive integer")
+    return value
 
 
 def _validate_finite_number(value: Any, field: str) -> float:

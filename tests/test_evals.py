@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import tempfile
 import urllib.error
 import unittest
+from collections.abc import Awaitable, Callable
 from http.client import HTTPMessage
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +41,7 @@ from bir.evals import (
     regex_match,
     retrieved_context_contains,
     run_experiment,
+    run_experiment_async,
     send_experiment,
 )
 
@@ -1507,6 +1510,416 @@ class EvalTests(unittest.TestCase):
                     send_experiment(experiment_path, backoff=True)
                 with self.assertRaises(TypeError):
                     send_experiment(experiment_path, backoff="fast")  # type: ignore[arg-type]
+
+
+class RunExperimentAsyncTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_matches_run_experiment_for_async_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO"),
+                    DatasetExample(id="q2", input={"question": "bir"}, expected="BIR"),
+                ]
+            )
+
+            async def answer(question: str) -> str:
+                await asyncio.sleep(0)
+                return question.upper()
+
+            def sync_answer(question: str) -> str:
+                return question.upper()
+
+            async_path = Path(directory) / "async.jsonl"
+            sync_path = Path(directory) / "sync.jsonl"
+            result = asyncio.run(
+                run_experiment_async(
+                    "uppercase",
+                    dataset=dataset,
+                    task=answer,
+                    evaluators=[exact_match(), contains("H", case_sensitive=True)],
+                    path=async_path,
+                    max_concurrency=2,
+                )
+            )
+            sync_result = run_experiment(
+                "uppercase",
+                dataset=dataset,
+                task=sync_answer,
+                evaluators=[exact_match(), contains("H", case_sensitive=True)],
+                path=sync_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores, sync_result.aggregate_scores)
+            self.assertEqual(
+                [row.example_id for row in result.results],
+                [row.example_id for row in sync_result.results],
+            )
+            records = [json.loads(line) for line in async_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["example_id"] for record in records], ["q1", "q2"])
+            self.assertEqual(records[0]["experiment_name"], "uppercase")
+            self.assertEqual(records[0]["scores"][0]["name"], "exact_match")
+            self.assertNotIn("trace_id", records[0])
+
+    def test_supports_sync_callables_and_awaitable_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset([DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO")])
+
+            def sync_task(question: str) -> str:
+                return question.upper()
+
+            def returns_awaitable(question: str) -> Awaitable[str]:
+                async def inner() -> str:
+                    await asyncio.sleep(0)
+                    return question.upper()
+
+                return inner()
+
+            cases: list[tuple[str, Callable[..., Any]]] = [
+                ("sync", sync_task),
+                ("awaitable", returns_awaitable),
+            ]
+            for label, task in cases:
+                path = Path(directory) / f"{label}.jsonl"
+                result = asyncio.run(
+                    run_experiment_async(
+                        label,
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[exact_match()],
+                        path=path,
+                    )
+                )
+                self.assertEqual(result.status, "success", label)
+                self.assertEqual(result.aggregate_scores, {"exact_match": 1.0}, label)
+
+    def test_preserves_dataset_order_under_out_of_order_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ordered.jsonl"
+            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}, expected=index) for index in range(8)])
+
+            async def task(n: int) -> int:
+                # Later examples finish first, so completion order reverses dataset order.
+                await asyncio.sleep((8 - n) * 0.005)
+                return n
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "ordered",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[exact_match()],
+                    path=path,
+                    max_concurrency=8,
+                )
+            )
+
+            expected_ids = [f"q{index}" for index in range(8)]
+            self.assertEqual([row.example_id for row in result.results], expected_ids)
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["example_id"] for record in records], expected_ids)
+            self.assertEqual(result.aggregate_scores, {"exact_match": 1.0})
+
+    def test_bounds_observed_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bounded.jsonl"
+            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}) for index in range(12)])
+            tracker = {"active": 0, "peak": 0}
+
+            async def task(n: int) -> int:
+                tracker["active"] += 1
+                tracker["peak"] = max(tracker["peak"], tracker["active"])
+                await asyncio.sleep(0.01)
+                tracker["active"] -= 1
+                return n
+
+            asyncio.run(
+                run_experiment_async(
+                    "bounded",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=path,
+                    max_concurrency=3,
+                )
+            )
+
+            self.assertGreater(tracker["peak"], 1)  # examples really ran concurrently
+            self.assertLessEqual(tracker["peak"], 3)
+
+    def test_default_max_concurrency_runs_one_example_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sequential.jsonl"
+            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}) for index in range(5)])
+            tracker = {"active": 0, "peak": 0}
+
+            async def task(n: int) -> int:
+                tracker["active"] += 1
+                tracker["peak"] = max(tracker["peak"], tracker["active"])
+                await asyncio.sleep(0)
+                tracker["active"] -= 1
+                return n
+
+            asyncio.run(
+                run_experiment_async(
+                    "sequential",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=path,
+                )
+            )
+
+            self.assertEqual(tracker["peak"], 1)
+
+    def test_rejects_invalid_max_concurrency(self) -> None:
+        dataset = Dataset([DatasetExample(id="q1", input={"n": 1})])
+
+        async def task(n: int) -> int:
+            return n
+
+        for value in (0, -1):
+            with self.assertRaisesRegex(ValueError, "max_concurrency must be a positive integer"):
+                asyncio.run(
+                    run_experiment_async("v", dataset=dataset, task=task, evaluators=[json_valid()], max_concurrency=value)
+                )
+        with self.assertRaisesRegex(TypeError, "max_concurrency must be an int"):
+            asyncio.run(
+                run_experiment_async("v", dataset=dataset, task=task, evaluators=[json_valid()], max_concurrency=True)
+            )
+        for bad_type in (1.5, "2"):
+            with self.assertRaisesRegex(TypeError, "max_concurrency must be an int"):
+                asyncio.run(
+                    run_experiment_async(
+                        "v",
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[json_valid()],
+                        max_concurrency=bad_type,  # type: ignore[arg-type]
+                    )
+                )
+
+    def test_record_traces_isolates_concurrent_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "traced.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+            dataset = Dataset(
+                [DatasetExample(id=f"q{index}", input={"question": str(index)}, expected=str(index)) for index in range(6)]
+            )
+
+            async def answer(question: str) -> str:
+                with span("retrieve_context"):
+                    await asyncio.sleep(0.005)
+                    with retrieval("search_docs", query=question) as result:
+                        result.add_document(id=f"doc-{question}", text=question)
+                return question
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "iso",
+                    dataset=dataset,
+                    task=answer,
+                    evaluators=[exact_match()],
+                    path=experiment_path,
+                    record_traces=True,
+                    max_concurrency=4,
+                )
+            )
+
+            self.assertEqual(result.status, "success")
+            traces = load_traces(trace_path)
+            self.assertEqual(len(traces), 6)
+            self.assertEqual(
+                sorted(trace.name for trace in traces),
+                [f"experiment.iso.q{index}" for index in range(6)],
+            )
+            for trace in traces:
+                # Every event in a trace shares that trace's id, and the retrieval query
+                # matches the trace's own example: concurrent examples never cross-talk.
+                self.assertTrue(all(event.trace_id == trace.id for event in trace.events))
+                types = [event.type for event in trace.events]
+                self.assertEqual(types.count("trace"), 1)
+                self.assertEqual(types.count("score"), 1)
+                span_event = next(event for event in trace.events if event.type == "span")
+                self.assertEqual(span_event.parent_id, trace.id)
+                tool_event = next(event for event in trace.events if event.type == "tool_call")
+                self.assertEqual(tool_event.parent_id, span_event.id)
+                example_number = trace.name.rsplit(".", 1)[1][1:]
+                self.assertEqual(tool_event.input, {"query": example_number})
+
+    def test_raises_and_writes_error_summary_through_first_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "failure.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q0", input={"n": 0}),
+                    DatasetExample(id="q1", input={"token": "raw-token"}),
+                    DatasetExample(id="q2", input={"n": 2}),
+                ]
+            )
+
+            async def task(**kwargs: object) -> object:
+                await asyncio.sleep(0.005)
+                if "token" in kwargs:
+                    raise RuntimeError(f"provider failed token={kwargs['token']}")
+                return kwargs["n"]
+
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                asyncio.run(
+                    run_experiment_async(
+                        "failure",
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[json_valid()],
+                        path=experiment_path,
+                        max_concurrency=3,
+                    )
+                )
+
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.status, "error")
+            self.assertEqual(summary.example_count, 2)  # q0 success + q1 error, in dataset order
+            self.assertEqual(summary.error_count, 1)
+
+            loaded = load_experiment(experiment_path)
+            self.assertEqual([row.example_id for row in loaded.results], ["q0", "q1"])
+            self.assertEqual(loaded.results[1].error, "provider failed token=[redacted]")
+            self.assertNotIn("raw-token", experiment_path.read_text(encoding="utf-8"))
+
+    def test_records_errors_when_configured_to_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "continue.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q0", input={"n": 0}),
+                    DatasetExample(id="q1", input={"token": "raw-token"}),
+                    DatasetExample(id="q2", input={"n": 2}),
+                ]
+            )
+
+            async def task(**kwargs: object) -> object:
+                await asyncio.sleep(0)
+                if "token" in kwargs:
+                    raise RuntimeError(f"provider failed token={kwargs['token']}")
+                return kwargs["n"]
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "continue",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    raise_on_error=False,
+                    max_concurrency=3,
+                )
+            )
+
+            self.assertEqual(result.status, "error")
+            self.assertEqual([row.example_id for row in result.results], ["q0", "q1", "q2"])
+            self.assertEqual([row.status for row in result.results], ["success", "error", "success"])
+            self.assertEqual(result.results[1].error, "provider failed token=[redacted]")
+            self.assertNotIn("raw-token", experiment_path.read_text(encoding="utf-8"))
+
+    def test_redacts_secret_inputs_and_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "secrets.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
+            dataset = Dataset([DatasetExample(id="q1", input={"api_key": "sk-secret"}, expected="ok")])
+
+            async def answer(api_key: str) -> dict[str, str]:
+                await asyncio.sleep(0)
+                return {"answer": "ok", "api_key": api_key}
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "secrets",
+                    dataset=dataset,
+                    task=answer,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    record_traces=True,
+                )
+            )
+
+            self.assertEqual(result.results[0].input, {"api_key": "[redacted]"})
+            self.assertEqual(result.results[0].output, {"answer": "ok", "api_key": "[redacted]"})
+            self.assertNotIn("sk-secret", experiment_path.read_text(encoding="utf-8"))
+            self.assertNotIn("sk-secret", trace_path.read_text(encoding="utf-8"))
+
+    def test_empty_dataset_writes_empty_result_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "empty.jsonl"
+
+            async def task(question: str) -> str:
+                return question
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "empty",
+                    dataset=Dataset([]),
+                    task=task,
+                    evaluators=[exact_match()],
+                    path=experiment_path,
+                )
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.results, [])
+            self.assertEqual(result.aggregate_scores, {})
+            self.assertEqual(experiment_path.read_text(encoding="utf-8"), "")
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.example_count, 0)
+
+    def test_requires_experiment_name(self) -> None:
+        async def task(question: str) -> str:
+            return question
+
+        with self.assertRaisesRegex(ValueError, "experiment name must not be empty"):
+            asyncio.run(run_experiment_async("", dataset=Dataset([]), task=task, evaluators=[exact_match()]))
+
+    def test_cancellation_cleans_up_children_without_writing_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "cancel.jsonl"
+            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}) for index in range(4)])
+            cancelled_children: list[int] = []
+
+            async def driver() -> None:
+                started = asyncio.Event()
+
+                async def task(n: int) -> int:
+                    started.set()
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        cancelled_children.append(n)
+                        raise
+                    return n
+
+                experiment = asyncio.ensure_future(
+                    run_experiment_async(
+                        "cancel",
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[json_valid()],
+                        path=experiment_path,
+                        max_concurrency=2,
+                    )
+                )
+                await started.wait()
+                experiment.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await experiment
+
+            asyncio.run(driver())
+            self.assertTrue(cancelled_children)  # in-flight example tasks were cancelled
+            self.assertFalse(experiment_path.exists())
+            self.assertFalse(experiment_path.with_suffix(".summary.json").exists())
 
 
 class FakeHttpResponse:

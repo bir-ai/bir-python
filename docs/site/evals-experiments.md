@@ -46,6 +46,49 @@ Results are written to `.bir/experiments/*.jsonl`, one row per example. A
 sibling `.summary.json` stores the experiment status, counts, aggregate scores,
 and result path.
 
+## Run an async experiment
+
+`run_experiment_async()` is the asynchronous counterpart to `run_experiment()`.
+Use it when your task is a coroutine — for example an async provider client — so
+you do not have to wrap it in an event-loop adapter. It accepts coroutine
+functions, plain sync callables, and sync callables that return an awaitable; a
+returned value is awaited only when it is awaitable.
+
+```python
+import asyncio
+
+from bir.evals import Dataset, DatasetExample, contains, run_experiment_async
+
+dataset = Dataset([DatasetExample(id="q1", input={"question": "What is Bir?"})])
+
+async def answer_question(question: str) -> str:
+    # await your async model client here
+    return "Bir is an observability SDK."
+
+result = asyncio.run(
+    run_experiment_async(
+        "quickstart-async",
+        dataset=dataset,
+        task=answer_question,
+        evaluators=[contains("observability")],
+        max_concurrency=8,
+    )
+)
+
+print(result.aggregate_scores)
+```
+
+Up to `max_concurrency` examples (a positive integer, default `1`) run at once,
+but the returned results, the persisted JSONL rows, and the summary aggregates
+always follow dataset order regardless of completion order. Evaluator execution,
+task input binding, redaction, `raise_on_error`, `record_traces`, and the
+persisted JSONL/summary schema are identical to `run_experiment()`.
+
+Each example runs in its own asyncio task, so `record_traces=True` produces an
+isolated trace tree per example even when they run concurrently. If the
+surrounding coroutine is cancelled, the in-flight example tasks are cancelled and
+awaited and `CancelledError` propagates without writing a summary.
+
 ## Store datasets as JSONL
 
 ```json
