@@ -19,8 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from types import TracebackType
-from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
+from typing import IO, Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 F = TypeVar("F", bound=Callable[..., Any])
 T = TypeVar("T")
@@ -199,6 +204,59 @@ class PromptRecord:
 # this module (defined there so the validators it reuses already exist) and is
 # then replaced wholesale by ``configure``.
 _write_lock = Lock()
+_sent_ids_lock = Lock()
+
+
+class _InterProcessFileLock:
+    """Exclusive advisory lock backed by a stable sibling lock file.
+
+    Callers must also hold their operation's in-process ``Lock`` before entering
+    this lock. The SDK never nests trace and sent-sidecar locks: if a future
+    operation needs both, it must acquire the trace lock first and the sidecar
+    lock second.
+    """
+
+    def __init__(self, target_path: Path) -> None:
+        self._path = target_path.with_name(f".{target_path.name}.lock")
+        self._file: IO[bytes] | None = None
+
+    def __enter__(self) -> _InterProcessFileLock:
+        lock_file = self._path.open("a+b")
+        try:
+            if os.name == "nt":
+                # msvcrt locks a byte range, so keep one stable byte in the file.
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except BaseException:
+            lock_file.close()
+            raise
+        self._file = lock_file
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        lock_file = self._file
+        self._file = None
+        if lock_file is None:
+            return
+        try:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
 
 
 def configure(
@@ -1393,9 +1451,10 @@ def _write_event(event: dict[str, Any]) -> None:
     with _write_lock:
         trace_path = _config.trace_path
         trace_path.parent.mkdir(parents=True, exist_ok=True)
-        _rotate_trace_file_if_needed(trace_path, payload)
-        with trace_path.open("a", encoding="utf-8") as trace_file:
-            trace_file.write(payload)
+        with _InterProcessFileLock(trace_path):
+            _rotate_trace_file_if_needed(trace_path, payload)
+            with trace_path.open("a", encoding="utf-8") as trace_file:
+                trace_file.write(payload)
 
 
 def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
@@ -1406,7 +1465,7 @@ def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
     only ever break on whole-line boundaries. The incoming line is never split:
     when an empty active file is about to receive a line larger than the cap, the
     line is still written whole rather than rotated away. Must be called while
-    holding ``_write_lock``.
+    holding both ``_write_lock`` and the trace path's process lock.
     """
 
     max_bytes = _config.max_bytes
@@ -1609,13 +1668,18 @@ def _record_sent_ids(sent_ids_path: Path, event_ids: list[str]) -> None:
     Only ever touches ``<trace_path>.sent`` — the trace JSONL is never modified.
     """
 
-    merged = _load_sent_ids(sent_ids_path)
-    merged.update(event_ids)
     sent_ids_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"event_ids": sorted(merged)}, separators=(",", ":")) + "\n"
-    temp_path = sent_ids_path.with_name(sent_ids_path.name + ".tmp")
-    temp_path.write_text(payload, encoding="utf-8")
-    temp_path.replace(sent_ids_path)
+    with _sent_ids_lock:
+        with _InterProcessFileLock(sent_ids_path):
+            merged = _load_sent_ids(sent_ids_path)
+            merged.update(event_ids)
+            payload = json.dumps({"event_ids": sorted(merged)}, separators=(",", ":")) + "\n"
+            temp_path = sent_ids_path.with_name(f".{sent_ids_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            try:
+                temp_path.write_text(payload, encoding="utf-8")
+                temp_path.replace(sent_ids_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:

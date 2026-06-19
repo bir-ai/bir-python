@@ -4,7 +4,10 @@ import asyncio
 import json
 import hashlib
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import urllib.error
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +26,7 @@ from bir._sdk import (
     _config_from_env,
     _parse_env_bool,
     _parse_env_sample_rate,
+    _record_sent_ids,
     _redact_secret_text,
     _reset_config_for_tests,
     _safe_capture,
@@ -153,6 +157,45 @@ class SdkTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         _reset_config_for_tests()
+
+    def _run_synced_subprocesses(
+        self,
+        workdir: Path,
+        code: str,
+        process_args: list[list[str]],
+    ) -> None:
+        """Start workers behind a file barrier and require clean exits."""
+
+        start_path = workdir / "start"
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        processes: list[subprocess.Popen[str]] = []
+        for index, args in enumerate(process_args):
+            ready_path = workdir / f"ready-{index}"
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", code, str(ready_path), str(start_path), *args],
+                    cwd=workdir,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            )
+
+        deadline = time.monotonic() + 15
+        while not all((workdir / f"ready-{index}").exists() for index in range(len(processes))):
+            if any(process.poll() is not None for process in processes) or time.monotonic() >= deadline:
+                for process in processes:
+                    process.kill()
+                outputs = [process.communicate() for process in processes]
+                self.fail(f"subprocess workers did not reach the start barrier: {outputs}")
+            time.sleep(0.01)
+        start_path.touch()
+
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, f"worker failed\nstdout: {stdout}\nstderr: {stderr}")
 
     def test_exposes_a_version_string(self) -> None:
         self.assertIn("__version__", bir.__all__)
@@ -2083,6 +2126,37 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(sum(1 for event in events if event.type == "trace"), 50)
             self.assertEqual(sum(1 for event in events if event.type == "score"), 50)
 
+    def test_cross_process_trace_writes_preserve_every_event(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            worker_code = """
+import sys, time
+from pathlib import Path
+from bir import configure, trace
+ready, start, trace_path, worker, count = sys.argv[1:]
+configure(trace_path=trace_path)
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.001)
+for index in range(int(count)):
+    with trace(f"worker-{worker}-{index}"):
+        pass
+"""
+            workers = 4
+            count = 50
+            self._run_synced_subprocesses(
+                workdir,
+                worker_code,
+                [[str(trace_path), str(worker), str(count)] for worker in range(workers)],
+            )
+
+            raw_lines = trace_path.read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in raw_lines]
+            expected_names = {f"worker-{worker}-{index}" for worker in range(workers) for index in range(count)}
+            self.assertEqual(len(payloads), workers * count)
+            self.assertEqual({payload["name"] for payload in payloads}, expected_names)
+            self.assertEqual(len({payload["id"] for payload in payloads}), workers * count)
+
     def _probe_trace_line_bytes(self, trace_path: Path) -> int:
         """Write one representative trace line, measure its size, then remove it.
 
@@ -2228,6 +2302,93 @@ class SdkTests(unittest.TestCase):
             events = load_events(include_rotated=True)
             self.assertEqual(len(events), 200)
             self.assertTrue(all(event.type == "trace" for event in events))
+
+    def test_cross_process_rotation_preserves_valid_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            worker_code = """
+import sys, time
+from pathlib import Path
+from bir import configure, trace
+ready, start, trace_path, worker, count, max_bytes, backup_count = sys.argv[1:]
+configure(trace_path=trace_path, max_bytes=int(max_bytes), backup_count=int(backup_count))
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.001)
+for index in range(int(count)):
+    with trace(f"rotated-{worker}-{index}"):
+        pass
+"""
+            workers = 4
+            count = 30
+            max_bytes = 700
+            backup_count = 200
+            self._run_synced_subprocesses(
+                workdir,
+                worker_code,
+                [
+                    [str(trace_path), str(worker), str(count), str(max_bytes), str(backup_count)]
+                    for worker in range(workers)
+                ],
+            )
+
+            numeric_backups = [
+                path
+                for path in trace_path.parent.glob(f"{trace_path.name}.*")
+                if path.name.removeprefix(f"{trace_path.name}.").isdigit()
+            ]
+            self.assertGreater(len(numeric_backups), 0)
+            self.assertLessEqual(len(numeric_backups), backup_count)
+            all_paths = numeric_backups + [trace_path]
+            payloads = [json.loads(line) for path in all_paths for line in path.read_text(encoding="utf-8").splitlines()]
+            expected_names = {f"rotated-{worker}-{index}" for worker in range(workers) for index in range(count)}
+            self.assertEqual(len(payloads), workers * count)
+            self.assertEqual({payload["name"] for payload in payloads}, expected_names)
+
+    def test_cross_process_sent_id_merges_preserve_union(self) -> None:
+        with temporary_workdir() as workdir:
+            sent_path = workdir / ".bir" / "traces.jsonl.sent"
+            worker_code = """
+import sys, time
+from pathlib import Path
+from bir._sdk import _record_sent_ids
+ready, start, sent_path, worker, batches, batch_size = sys.argv[1:]
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.001)
+for batch in range(int(batches)):
+    ids = [f"sent-{worker}-{batch}-{index}" for index in range(int(batch_size))]
+    _record_sent_ids(Path(sent_path), ids)
+"""
+            workers = 4
+            batches = 10
+            batch_size = 5
+            self._run_synced_subprocesses(
+                workdir,
+                worker_code,
+                [[str(sent_path), str(worker), str(batches), str(batch_size)] for worker in range(workers)],
+            )
+
+            payload = json.loads(sent_path.read_text(encoding="utf-8"))
+            expected_ids = {
+                f"sent-{worker}-{batch}-{index}"
+                for worker in range(workers)
+                for batch in range(batches)
+                for index in range(batch_size)
+            }
+            self.assertEqual(set(payload["event_ids"]), expected_ids)
+            self.assertEqual(list(sent_path.parent.glob(f".{sent_path.name}.*.tmp")), [])
+
+    def test_sent_id_temp_is_cleaned_and_lock_released_after_replace_error(self) -> None:
+        with temporary_workdir() as workdir:
+            sent_path = workdir / ".bir" / "traces.jsonl.sent"
+            with patch("bir._sdk.Path.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    _record_sent_ids(sent_path, ["first"])
+
+            self.assertEqual(list(sent_path.parent.glob(f".{sent_path.name}.*.tmp")), [])
+            _record_sent_ids(sent_path, ["second"])
+            self.assertEqual(json.loads(sent_path.read_text(encoding="utf-8")), {"event_ids": ["second"]})
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:

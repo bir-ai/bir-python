@@ -74,6 +74,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- Local trace append/rotation and sent-ID sidecar merge/replace operations now
+  use stdlib advisory file locks in addition to the existing in-process locks.
+  Concurrent local processes writing one trace path no longer race rotation or
+  lose sent-ID updates; sidecar replacements use unique, cleaned-up temp files.
+  POSIX uses `flock` and Windows uses byte-range locking. No runtime dependency,
+  public API, event schema, JSON formatting, or default rotation behavior changed.
 - CI now installs the optional `docs` extra and runs `mkdocs build --strict`
   once per pull request and push to `main`, catching documentation navigation,
   link, and warning regressions without adding runtime dependencies.

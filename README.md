@@ -37,6 +37,21 @@ def answer_question(question: str) -> str:
 Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
+## Local persistence and concurrency
+
+Trace appends and size-based rotation are serialized across threads and local
+processes that write the same trace path. Opt-in sent-ID bookkeeping uses a
+separate lock around sidecar merge and replacement, so concurrent workers and
+`bir send` processes preserve the union of accepted IDs. The implementation is
+stdlib only: it uses `flock` on POSIX and byte-range locking on Windows, with
+stable hidden lock files beside the trace and sidecar files.
+
+These locks are advisory, so every writer must use Bir's persistence path.
+Cross-host coordination and filesystems that do not implement normal local
+advisory-lock semantics are not supported; use one local trace path per host in
+those deployments. Lock files may remain on disk and must not be deleted while
+Bir processes are active.
+
 ## Documentation
 
 The documentation site covers the [quickstart](docs/site/quickstart.md),
