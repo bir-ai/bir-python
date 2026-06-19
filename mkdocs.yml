@@ -1,0 +1,29 @@
+site_name: Bir Python SDK
+site_description: Local-first LLM tracing and evals for Python
+site_url: https://bir-ai.github.io/bir-python/
+repo_url: https://github.com/bir-ai/bir-python
+repo_name: bir-ai/bir-python
+docs_dir: docs/site
+site_dir: site
+
+theme:
+  name: mkdocs
+
+nav:
+  - Overview: index.md
+  - Quickstart: quickstart.md
+  - Core API: core-api.md
+  - Capture & Privacy: capture-privacy.md
+  - Sampling & Service Metadata: sampling-service-metadata.md
+  - Sending to a Server: sending.md
+  - Integrations: integrations.md
+  - Evals & Experiments: evals-experiments.md
+  - CLI & Environment Config: cli-env.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - codehilite
+  - fenced_code
+
+strict: true

@@ -1,0 +1,69 @@
+# CLI & Environment Config
+
+Installing `bir-sdk` adds a standard-library-only `bir` command for inspecting
+local data and sending it to a server.
+
+## Commands
+
+```bash
+bir traces                    # list local traces, newest first
+bir traces --limit 20 --json  # machine-readable output
+bir tail                      # follow the local trace file
+bir experiments               # list local experiments and scores
+bir send                      # send events to the default local server
+bir send-experiment .bir/experiments/<name>-<id>.jsonl
+bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
+```
+
+| Command | What it does |
+| --- | --- |
+| `bir traces [--path P] [--limit N] [--json]` | List trace time, status, duration, event count, and name. |
+| `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
+| `bir experiments [--dir D] [--json]` | List local experiment summaries. |
+| `bir send [--path P] [--server URL]` | Send local events and print the upload result. |
+| `bir send-experiment PATH [--server URL]` | Send a saved experiment and summary. |
+| `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
+
+Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
+default; experiment listing uses `.bir/experiments`; send commands target
+`http://127.0.0.1:8000`.
+
+Commands print failures to stderr and exit non-zero for missing or malformed
+files, server failures, and failed eval gates. JSON output on `traces` and
+`experiments` is suitable for scripts.
+
+## Environment configuration
+
+Bir reads these variables once when the `bir` package is imported:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BIR_TRACE_PATH` | Local trace JSONL path. | `.bir/traces.jsonl` |
+| `BIR_CAPTURE_INPUTS` | Enable input capture. | `false` |
+| `BIR_CAPTURE_OUTPUTS` | Enable output capture. | `false` |
+| `BIR_SAMPLE_RATE` | Trace recording probability from `0.0` to `1.0`. | `1.0` |
+| `BIR_SERVICE_NAME` | Service name on trace roots. | unset |
+| `BIR_ENVIRONMENT` | Deployment environment on trace roots. | unset |
+
+```bash
+export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
+export BIR_CAPTURE_INPUTS=false
+export BIR_CAPTURE_OUTPUTS=false
+export BIR_SAMPLE_RATE=0.1
+export BIR_SERVICE_NAME=rag-api
+export BIR_ENVIRONMENT=production
+```
+
+Boolean values accept `1`, `true`, `yes`, and `on`, or `0`, `false`, `no`, and
+`off`, case-insensitively. Invalid values raise a configuration error.
+
+Explicit calls take precedence:
+
+```python
+from bir import configure
+
+configure(sample_rate=1.0, environment="staging")
+```
+
+Capture remains disabled unless explicitly enabled. See
+[Capture & Privacy](capture-privacy.md) before recording application payloads.

@@ -19,6 +19,10 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- A structured MkDocs documentation site covering the quickstart, core API,
+  privacy and capture, sampling and service metadata, server uploads,
+  integrations, evals, CLI, and environment configuration. The documentation
+  toolchain is isolated in the optional `docs` dependency extra.
 - Bounded retry with exponential backoff for `send_events()`. New `retries`
   (default `2`) and `backoff` (default `0.5`) keyword arguments retry transient
   failures — network errors, timeouts, and HTTP 5xx — sleeping

@@ -12,6 +12,7 @@ coverage.xml
 htmlcov/
 build/
 dist/
+/site/
 
 # Node / web
 node_modules/

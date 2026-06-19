@@ -44,6 +44,7 @@ bir = "bir.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+docs = ["mkdocs>=1.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
