@@ -35,6 +35,18 @@ _WORD_TOKEN_PATTERN = re.compile(r"\w+")
 _CITATION_ANSWER_PREVIEW_LIMIT = 200
 _DEFAULT_CITATION_PATTERN = r"\[[\w-]+\]"
 
+# Missing-score policy vocabulary for compare_experiments(). ``ignore`` keeps the
+# historical behavior (baseline-only evaluators are reported but never fail the
+# gate); ``regress`` treats a baseline-only evaluator as a regression because a
+# removed evaluator silently drops coverage.
+_MISSING_SCORE_IGNORE = "ignore"
+_MISSING_SCORE_REGRESS = "regress"
+_MISSING_SCORE_POLICIES = (_MISSING_SCORE_IGNORE, _MISSING_SCORE_REGRESS)
+
+# Machine-readable explanations recorded in ExperimentDiff.regression_reasons.
+_REGRESSION_REASON_DELTA = "delta_below_tolerance"
+_REGRESSION_REASON_BASELINE_ONLY = "baseline_only"
+
 __all__ = [
     "Dataset",
     "DatasetExample",
@@ -325,7 +337,15 @@ class ExperimentResult:
 
 @dataclass(frozen=True)
 class ExperimentDiff:
-    """Aggregate-score differences between two experiment runs."""
+    """Aggregate-score differences between two experiment runs.
+
+    ``tolerance`` is the global tolerance, while ``effective_tolerances`` records
+    the tolerance actually applied to each shared evaluator after per-evaluator
+    overrides. ``missing_score`` is the configured policy for evaluators present
+    only in the baseline, and ``regression_reasons`` maps every evaluator that
+    fails the gate to a machine-readable reason. All mappings are ordered by key
+    so the diff serializes deterministically.
+    """
 
     deltas: dict[str, float]
     regressed: frozenset[str]
@@ -334,12 +354,23 @@ class ExperimentDiff:
     baseline_only: frozenset[str]
     candidate_only: frozenset[str]
     tolerance: float
+    effective_tolerances: dict[str, float] = field(default_factory=dict)
+    missing_score: str = _MISSING_SCORE_IGNORE
+    regression_reasons: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_regressions(self) -> bool:
-        """Return whether any shared evaluator regressed beyond tolerance."""
+        """Return whether the configured policy reports any regression.
 
-        return bool(self.regressed)
+        A shared evaluator that dropped beyond its effective tolerance always
+        counts. When the missing-score policy is ``regress``, evaluators present
+        only in the baseline also count: a removed evaluator drops coverage even
+        though no aggregate delta can be computed.
+        """
+
+        if self.regressed:
+            return True
+        return self.missing_score == _MISSING_SCORE_REGRESS and bool(self.baseline_only)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a deterministic JSON-serializable representation of the diff."""
@@ -352,6 +383,9 @@ class ExperimentDiff:
             "baseline_only": sorted(self.baseline_only),
             "candidate_only": sorted(self.candidate_only),
             "tolerance": self.tolerance,
+            "effective_tolerances": self.effective_tolerances,
+            "missing_score": self.missing_score,
+            "regression_reasons": self.regression_reasons,
             "has_regressions": self.has_regressions,
         }
 
@@ -1108,46 +1142,76 @@ def compare_experiments(
     candidate: ExperimentResult | str | Path,
     *,
     tolerance: float = 0.0,
+    score_tolerances: Mapping[str, float] | None = None,
+    missing_score: str = _MISSING_SCORE_IGNORE,
 ) -> ExperimentDiff:
     """Compare shared aggregate evaluator scores from two experiment runs.
 
     A shared evaluator regresses when ``candidate - baseline`` is strictly less
-    than ``-tolerance``. Evaluators found in only one run are reported but are
-    not treated as regressions because no aggregate score can be compared.
+    than ``-tolerance``. ``score_tolerances`` maps an evaluator name to a
+    non-negative, finite tolerance that overrides the global ``tolerance`` for
+    that evaluator only; the strict ``math.isclose`` boundary is preserved per
+    evaluator. Every override name must be a shared evaluator present in both
+    runs, so a typo or a tolerance for a non-comparable evaluator raises a clear
+    error instead of being silently ignored.
+
+    ``missing_score`` selects how evaluators present only in the baseline are
+    treated. ``"ignore"`` (the default) reports them without failing the gate,
+    matching the historical behavior. ``"regress"`` treats each baseline-only
+    evaluator as a regression, because a removed evaluator silently drops
+    coverage even though no aggregate delta can be computed. Evaluators found
+    only in the candidate are always reported but never counted as regressions.
     """
 
-    validated_tolerance = _validate_finite_number(tolerance, "tolerance")
-    if validated_tolerance < 0:
-        raise ValueError("tolerance must be non-negative")
+    validated_tolerance = _validate_non_negative_number(tolerance, "tolerance")
+    validated_missing_score = _validate_missing_score(missing_score)
 
     baseline_result = baseline if isinstance(baseline, ExperimentResult) else load_experiment(baseline)
     candidate_result = candidate if isinstance(candidate, ExperimentResult) else load_experiment(candidate)
     baseline_scores = baseline_result.aggregate_scores
     candidate_scores = candidate_result.aggregate_scores
     shared = baseline_scores.keys() & candidate_scores.keys()
-    deltas = {name: candidate_scores[name] - baseline_scores[name] for name in sorted(shared)}
 
-    regressed = frozenset(
-        name
-        for name, delta in deltas.items()
-        if delta < -validated_tolerance
-        and not math.isclose(delta, -validated_tolerance, rel_tol=1e-12, abs_tol=1e-12)
-    )
-    improved = frozenset(
-        name
-        for name, delta in deltas.items()
-        if delta > validated_tolerance
-        and not math.isclose(delta, validated_tolerance, rel_tol=1e-12, abs_tol=1e-12)
-    )
+    overrides = _validate_score_tolerances(score_tolerances, shared)
+    deltas = {name: candidate_scores[name] - baseline_scores[name] for name in sorted(shared)}
+    effective_tolerances = {name: overrides.get(name, validated_tolerance) for name in sorted(shared)}
+
+    regressed_names: list[str] = []
+    improved_names: list[str] = []
+    regression_reasons: dict[str, str] = {}
+    for name in sorted(shared):
+        delta = deltas[name]
+        evaluator_tolerance = effective_tolerances[name]
+        if delta < -evaluator_tolerance and not math.isclose(
+            delta, -evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            regressed_names.append(name)
+            regression_reasons[name] = _REGRESSION_REASON_DELTA
+        elif delta > evaluator_tolerance and not math.isclose(
+            delta, evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            improved_names.append(name)
+
+    baseline_only = frozenset(baseline_scores.keys() - candidate_scores.keys())
+    candidate_only = frozenset(candidate_scores.keys() - baseline_scores.keys())
+    if validated_missing_score == _MISSING_SCORE_REGRESS:
+        for name in baseline_only:
+            regression_reasons[name] = _REGRESSION_REASON_BASELINE_ONLY
+
+    regressed = frozenset(regressed_names)
+    improved = frozenset(improved_names)
     unchanged = frozenset(shared - regressed - improved)
     return ExperimentDiff(
         deltas=deltas,
         regressed=regressed,
         improved=improved,
         unchanged=unchanged,
-        baseline_only=frozenset(baseline_scores.keys() - candidate_scores.keys()),
-        candidate_only=frozenset(candidate_scores.keys() - baseline_scores.keys()),
+        baseline_only=baseline_only,
+        candidate_only=candidate_only,
         tolerance=validated_tolerance,
+        effective_tolerances=effective_tolerances,
+        missing_score=validated_missing_score,
+        regression_reasons=dict(sorted(regression_reasons.items())),
     )
 
 
@@ -1761,6 +1825,46 @@ def _validate_non_negative_number(value: Any, field: str) -> float:
     if numeric_value < 0:
         raise ValueError(f"{field} must be non-negative")
     return numeric_value
+
+
+def _validate_missing_score(missing_score: Any) -> str:
+    if missing_score not in _MISSING_SCORE_POLICIES:
+        valid = ", ".join(_MISSING_SCORE_POLICIES)
+        raise ValueError(f"missing_score must be one of: {valid}")
+    return missing_score
+
+
+def _validate_score_tolerances(
+    score_tolerances: Mapping[str, float] | None,
+    shared_names: Any,
+) -> dict[str, float]:
+    """Validate per-evaluator tolerance overrides against the shared evaluators.
+
+    Names must be non-empty strings naming a shared evaluator (present in both
+    runs); unknown names raise so a typo or a tolerance for a non-comparable
+    evaluator fails loudly rather than being silently ignored. Values reuse the
+    non-negative finite check, rejecting booleans, negatives, NaN, and infinity.
+    """
+
+    if score_tolerances is None:
+        return {}
+    if not isinstance(score_tolerances, Mapping):
+        raise TypeError("score_tolerances must be a mapping of evaluator name to tolerance")
+
+    resolved: dict[str, float] = {}
+    unknown: list[str] = []
+    for name, value in score_tolerances.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("score_tolerances names must be non-empty strings")
+        resolved[name] = _validate_non_negative_number(value, f"score_tolerances[{name!r}]")
+        if name not in shared_names:
+            unknown.append(name)
+    if unknown:
+        formatted = ", ".join(sorted(unknown))
+        raise ValueError(
+            f"score_tolerances names must be shared evaluators present in both experiments: {formatted}"
+        )
+    return resolved
 
 
 def _validate_positive_int(value: Any, field: str) -> int:

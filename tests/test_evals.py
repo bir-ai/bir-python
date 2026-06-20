@@ -103,6 +103,130 @@ class EvalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tolerance must be finite"):
                 compare_experiments(experiment, experiment, tolerance=math.inf)
 
+    def test_compare_experiments_score_tolerance_overrides_global(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(
+                Path(directory) / "baseline.jsonl", {"quality": 0.9, "speed": 0.9}
+            )
+            candidate = self._run_score_experiment(
+                Path(directory) / "candidate.jsonl", {"quality": 0.7, "speed": 0.7}
+            )
+
+            # quality gets a roomy override and stays unchanged; speed keeps the
+            # strict global tolerance and regresses on the same 0.2 drop.
+            diff = compare_experiments(
+                baseline, candidate, tolerance=0.0, score_tolerances={"quality": 0.3}
+            )
+
+            self.assertEqual(diff.regressed, {"speed"})
+            self.assertEqual(diff.unchanged, {"quality"})
+            self.assertEqual(diff.effective_tolerances, {"quality": 0.3, "speed": 0.0})
+            self.assertEqual(diff.regression_reasons, {"speed": "delta_below_tolerance"})
+            self.assertTrue(diff.has_regressions)
+
+    def test_compare_experiments_score_tolerance_boundary_is_strict_per_evaluator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.8})
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.7})
+
+            # A drop exactly equal to the per-evaluator tolerance is the unchanged
+            # boundary, matching the global-tolerance isclose behavior.
+            diff = compare_experiments(baseline, candidate, score_tolerances={"quality": 0.1})
+
+            self.assertFalse(diff.has_regressions)
+            self.assertEqual(diff.unchanged, {"quality"})
+            self.assertEqual(diff.regression_reasons, {})
+
+    def test_compare_experiments_rejects_unknown_score_tolerance_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(
+                Path(directory) / "baseline.jsonl", {"quality": 0.9, "removed": 0.5}
+            )
+            candidate = self._run_score_experiment(
+                Path(directory) / "candidate.jsonl", {"quality": 0.9, "added": 0.5}
+            )
+
+            # A typo and a baseline-only evaluator are both rejected: a tolerance
+            # only has meaning for an evaluator shared by both runs.
+            with self.assertRaisesRegex(ValueError, "shared evaluators present in both experiments: qualtiy"):
+                compare_experiments(baseline, candidate, score_tolerances={"qualtiy": 0.1})
+            with self.assertRaisesRegex(ValueError, "shared evaluators present in both experiments: removed"):
+                compare_experiments(baseline, candidate, score_tolerances={"removed": 0.1})
+
+    def test_compare_experiments_rejects_invalid_score_tolerance_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment = self._run_score_experiment(Path(directory) / "experiment.jsonl", {"quality": 1.0})
+
+            with self.assertRaisesRegex(ValueError, r"score_tolerances\['quality'\] must be non-negative"):
+                compare_experiments(experiment, experiment, score_tolerances={"quality": -0.1})
+            with self.assertRaisesRegex(ValueError, r"score_tolerances\['quality'\] must be finite"):
+                compare_experiments(experiment, experiment, score_tolerances={"quality": math.inf})
+            with self.assertRaisesRegex(ValueError, r"score_tolerances\['quality'\] must be an int or float"):
+                compare_experiments(experiment, experiment, score_tolerances={"quality": True})
+            with self.assertRaisesRegex(ValueError, "score_tolerances names must be non-empty strings"):
+                compare_experiments(experiment, experiment, score_tolerances={"": 0.1})
+
+    def test_compare_experiments_missing_score_regress_flags_baseline_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(
+                Path(directory) / "baseline.jsonl", {"quality": 0.9, "coverage": 1.0}
+            )
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.9})
+
+            ignored = compare_experiments(baseline, candidate)
+            self.assertFalse(ignored.has_regressions)
+            self.assertEqual(ignored.baseline_only, {"coverage"})
+            self.assertEqual(ignored.regression_reasons, {})
+            self.assertEqual(ignored.missing_score, "ignore")
+
+            strict = compare_experiments(baseline, candidate, missing_score="regress")
+            self.assertTrue(strict.has_regressions)
+            self.assertEqual(strict.baseline_only, {"coverage"})
+            # The delta-based regressed set stays empty; the missing evaluator is a
+            # regression only through the policy and the reasons map.
+            self.assertEqual(strict.regressed, frozenset())
+            self.assertEqual(strict.regression_reasons, {"coverage": "baseline_only"})
+            self.assertEqual(strict.missing_score, "regress")
+
+    def test_compare_experiments_rejects_invalid_missing_score(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment = self._run_score_experiment(Path(directory) / "experiment.jsonl", {"quality": 1.0})
+            with self.assertRaisesRegex(ValueError, "missing_score must be one of: ignore, regress"):
+                compare_experiments(experiment, experiment, missing_score="drop")
+
+    def test_compare_experiments_to_dict_explains_policy_and_tolerances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_score_experiment(
+                Path(directory) / "baseline.jsonl", {"quality": 0.9, "speed": 0.9, "coverage": 1.0}
+            )
+            candidate = self._run_score_experiment(
+                Path(directory) / "candidate.jsonl", {"quality": 0.6, "speed": 0.6}
+            )
+
+            diff = compare_experiments(
+                baseline,
+                candidate,
+                tolerance=0.05,
+                score_tolerances={"quality": 0.5},
+                missing_score="regress",
+            )
+            payload = diff.to_dict()
+
+            self.assertEqual(payload["missing_score"], "regress")
+            self.assertEqual(payload["effective_tolerances"], {"quality": 0.5, "speed": 0.05})
+            self.assertEqual(
+                payload["regression_reasons"],
+                {"coverage": "baseline_only", "speed": "delta_below_tolerance"},
+            )
+            self.assertEqual(payload["baseline_only"], ["coverage"])
+            self.assertEqual(payload["regressed"], ["speed"])
+            self.assertTrue(payload["has_regressions"])
+            # Mappings are emitted in deterministic sorted-key order.
+            self.assertEqual(list(payload["regression_reasons"]), ["coverage", "speed"])
+            self.assertEqual(list(payload["effective_tolerances"]), ["quality", "speed"])
+            # The whole payload round-trips through JSON unchanged.
+            self.assertEqual(json.loads(json.dumps(payload)), payload)
+
     @staticmethod
     def _run_score_experiment(path: Path, scores: dict[str, float]) -> ExperimentResult:
         return run_experiment(

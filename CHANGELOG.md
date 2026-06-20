@@ -86,7 +86,20 @@ Before publishing, verify the release with the SDK release checklist in
   counts without importing `vertexai`.
 - Aggregate-score experiment comparison through `compare_experiments()` and
   `ExperimentDiff`, plus a stdlib-only `bir eval-gate` command that exits
-  non-zero when a candidate regression exceeds the configured tolerance.
+  non-zero when a candidate regression exceeds the configured tolerance. The
+  comparison takes per-evaluator tolerance overrides via `score_tolerances`
+  (repeatable `--score-tolerance NAME=VALUE` on the CLI), which override the
+  global `tolerance` only for the named shared evaluators while preserving the
+  strict per-evaluator `math.isclose` boundary; non-negative finite values are
+  required and an override naming a non-shared evaluator is rejected so typos
+  fail loudly. A `missing_score` policy (`--missing-score {ignore,regress}`)
+  controls evaluators present only in the baseline: `ignore` (the default)
+  reports them without failing, matching the previous behavior, while `regress`
+  treats a removed evaluator as a regression because it silently drops coverage.
+  `ExperimentDiff.to_dict()` additionally reports `effective_tolerances`,
+  `missing_score`, and `regression_reasons` so the gate decision is fully
+  machine-readable. Conflicting or malformed CLI assignments are rejected with
+  clear errors. Stdlib only.
 - A stdlib-only `bir` command-line interface, installed as a console script, for
   inspecting local traces and experiments and sending them to a server without
   writing a script. Subcommands: `bir traces`, `bir tail`, `bir experiments`,

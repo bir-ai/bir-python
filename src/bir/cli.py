@@ -19,6 +19,7 @@ from typing import Any, Callable, TextIO
 from . import __version__, _sdk
 from ._sdk import LoadedTrace, load_traces, send_events
 from .evals import ExperimentSummary, compare_experiments, list_experiments, send_experiment
+from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
 
 _DEFAULT_SERVER = "http://127.0.0.1:8000"
 _DEFAULT_EXPERIMENT_DIR = ".bir/experiments"
@@ -123,6 +124,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Maximum aggregate-score change treated as unchanged (default: 0).",
     )
+    eval_gate.add_argument(
+        "--score-tolerance",
+        dest="score_tolerances",
+        action="append",
+        metavar="NAME=VALUE",
+        type=_score_tolerance_assignment,
+        help=(
+            "Override --tolerance for one shared evaluator; repeatable. VALUE is a "
+            "non-negative, finite number. Repeating a NAME with the same value is "
+            "allowed; conflicting values are rejected."
+        ),
+    )
+    eval_gate.add_argument(
+        "--missing-score",
+        choices=_MISSING_SCORE_POLICIES,
+        default="ignore",
+        help=(
+            "Policy for evaluators present only in the baseline: 'ignore' reports "
+            "them without failing (default), 'regress' treats them as regressions."
+        ),
+    )
     eval_gate.set_defaults(func=_cmd_eval_gate)
 
     return parser
@@ -194,9 +216,38 @@ def _cmd_send_experiment(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval_gate(args: argparse.Namespace) -> int:
-    diff = compare_experiments(args.baseline, args.candidate, tolerance=args.tolerance)
+    diff = compare_experiments(
+        args.baseline,
+        args.candidate,
+        tolerance=args.tolerance,
+        score_tolerances=_collect_score_tolerances(args.score_tolerances),
+        missing_score=args.missing_score,
+    )
     _dump_json(diff.to_dict(), sys.stdout)
     return 1 if diff.has_regressions else 0
+
+
+def _collect_score_tolerances(
+    assignments: list[tuple[str, float]] | None,
+) -> dict[str, float] | None:
+    """Fold repeated ``--score-tolerance`` assignments into a single mapping.
+
+    Repeating a NAME with the same value is idempotent; a NAME repeated with a
+    different value is a conflict and fails clearly. Returns ``None`` when no
+    overrides were supplied so the default global tolerance applies unchanged.
+    """
+
+    if not assignments:
+        return None
+    collected: dict[str, float] = {}
+    for name, value in assignments:
+        existing = collected.get(name)
+        if existing is not None and existing != value:
+            raise ValueError(
+                f"conflicting --score-tolerance values for {name!r}: {existing} and {value}"
+            )
+        collected[name] = value
+    return collected
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:
@@ -371,6 +422,21 @@ def _non_negative_float(value: str) -> float:
     if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
     return number
+
+
+def _score_tolerance_assignment(value: str) -> tuple[str, float]:
+    """Parse a ``--score-tolerance NAME=VALUE`` assignment into a (name, value) pair."""
+
+    name, separator, raw_value = value.partition("=")
+    if not separator or not name:
+        raise argparse.ArgumentTypeError(f"expected NAME=VALUE with a non-empty name, got {value!r}")
+    try:
+        number = float(raw_value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a numeric tolerance in NAME=VALUE, got {value!r}") from None
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative, finite tolerance, got {value!r}")
+    return name, number
 
 
 if __name__ == "__main__":

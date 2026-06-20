@@ -96,6 +96,22 @@ async tasks, plain sync callables, and sync callables that return an awaitable,
 and otherwise matches `run_experiment()`. See
 [local evals and experiments](docs/site/evals-experiments.md).
 
+Compare a candidate against a baseline and gate CI on regressions with
+`compare_experiments()` or `bir eval-gate`. A global `tolerance` bounds how far a
+shared evaluator may drop, `score_tolerances` (and repeatable
+`--score-tolerance NAME=VALUE`) override that per evaluator, and `missing_score`
+(`--missing-score {ignore,regress}`) decides whether an evaluator dropped from
+the candidate fails the gate:
+
+```bash
+bir eval-gate baseline.jsonl candidate.jsonl \
+  --tolerance 0.01 --score-tolerance latency_under=0.05 --missing-score regress
+```
+
+The command exits `1` exactly when the policy reports a regression and prints a
+machine-readable diff with `effective_tolerances`, `missing_score`, and
+`regression_reasons`.
+
 ## Documentation
 
 The documentation site covers the [quickstart](docs/site/quickstart.md),

@@ -292,6 +292,132 @@ class EvalGateCommandTests(CliBaseTest):
             self.assertEqual(err, "")
             self.assertFalse(json.loads(out)["has_regressions"])
 
+    @staticmethod
+    def _run_scores(path: Path, scores: dict[str, float]) -> None:
+        run_experiment(
+            path.stem,
+            dataset=Dataset([DatasetExample(id="row", input={"scores": scores})]),
+            task=lambda scores: scores,
+            evaluators=[
+                custom_evaluator(name, lambda output, _expected, key=name: output[key])
+                for name in scores
+            ],
+            path=path,
+        )
+
+    def test_score_tolerance_flag_overrides_global(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            # The 0.2 drop regresses at the default tolerance, but a per-evaluator
+            # override of 0.3 absorbs it and the gate passes.
+            code, out, err = run_cli(
+                "eval-gate", str(baseline), str(candidate), "--score-tolerance", "quality=0.3"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertFalse(payload["has_regressions"])
+            self.assertEqual(payload["effective_tolerances"], {"quality": 0.3})
+            self.assertEqual(payload["regression_reasons"], {})
+
+    def test_repeated_identical_score_tolerance_is_allowed(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            code, out, err = run_cli(
+                "eval-gate",
+                str(baseline),
+                str(candidate),
+                "--score-tolerance",
+                "quality=0.3",
+                "--score-tolerance",
+                "quality=0.3",
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(json.loads(out)["effective_tolerances"], {"quality": 0.3})
+
+    def test_missing_score_regress_exits_nonzero(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_scores(baseline, {"quality": 0.9, "coverage": 1.0})
+            self._run_scores(candidate, {"quality": 0.9})
+
+            # Default ignore policy: removing an evaluator does not fail the gate.
+            code, out, _ = run_cli("eval-gate", str(baseline), str(candidate))
+            self.assertEqual(code, 0)
+            self.assertFalse(json.loads(out)["has_regressions"])
+
+            # Strict regress policy treats the baseline-only evaluator as lost coverage.
+            code, out, err = run_cli(
+                "eval-gate", str(baseline), str(candidate), "--missing-score", "regress"
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertTrue(payload["has_regressions"])
+            self.assertEqual(payload["missing_score"], "regress")
+            self.assertEqual(payload["baseline_only"], ["coverage"])
+            self.assertEqual(payload["regression_reasons"], {"coverage": "baseline_only"})
+
+    def test_rejects_malformed_score_tolerance(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            for malformed in ("quality", "quality=", "quality=abc", "quality=-0.1", "quality=inf", "=0.1"):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli("eval-gate", str(baseline), str(candidate), "--score-tolerance", malformed)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_rejects_conflicting_score_tolerance(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            code, out, err = run_cli(
+                "eval-gate",
+                str(baseline),
+                str(candidate),
+                "--score-tolerance",
+                "quality=0.1",
+                "--score-tolerance",
+                "quality=0.2",
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("conflicting --score-tolerance values for 'quality'", err)
+
+    def test_unknown_score_tolerance_name_exits_nonzero(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.7)
+
+            code, out, err = run_cli(
+                "eval-gate", str(baseline), str(candidate), "--score-tolerance", "qualtiy=0.3"
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("shared evaluators present in both experiments", err)
+
 
 class SendCommandTests(CliBaseTest):
     def test_send_reports_accepted_attempted_skipped(self) -> None:

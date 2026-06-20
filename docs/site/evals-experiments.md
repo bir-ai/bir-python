@@ -223,13 +223,70 @@ if diff.has_regressions:
     raise SystemExit(1)
 ```
 
-Evaluators present in only one run are reported separately. The CLI exposes the
-same CI gate and exits `1` only when a shared evaluator drops by more than the
-tolerance:
+A shared evaluator regresses when `candidate - baseline` drops by more than the
+tolerance; a change exactly equal to the tolerance is treated as unchanged.
+Evaluators present in only one run are reported separately.
+
+### Per-evaluator tolerances
+
+Different scores tolerate different movement. `score_tolerances` overrides the
+global `tolerance` for individual evaluators while leaving the rest on the
+global value:
+
+```python
+diff = compare_experiments(
+    "baseline.jsonl",
+    "candidate.jsonl",
+    tolerance=0.01,
+    score_tolerances={"latency_under": 0.05},
+)
+```
+
+Each override value must be a non-negative, finite number, and each name must be
+a *shared* evaluator present in both runs. A name that is not shared (a typo, or
+an evaluator that only one run produced) raises a clear error rather than being
+silently ignored. `diff.effective_tolerances` reports the tolerance actually
+applied to each shared evaluator.
+
+### Missing-score policy
+
+By default, an evaluator that exists in the baseline but not the candidate is
+reported under `baseline_only` without failing the gate (`missing_score="ignore"`).
+Because a removed evaluator silently drops coverage, you can opt into treating it
+as a regression:
+
+```python
+diff = compare_experiments(
+    "baseline.jsonl",
+    "candidate.jsonl",
+    missing_score="regress",
+)
+```
+
+Under `"regress"`, every baseline-only evaluator makes `diff.has_regressions`
+true and appears in `diff.regression_reasons` with the reason `"baseline_only"`.
+Delta-based regressions of shared evaluators use the reason
+`"delta_below_tolerance"`. Evaluators that appear only in the candidate add
+coverage and are never treated as regressions.
+
+### CLI gate
+
+The CLI exposes the same gate and exits `1` exactly when the configured policy
+reports a regression. `--score-tolerance NAME=VALUE` is repeatable and
+`--missing-score` selects the policy:
 
 ```console
-bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
+bir eval-gate baseline.jsonl candidate.jsonl \
+  --tolerance 0.01 \
+  --score-tolerance latency_under=0.05 \
+  --missing-score regress
 ```
+
+Repeating `--score-tolerance` for the same evaluator with the same value is
+allowed; conflicting values, malformed `NAME=VALUE` assignments, and unknown
+evaluator names are rejected with a clear error. The emitted JSON includes
+`effective_tolerances`, `missing_score`, and `regression_reasons` so the gate
+decision is fully machine-readable.
 
 ## Link results to traces
 
