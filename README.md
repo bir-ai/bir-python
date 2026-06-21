@@ -37,6 +37,40 @@ def answer_question(question: str) -> str:
 Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
+## Tracing generators and streaming
+
+`@observe()` also traces generator and async-generator functions across their
+full iteration, not just their creation. The wrapper stays lazy — the body does
+not run and nothing is written until the first iteration — and the trace stays
+open from the first `next()`/`await __anext__()` through exhaustion, so spans and
+generations created in the body (for example while consuming a streamed LLM
+response) attach to it:
+
+```python
+from bir import generation, observe
+
+
+@observe()
+def stream_answer(question: str):
+    with generation("local.llm", model="demo-model") as gen:
+        chunks = []
+        for token in ("Ans", "wer", "!"):
+            chunks.append(token)
+            yield token
+        gen.set_output("".join(chunks))
+```
+
+The trace is finalized when the generator is exhausted (a successful trace),
+raises (a redacted error, re-raised unchanged to the consumer), or is closed or
+cancelled early. An early `close()`/`aclose()` or a cancellation is recorded as a
+successful trace whose `metadata.generator.outcome` is `"closed"`, and it resets
+all trace context so nothing leaks into later work. `send`/`throw`/`close` (and
+`asend`/`athrow`/`aclose`) and the body's `finally` blocks all behave exactly as
+they would without the decorator, and concurrent async generators running in
+separate tasks stay isolated. Yielded values are never buffered; with output
+capture enabled only a bounded yielded-item count is recorded under
+`metadata.generator.items`.
+
 ## Local persistence and concurrency
 
 Trace appends and size-based rotation are serialized across threads and local

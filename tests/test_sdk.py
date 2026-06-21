@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import hashlib
 import os
@@ -11,7 +12,7 @@ import time
 import urllib.error
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Generator, Iterator
 from contextlib import contextmanager
 from http.client import HTTPMessage
 from io import BytesIO
@@ -518,6 +519,509 @@ class SdkTests(unittest.TestCase):
             self.assertTrue(all(event["type"] == "trace" for event in events))
             self.assertTrue(all(event["parent_id"] is None for event in events))
             self.assertEqual(len({event["trace_id"] for event in events}), 2)
+
+    def test_observe_sync_generator_yields_same_values_and_records_completed_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def stream(count: int) -> Generator[int, None, None]:
+                for index in range(count):
+                    yield index
+
+            self.assertEqual(list(stream(3)), [0, 1, 2])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["name"], "stream")
+            self.assertEqual(event["id"], event["trace_id"])
+            self.assertIsNone(event["parent_id"])
+            self.assertEqual(event["status"], "success")
+            self.assertIsNone(event["error"])
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "completed"}})
+
+    def test_observe_sync_generator_is_lazy_until_first_iteration(self) -> None:
+        with temporary_workdir() as workdir:
+            body_ran: list[str] = []
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                body_ran.append("started")
+                yield 1
+
+            generator = stream()
+            # Creating the generator must not run the body or write any event.
+            self.assertEqual(body_ran, [])
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+
+            self.assertEqual(next(generator), 1)
+            self.assertEqual(body_ran, ["started"])
+            self.assertEqual(list(generator), [])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["status"], "success")
+
+    def test_observe_sync_generator_child_events_attach_across_iterations(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                with span("before_first"):
+                    pass
+                yield 1
+                # This span is created only after the consumer pulled the first
+                # value, proving the trace stays open across the whole iteration.
+                with span("after_first"):
+                    pass
+                yield 2
+
+            self.assertEqual(list(stream()), [1, 2])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual({event["name"] for event in span_events}, {"before_first", "after_first"})
+            for span_event in span_events:
+                self.assertEqual(span_event["trace_id"], trace_event["id"])
+                self.assertEqual(span_event["parent_id"], trace_event["id"])
+
+    def test_observe_sync_generator_generation_spans_streamed_yields(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def stream_tokens() -> Generator[str, None, None]:
+                # The generation is held open across every yielded token, the
+                # canonical streaming-LLM shape, and finalized once the stream ends.
+                with generation("local.llm", model="demo", capture_output=True) as gen:
+                    collected: list[str] = []
+                    for token in ("Ans", "wer"):
+                        collected.append(token)
+                        yield token
+                    gen.set_output("".join(collected))
+
+            self.assertEqual(list(stream_tokens()), ["Ans", "wer"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["trace_id"], trace_event["id"])
+            self.assertEqual(generation_event["parent_id"], trace_event["id"])
+            self.assertEqual(generation_event["output"], "Answer")
+            self.assertEqual(generation_event["status"], "success")
+
+    def test_observe_sync_generator_records_error_and_reraises(self) -> None:
+        with temporary_workdir() as workdir:
+            secret_error = "provider failed api_key=sk-secret"
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                yield 1
+                raise RuntimeError(secret_error)
+
+            generator = stream()
+            self.assertEqual(next(generator), 1)
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                next(generator)
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["status"], "error")
+            self.assertEqual(event["error"], "provider failed api_key=[redacted]")
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "error"}})
+
+    def test_observe_sync_generator_close_records_terminal_state_and_runs_finally(self) -> None:
+        with temporary_workdir() as workdir:
+            finally_ran: list[str] = []
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                try:
+                    yield 1
+                    yield 2
+                finally:
+                    finally_ran.append("cleanup")
+
+            generator = stream()
+            self.assertEqual(next(generator), 1)
+            generator.close()
+
+            # The wrapped generator's finally block must still run on close.
+            self.assertEqual(finally_ran, ["cleanup"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["status"], "success")
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "closed"}})
+
+            # Closing early must reset all contextvars, leaving no active trace.
+            with self.assertRaisesRegex(RuntimeError, "requires an active trace"):
+                score("after_close", 1.0)
+
+    def test_observe_sync_generator_does_not_leak_context_between_iterations(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                yield 1
+                yield 2
+
+            generator = stream()
+            self.assertEqual(next(generator), 1)
+            # While the generator is suspended the trace context belongs to it, not
+            # to the consumer, so a score outside the body has no active trace.
+            with self.assertRaisesRegex(RuntimeError, "requires an active trace"):
+                score("between", 1.0)
+            self.assertEqual(list(generator), [2])
+
+    def test_observe_sync_generator_send_value_round_trips(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def echo() -> Generator[str, str | None, None]:
+                received = yield "ready"
+                yield f"got {received}"
+
+            generator = echo()
+            self.assertEqual(next(generator), "ready")
+            self.assertEqual(generator.send("hello"), "got hello")
+            self.assertEqual(list(generator), [])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(events[0]["status"], "success")
+
+    def test_observe_sync_generator_throw_is_proxied_to_body(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def catcher() -> Generator[str, None, None]:
+                try:
+                    yield "first"
+                except ValueError:
+                    yield "handled"
+
+            generator = catcher()
+            self.assertEqual(next(generator), "first")
+            # A thrown exception the body catches lets iteration continue.
+            self.assertEqual(generator.throw(ValueError("boom")), "handled")
+            # Exhaust the generator so the trace is finalized.
+            self.assertEqual(list(generator), [])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["status"], "success")
+            self.assertEqual(events[0]["metadata"], {"generator": {"outcome": "completed"}})
+
+    def test_observe_sync_generator_uncaught_throw_records_error(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                yield 1
+                yield 2
+
+            generator = stream()
+            self.assertEqual(next(generator), 1)
+            with self.assertRaisesRegex(ValueError, "boom"):
+                generator.throw(ValueError("boom"))
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["status"], "error")
+            self.assertEqual(events[0]["error"], "boom")
+
+    def test_observe_sync_generator_capture_records_item_count_not_content(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def stream(label: str) -> Iterator[str]:
+                yield f"{label}-secretpayload-1"
+                yield f"{label}-secretpayload-2"
+
+            self.assertEqual(
+                list(stream("topic")),
+                ["topic-secretpayload-1", "topic-secretpayload-2"],
+            )
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            event = read_events(trace_path)[0]
+            self.assertEqual(event["input"], {"label": "topic"})
+            # Output capture records only the bounded yielded-item count.
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "completed", "items": 2}})
+            self.assertIsNone(event["output"])
+            # Yielded content itself is never buffered or persisted.
+            self.assertNotIn("secretpayload", trace_path.read_text(encoding="utf-8"))
+
+    def test_observe_sync_generator_without_capture_records_no_item_count(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                yield 1
+                yield 2
+
+            self.assertEqual(list(stream()), [1, 2])
+
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "completed"}})
+            self.assertIsNone(event["output"])
+
+    def test_observe_preserves_generator_function_nature(self) -> None:
+        @observe()
+        def stream() -> Iterator[int]:
+            yield 1
+
+        self.assertTrue(inspect.isgeneratorfunction(stream))
+        self.assertEqual(stream.__name__, "stream")
+
+    def test_nested_observe_generator_records_span_under_same_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(name="inner_stream")
+            def inner() -> Iterator[str]:
+                yield "a"
+                yield "b"
+
+            @observe()
+            def outer() -> Iterator[str]:
+                for value in inner():
+                    yield value
+
+            self.assertEqual(list(outer()), ["a", "b"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_events = [event for event in events if event["type"] == "trace"]
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual(len(trace_events), 1)
+            self.assertEqual(len(span_events), 1)
+            self.assertEqual(span_events[0]["name"], "inner_stream")
+            self.assertEqual(span_events[0]["trace_id"], trace_events[0]["id"])
+            self.assertEqual(span_events[0]["parent_id"], trace_events[0]["id"])
+
+    def test_sample_rate_zero_drops_sync_generator_but_still_yields(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            @observe()
+            def stream() -> Generator[int, None, None]:
+                with span("child"):
+                    score("helpfulness", 0.9)
+                yield 1
+                yield 2
+
+            self.assertEqual(list(stream()), [1, 2])
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_observe_async_generator_yields_same_values_and_records_completed_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def stream(count: int) -> AsyncGenerator[int, None]:
+                for index in range(count):
+                    await asyncio.sleep(0)
+                    yield index
+
+            async def collect() -> list[int]:
+                return [value async for value in stream(3)]
+
+            self.assertEqual(asyncio.run(collect()), [0, 1, 2])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["name"], "stream")
+            self.assertEqual(event["status"], "success")
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "completed"}})
+
+    def test_observe_async_generator_is_lazy_until_first_iteration(self) -> None:
+        with temporary_workdir() as workdir:
+            body_ran: list[str] = []
+
+            @observe()
+            async def stream() -> AsyncGenerator[int, None]:
+                body_ran.append("started")
+                await asyncio.sleep(0)
+                yield 1
+
+            async def drive() -> None:
+                generator = stream()
+                self.assertEqual(body_ran, [])
+                self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+                self.assertEqual(await generator.__anext__(), 1)
+                await generator.aclose()
+
+            asyncio.run(drive())
+            self.assertEqual(body_ran, ["started"])
+
+    def test_observe_async_generator_child_events_attach_to_trace(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def stream() -> AsyncGenerator[int, None]:
+                async with span("before_first"):
+                    await asyncio.sleep(0)
+                yield 1
+                async with span("after_first"):
+                    await asyncio.sleep(0)
+                yield 2
+
+            async def collect() -> list[int]:
+                return [value async for value in stream()]
+
+            self.assertEqual(asyncio.run(collect()), [1, 2])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual({event["name"] for event in span_events}, {"before_first", "after_first"})
+            for span_event in span_events:
+                self.assertEqual(span_event["trace_id"], trace_event["id"])
+                self.assertEqual(span_event["parent_id"], trace_event["id"])
+
+    def test_observe_async_generator_records_error_and_reraises(self) -> None:
+        with temporary_workdir() as workdir:
+            secret_error = "provider failed token=sk-secret"
+
+            @observe()
+            async def stream() -> AsyncGenerator[int, None]:
+                await asyncio.sleep(0)
+                yield 1
+                raise RuntimeError(secret_error)
+
+            async def drive() -> None:
+                generator = stream()
+                self.assertEqual(await generator.__anext__(), 1)
+                with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                    await generator.__anext__()
+
+            asyncio.run(drive())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["status"], "error")
+            self.assertEqual(event["error"], "provider failed token=[redacted]")
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "error"}})
+
+    def test_observe_async_generator_aclose_records_terminal_state_and_runs_finally(self) -> None:
+        with temporary_workdir() as workdir:
+            finally_ran: list[str] = []
+
+            @observe()
+            async def stream() -> AsyncGenerator[int, None]:
+                try:
+                    yield 1
+                    yield 2
+                finally:
+                    finally_ran.append("cleanup")
+
+            async def drive() -> None:
+                generator = stream()
+                self.assertEqual(await generator.__anext__(), 1)
+                await generator.aclose()
+
+            asyncio.run(drive())
+
+            self.assertEqual(finally_ran, ["cleanup"])
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(event["status"], "success")
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "closed"}})
+
+    def test_observe_async_generator_asend_value_round_trips(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def echo() -> AsyncGenerator[str, str | None]:
+                received = yield "ready"
+                yield f"got {received}"
+
+            async def drive() -> tuple[str, str]:
+                generator = echo()
+                first = await generator.asend(None)
+                second = await generator.asend("hello")
+                await generator.aclose()
+                return first, second
+
+            self.assertEqual(asyncio.run(drive()), ("ready", "got hello"))
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "closed"}})
+
+    def test_observe_async_generator_capture_records_item_count_not_content(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(capture_outputs=True)
+            async def stream() -> AsyncGenerator[str, None]:
+                yield "secretpayload-1"
+                yield "secretpayload-2"
+
+            async def collect() -> list[str]:
+                return [value async for value in stream()]
+
+            self.assertEqual(asyncio.run(collect()), ["secretpayload-1", "secretpayload-2"])
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            event = read_events(trace_path)[0]
+            self.assertEqual(event["metadata"], {"generator": {"outcome": "completed", "items": 2}})
+            self.assertNotIn("secretpayload", trace_path.read_text(encoding="utf-8"))
+
+    def test_observe_async_generators_isolated_across_concurrent_tasks(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def worker(label: str) -> AsyncGenerator[str, None]:
+                for index in range(2):
+                    async with span(f"span_{label}"):
+                        # Yield control so the two workers interleave; leaked
+                        # contextvars would cross-attach the spans.
+                        await asyncio.sleep(0)
+                    yield f"{label}{index}"
+
+            async def collect(label: str) -> list[str]:
+                return [value async for value in worker(label)]
+
+            async def main() -> tuple[list[str], list[str]]:
+                return await asyncio.gather(collect("a"), collect("b"))
+
+            results = asyncio.run(main())
+            self.assertEqual(sorted(results[0] + results[1]), ["a0", "a1", "b0", "b1"])
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_events = [event for event in events if event["type"] == "trace"]
+            span_events = [event for event in events if event["type"] == "span"]
+            self.assertEqual(len(trace_events), 2)
+            self.assertEqual(len(span_events), 4)
+
+            traces_by_id = {event["id"]: event for event in trace_events}
+            for span_event in span_events:
+                self.assertIn(span_event["trace_id"], traces_by_id)
+                self.assertEqual(span_event["parent_id"], span_event["trace_id"])
+            self.assertEqual(len({event["trace_id"] for event in span_events}), 2)
+
+    def test_sample_rate_zero_drops_async_generator_but_still_yields(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0)
+
+            @observe()
+            async def stream() -> AsyncGenerator[int, None]:
+                async with span("child"):
+                    score("helpfulness", 0.9)
+                yield 1
+                yield 2
+
+            async def collect() -> list[int]:
+                return [value async for value in stream()]
+
+            self.assertEqual(asyncio.run(collect()), [1, 2])
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
 
     def test_span_creates_nested_event(self) -> None:
         with temporary_workdir() as workdir:

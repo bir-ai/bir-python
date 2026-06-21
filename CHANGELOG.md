@@ -19,6 +19,21 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `@observe()` now traces generator and async-generator functions across their
+  whole iteration lifetime instead of closing the trace when the generator object
+  is created. The wrapper stays lazy (no body runs and nothing is written until
+  the first iteration), the root trace spans the first `next`/`asend` through
+  exhaustion so child spans and generations created in the body attach to it, and
+  it is finalized on exhaustion (success), on an exception from the body (recorded
+  as a redacted error and re-raised unchanged), or on an early
+  `close`/`aclose`/cancellation (recorded as a success whose
+  `metadata.generator.outcome` is `"closed"`). `send`/`throw`/`close`,
+  `asend`/`athrow`/`aclose`, and the body's `finally` blocks are all preserved,
+  contextvars never leak between iterations or into later work, and concurrent
+  async generators in separate tasks stay isolated. Output capture stays opt-in
+  and records only a bounded yielded-item count under `metadata.generator.items`
+  rather than buffering the stream. Existing sync-function and coroutine behavior
+  is unchanged. Stdlib only (`inspect`, `contextvars`).
 - `trace_response()` in `bir.integrations.openai`, a dependency-free wrapper for
   OpenAI's Responses API (`client.responses.create`). It forwards arguments
   unchanged, returns the provider response object, and records one generation with

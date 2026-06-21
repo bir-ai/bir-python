@@ -577,7 +577,20 @@ def observe(
     capture_inputs: bool | None = None,
     capture_outputs: bool | None = None,
 ) -> Callable[[F], F]:
-    """Decorate a sync or async function and record one trace event for each call."""
+    """Decorate a sync or async function and record one trace event for each call.
+
+    Generator and async-generator functions are also supported and are traced for
+    their full iteration lifetime rather than only their creation: the wrapper
+    stays lazy (no body runs and nothing is written until the first iteration),
+    the trace stays open across every ``next``/``send``/``throw`` (or
+    ``asend``/``athrow``) so child spans and generations created in the body
+    attach to it, and it is finalized when the generator is exhausted (recorded as
+    a successful trace), raises (recorded as a redacted error and re-raised), or is
+    closed/cancelled early (recorded as a successful trace whose
+    ``metadata.generator.outcome`` is ``"closed"``). Yielded values are never
+    buffered; with output capture enabled only a bounded yielded-item count is
+    recorded under ``metadata.generator.items``.
+    """
 
     if name is not None:
         _validate_event_name(name, "observe name")
@@ -585,6 +598,130 @@ def observe(
     def decorator(func: F) -> F:
         trace_name = name or func.__name__
         signature = inspect.signature(func)
+
+        # Generator and async-generator functions return their iterator before any
+        # body runs, so they are detected before the coroutine/sync branches and
+        # wrapped so the trace spans the actual iteration instead of closing at
+        # creation time. ``iscoroutinefunction`` is false for async generators, so
+        # ordering these first is safe.
+        if inspect.isasyncgenfunction(func):
+
+            @functools.wraps(func)
+            async def async_generator_wrapper(*args: Any, **kwargs: Any) -> Any:
+                # Nothing here runs until the first ``__anext__``/``asend`` because
+                # the wrapper is itself an async generator, keeping creation lazy.
+                underlying = func(*args, **kwargs)
+                consumer_ctx = _snapshot_context()
+                state = _begin_observe(capture_inputs, capture_outputs)
+                input_payload = (
+                    _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
+                )
+                gen_ctx = _snapshot_context()
+                yielded = 0
+                resume: tuple[str, Any] = ("asend", None)
+                while True:
+                    # Advance the body with the generator's own trace context so its
+                    # child events attach to this trace and never leak to the consumer.
+                    _restore_context(gen_ctx)
+                    try:
+                        action, payload = resume
+                        if action == "asend":
+                            value = await underlying.asend(payload)
+                        else:
+                            value = await underlying.athrow(payload)
+                    except StopAsyncIteration:
+                        _finalize_generator(state, trace_name, input_payload, yielded, "completed", consumer_ctx)
+                        return
+                    except Exception as exc:
+                        _finalize_generator(state, trace_name, input_payload, yielded, "error", consumer_ctx, exc)
+                        raise
+                    except BaseException:
+                        # Cancellation (``CancelledError`` is a ``BaseException``)
+                        # already unwound the body; record a non-error terminal state
+                        # and re-raise without swallowing it.
+                        _finalize_generator(state, trace_name, input_payload, yielded, "closed", consumer_ctx)
+                        raise
+                    gen_ctx = _snapshot_context()
+                    _restore_context(consumer_ctx)
+                    yielded += 1
+                    try:
+                        sent = yield value
+                    except GeneratorExit:
+                        consumer_ctx = _snapshot_context()
+                        _restore_context(gen_ctx)
+                        try:
+                            await underlying.aclose()
+                        finally:
+                            _finalize_generator(state, trace_name, input_payload, yielded, "closed", consumer_ctx)
+                        raise
+                    except BaseException as exc:
+                        consumer_ctx = _snapshot_context()
+                        resume = ("athrow", exc)
+                    else:
+                        consumer_ctx = _snapshot_context()
+                        resume = ("asend", sent)
+
+            return cast(F, async_generator_wrapper)
+
+        if inspect.isgeneratorfunction(func):
+
+            @functools.wraps(func)
+            def generator_wrapper(*args: Any, **kwargs: Any) -> Any:
+                # Nothing here runs until the first ``next``/``send`` because the
+                # wrapper is itself a generator, keeping creation lazy.
+                underlying = func(*args, **kwargs)
+                consumer_ctx = _snapshot_context()
+                state = _begin_observe(capture_inputs, capture_outputs)
+                input_payload = (
+                    _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
+                )
+                gen_ctx = _snapshot_context()
+                yielded = 0
+                resume: tuple[str, Any] = ("next", None)
+                while True:
+                    # Advance the body with the generator's own trace context so its
+                    # child events attach to this trace and never leak to the consumer.
+                    _restore_context(gen_ctx)
+                    try:
+                        action, payload = resume
+                        if action == "next":
+                            value = next(underlying)
+                        elif action == "send":
+                            value = underlying.send(payload)
+                        else:
+                            value = underlying.throw(payload)
+                    except StopIteration:
+                        _finalize_generator(state, trace_name, input_payload, yielded, "completed", consumer_ctx)
+                        return
+                    except Exception as exc:
+                        _finalize_generator(state, trace_name, input_payload, yielded, "error", consumer_ctx, exc)
+                        raise
+                    except BaseException:
+                        # KeyboardInterrupt and friends already unwound the body;
+                        # record a non-error terminal state and re-raise.
+                        _finalize_generator(state, trace_name, input_payload, yielded, "closed", consumer_ctx)
+                        raise
+                    gen_ctx = _snapshot_context()
+                    _restore_context(consumer_ctx)
+                    yielded += 1
+                    try:
+                        sent = yield value
+                    except GeneratorExit:
+                        consumer_ctx = _snapshot_context()
+                        _restore_context(gen_ctx)
+                        try:
+                            underlying.close()
+                        finally:
+                            _finalize_generator(state, trace_name, input_payload, yielded, "closed", consumer_ctx)
+                        raise
+                    except BaseException as exc:
+                        consumer_ctx = _snapshot_context()
+                        resume = ("throw", exc)
+                    else:
+                        consumer_ctx = _snapshot_context()
+                        resume = ("send", sent)
+
+            return cast(F, generator_wrapper)
 
         if inspect.iscoroutinefunction(func):
 
@@ -691,17 +828,28 @@ def _finish_observe_success(
     trace_name: str,
     input_payload: Any,
     result: Any,
+    metadata: Mapping[str, Any] | None = None,
+    reset_context: bool = True,
 ) -> None:
-    """Reset the call contextvars and write the success event for an observation."""
+    """Reset the call contextvars and write the success event for an observation.
+
+    ``metadata`` is optional event metadata (used by the generator wrappers to
+    record the bounded terminal-state marker); it defaults to ``None`` so the
+    plain sync/async wrappers keep writing no metadata. ``reset_context`` is
+    ``False`` for the generator wrappers, which tear down their own context by
+    value (a generator can be finalized — via GC or cancellation — in a different
+    context than the one that created the tokens, where token reset would fail).
+    """
 
     end_time = _now()
-    _reset_context(
-        state.trace_token,
-        state.parent_token,
-        state.capture_inputs_token,
-        state.capture_outputs_token,
-        state.dropped_token,
-    )
+    if reset_context:
+        _reset_context(
+            state.trace_token,
+            state.parent_token,
+            state.capture_inputs_token,
+            state.capture_outputs_token,
+            state.dropped_token,
+        )
     if state.dropped:
         return
     output_payload = _safe_capture(result) if state.capture_outputs else None
@@ -716,6 +864,7 @@ def _finish_observe_success(
             end_time=end_time,
             status="success",
             error=None,
+            metadata=metadata,
             input=input_payload,
             output=output_payload,
         )
@@ -725,23 +874,30 @@ def _finish_observe_success(
 def _finish_observe_error(
     state: _ObserveState,
     trace_name: str,
-    exc: Exception,
+    exc: BaseException,
     input_payload: Any,
+    metadata: Mapping[str, Any] | None = None,
+    reset_context: bool = True,
 ) -> None:
     """Reset the call contextvars and write the error event for a failed observation.
 
     A storage failure re-raises the original ``exc`` chained to it so the user's
-    exception is never silently swallowed by a write error.
+    exception is never silently swallowed by a write error. ``metadata`` is
+    optional event metadata (used by the generator wrappers); it defaults to
+    ``None`` so the plain sync/async wrappers keep writing no metadata.
+    ``reset_context`` is ``False`` for the generator wrappers, which tear down
+    their own context by value (see :func:`_finish_observe_success`).
     """
 
     end_time = _now()
-    _reset_context(
-        state.trace_token,
-        state.parent_token,
-        state.capture_inputs_token,
-        state.capture_outputs_token,
-        state.dropped_token,
-    )
+    if reset_context:
+        _reset_context(
+            state.trace_token,
+            state.parent_token,
+            state.capture_inputs_token,
+            state.capture_outputs_token,
+            state.dropped_token,
+        )
     if state.dropped:
         return
     event = _event(
@@ -754,12 +910,51 @@ def _finish_observe_error(
         end_time=end_time,
         status="error",
         error=_safe_error(exc),
+        metadata=metadata,
         input=input_payload,
     )
     try:
         _write_event(event)
     except Exception as storage_error:
         raise exc from storage_error
+
+
+def _finalize_generator(
+    state: _ObserveState,
+    trace_name: str,
+    input_payload: Any,
+    yielded: int,
+    outcome: str,
+    consumer_ctx: _ContextSnapshot,
+    exc: BaseException | None = None,
+) -> None:
+    """Finalize an observed generator's trace once iteration ends.
+
+    ``outcome`` is the terminal disposition recorded under
+    ``metadata.generator.outcome``: ``"completed"`` for normal exhaustion,
+    ``"error"`` for an exception raised by the body, and ``"closed"`` for an
+    explicit ``close``/``aclose`` or consumer cancellation. The yielded-item
+    ``items`` count is bounded metadata recorded only when output capture is
+    enabled, so streamed content is never buffered or persisted by default. Both
+    the completed and closed outcomes are persisted with the existing
+    ``"success"`` status; only the error outcome uses ``"error"`` and re-raises
+    through :func:`_finish_observe_error`.
+
+    Context is restored to ``consumer_ctx`` by value rather than by resetting the
+    tokens from ``_begin_observe``: a generator may be finalized in a different
+    context than the one that started it (GC, ``shutdown_asyncgens``, or
+    cross-task cancellation), where token reset raises ``ValueError``.
+    """
+
+    _restore_context(consumer_ctx)
+    generator_metadata: dict[str, Any] = {"outcome": outcome}
+    if state.capture_outputs:
+        generator_metadata["items"] = yielded
+    metadata = {"generator": generator_metadata}
+    if exc is not None:
+        _finish_observe_error(state, trace_name, exc, input_payload, metadata=metadata, reset_context=False)
+    else:
+        _finish_observe_success(state, trace_name, input_payload, None, metadata=metadata, reset_context=False)
 
 
 def span(name: str) -> _Span:
@@ -2072,6 +2267,43 @@ def _reset_context(
     _current_capture_inputs.reset(capture_inputs_token)
     _current_parent_id.reset(parent_token)
     _current_trace_id.reset(trace_token)
+
+
+# Snapshot of every SDK contextvar value, used by the generator wrappers to swap
+# the trace context in only while the underlying generator body is advancing.
+# Tuple order matches ``_restore_context``: trace id, parent id, capture-inputs,
+# capture-outputs, dropped.
+_ContextSnapshot = tuple[str | None, str | None, bool | None, bool | None, bool]
+
+
+def _snapshot_context() -> _ContextSnapshot:
+    """Capture the current values of every SDK contextvar."""
+
+    return (
+        _current_trace_id.get(),
+        _current_parent_id.get(),
+        _current_capture_inputs.get(),
+        _current_capture_outputs.get(),
+        _current_trace_dropped.get(),
+    )
+
+
+def _restore_context(snapshot: _ContextSnapshot) -> None:
+    """Restore the SDK contextvars to a previously captured snapshot.
+
+    This sets absolute values rather than resetting tokens, so it composes with
+    the token-based ``_begin_observe``/``_reset_context`` pair: the tokens created
+    by ``_begin_observe`` still reset to their original pre-observe values at
+    finalization regardless of the intermediate swaps performed here. Only the
+    SDK's own contextvars are touched, so a generator body's effect on unrelated
+    contextvars is left exactly as plain Python iteration would leave it.
+    """
+
+    _current_trace_id.set(snapshot[0])
+    _current_parent_id.set(snapshot[1])
+    _current_capture_inputs.set(snapshot[2])
+    _current_capture_outputs.set(snapshot[3])
+    _current_trace_dropped.set(snapshot[4])
 
 
 def _new_id() -> str:
