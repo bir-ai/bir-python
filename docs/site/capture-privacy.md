@@ -37,6 +37,37 @@ are also scanned for common secret-like text patterns, including:
     sensitive value will be recognized. Keep capture opt-in for sensitive
     payloads and review what your application records.
 
+### Adding custom rules
+
+Organizations often have domain-specific credential names or text formats Bir
+cannot know in advance. `configure()` accepts two additive options for them:
+
+```python
+import re
+from bir import configure
+
+configure(
+    additional_secret_keys=["ssn", "badge-id"],
+    additional_redaction_patterns=[r"CUST-\d+", re.compile(r"acct-\w+", re.IGNORECASE)],
+)
+```
+
+- `additional_secret_keys` redacts extra mapping keys by whole-name,
+  case-insensitive match (`-` and `_` are treated as equivalent), so `"ssn"`
+  redacts a `SSN` field but not an unrelated `session_id`.
+- `additional_redaction_patterns` accepts regex strings and/or compiled
+  `re.Pattern` objects, replacing every match with `[redacted]` in captured
+  strings, repr fallbacks, error text, prompt and score metadata, integration
+  inputs/outputs, and dataset/experiment files.
+
+These options are **purely additive**: the built-in rules and the `[redacted]`
+marker always apply and can never be disabled, replaced, or reordered. Entries
+are validated and compiled once during `configure()`, so an empty key, empty
+pattern, invalid regex, non-string entry, bytes pattern, or an over-large list
+raises immediately. Passing either argument replaces the previously configured
+additional rules of that kind (an empty iterable clears them); omitting it leaves
+them unchanged.
+
 Captured values are normalized to JSON-compatible data. Non-finite floats such
 as `NaN` and `Infinity` are stored as strings, and deeply nested values are
 truncated.

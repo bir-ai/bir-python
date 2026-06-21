@@ -66,6 +66,14 @@ _SECRET_KEY_NAMES = {
     "credentials",
     "creds",
 }
+# Upper bounds on the user-supplied additive redaction rules accepted by
+# ``configure``. They reject unboundedly large configuration that would slow
+# every capture or grow memory without limit. Built-in rules are never counted
+# against these caps and can never be disabled, replaced, or reordered.
+_MAX_ADDITIONAL_SECRET_KEYS = 100
+_MAX_ADDITIONAL_REDACTION_PATTERNS = 100
+_MAX_ADDITIONAL_SECRET_KEY_LENGTH = 200
+_MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH = 1000
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 _current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
@@ -89,6 +97,16 @@ class _Config:
     # rotated siblings (``traces.jsonl.1`` .. ``traces.jsonl.N``).
     max_bytes: int | None = None
     backup_count: int = 3
+    # Additive, user-supplied redaction rules layered on top of the built-in
+    # rules; both default to empty so out-of-the-box behavior is unchanged. They
+    # only ever widen coverage: ``additional_secret_keys`` are extra mapping-key
+    # names redacted by exact, case-insensitive match (already normalized to the
+    # built-in name form), and ``additional_redaction_patterns`` are extra
+    # compiled regexes whose every match is replaced with the ``[redacted]``
+    # marker. Built-in rules always run regardless of these and can never be
+    # disabled, replaced, or reordered.
+    additional_secret_keys: frozenset[str] = frozenset()
+    additional_redaction_patterns: tuple[re.Pattern[str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -269,6 +287,8 @@ def configure(
     sample_rate: float | None = None,
     max_bytes: int | None = None,
     backup_count: int | None = None,
+    additional_secret_keys: Iterable[str] | None = None,
+    additional_redaction_patterns: Iterable[str | re.Pattern[str]] | None = None,
 ) -> None:
     """Configure local SDK behavior.
 
@@ -294,6 +314,24 @@ def configure(
     Note that a single logical trace may be split across rotated files when
     rotation happens mid-trace, so reading with ``include_rotated=True`` can
     surface incomplete traces near a rotation boundary.
+
+    ``additional_secret_keys`` and ``additional_redaction_patterns`` add to the
+    built-in redaction rules; they can only ever widen what is redacted and can
+    never disable, replace, reorder, or change the ``[redacted]`` marker of the
+    built-in rules. ``additional_secret_keys`` is an iterable of extra
+    mapping-key names: a captured mapping key is redacted when it matches one of
+    them exactly and case-insensitively, treating ``-`` and ``_`` as equivalent
+    (this is whole-name exact matching, unlike the built-in substring rules).
+    ``additional_redaction_patterns`` is an iterable of regex strings and/or
+    already-compiled ``re.Pattern`` objects; every match of each pattern in any
+    captured string, repr fallback, prompt text, eval metadata, or error message
+    is replaced with ``[redacted]``, running after all built-in text patterns.
+    Both are validated and compiled once here, so an empty key, empty pattern,
+    invalid regex, non-string entry, bytes pattern, or an over-large list raises
+    ``ValueError``/``TypeError`` immediately. Passing either argument replaces the
+    previously configured *additional* rules of that kind (passing an empty
+    iterable clears them); omitting it leaves the current additional rules
+    unchanged. The built-in rules always remain in force either way.
 
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
@@ -322,6 +360,12 @@ def configure(
         updates["max_bytes"] = _validate_non_negative_int(max_bytes, "max_bytes")
     if backup_count is not None:
         updates["backup_count"] = _validate_non_negative_int(backup_count, "backup_count")
+    if additional_secret_keys is not None:
+        updates["additional_secret_keys"] = _validate_additional_secret_keys(additional_secret_keys)
+    if additional_redaction_patterns is not None:
+        updates["additional_redaction_patterns"] = _validate_additional_redaction_patterns(
+            additional_redaction_patterns
+        )
 
     _config = replace(_config, **updates)
 
@@ -2133,7 +2177,12 @@ def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     normalized = key.lower().replace("-", "_")
-    return normalized in _SECRET_KEY_NAMES or any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
+    # The user-supplied ``additional_secret_keys`` are stored already normalized to
+    # this same form, so they join the built-in name set as exact whole-name
+    # matches (never substrings) and can only add coverage, never remove it.
+    if normalized in _SECRET_KEY_NAMES or normalized in _config.additional_secret_keys:
+        return True
+    return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
 
 
 def _safe_key(value: Any) -> str:
@@ -2185,6 +2234,11 @@ def _redact_secret_text(value: str) -> str:
     redacted = re.sub(r"(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", _REDACTED, redacted)
     redacted = re.sub(r"\bxox[baprs]-[0-9A-Za-z-]+\b", _REDACTED, redacted)
     redacted = re.sub(r"\b(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}\b", _REDACTED, redacted)
+    # User-supplied patterns run last, in configuration order, and only ever add
+    # redaction on top of the built-in rules above; each replaces its whole match
+    # with the marker. They cannot weaken or bypass any built-in rule.
+    for pattern in _config.additional_redaction_patterns:
+        redacted = pattern.sub(_REDACTED, redacted)
     return redacted
 
 
@@ -2194,6 +2248,91 @@ def _redact_labeled_secret_match(match: re.Match[str]) -> str:
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_REDACTED}"
+
+
+def _validate_additional_secret_keys(value: Any) -> frozenset[str]:
+    """Validate and normalize the user-supplied extra secret-key names.
+
+    Accepts any non-string iterable of non-empty strings and returns them
+    normalized to the same form the built-in name rule uses (lower-cased with
+    ``-`` treated as ``_``), so matching is exact and case-insensitive. A bare
+    ``str``/``bytes`` is rejected so a single key is never silently iterated
+    character by character. The entry count and per-key length are bounded so a
+    pathologically large configuration fails fast with a clear error.
+    """
+
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise TypeError("bir additional_secret_keys must be an iterable of strings")
+    keys = list(value)
+    if len(keys) > _MAX_ADDITIONAL_SECRET_KEYS:
+        raise ValueError(f"bir additional_secret_keys must not exceed {_MAX_ADDITIONAL_SECRET_KEYS} entries")
+    normalized: set[str] = set()
+    for key in keys:
+        if not isinstance(key, str):
+            raise TypeError("bir additional_secret_keys entries must be strings")
+        if not key:
+            raise ValueError("bir additional_secret_keys entries must not be empty")
+        if len(key) > _MAX_ADDITIONAL_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"bir additional_secret_keys entries must not exceed "
+                f"{_MAX_ADDITIONAL_SECRET_KEY_LENGTH} characters"
+            )
+        normalized.add(key.lower().replace("-", "_"))
+    return frozenset(normalized)
+
+
+def _validate_additional_redaction_patterns(value: Any) -> tuple[re.Pattern[str], ...]:
+    """Validate and compile the user-supplied extra text-redaction patterns.
+
+    Accepts any non-string iterable of regex strings and/or already-compiled
+    ``re.Pattern`` objects, compiling and validating each exactly once here so a
+    bad pattern fails at ``configure`` time rather than on a later capture. The
+    entry count is bounded to reject unboundedly large configuration. The
+    returned patterns run in order, after every built-in rule.
+    """
+
+    if isinstance(value, (str, bytes, re.Pattern)) or not isinstance(value, Iterable):
+        raise TypeError(
+            "bir additional_redaction_patterns must be an iterable of regex strings or compiled patterns"
+        )
+    raw_patterns = list(value)
+    if len(raw_patterns) > _MAX_ADDITIONAL_REDACTION_PATTERNS:
+        raise ValueError(
+            f"bir additional_redaction_patterns must not exceed {_MAX_ADDITIONAL_REDACTION_PATTERNS} entries"
+        )
+    return tuple(_compile_additional_redaction_pattern(pattern) for pattern in raw_patterns)
+
+
+def _compile_additional_redaction_pattern(pattern: Any) -> re.Pattern[str]:
+    """Return a compiled ``str`` regex for one ``additional_redaction_patterns`` entry.
+
+    An already-compiled ``re.Pattern`` is accepted as-is so the caller's flags are
+    preserved, but a bytes pattern is rejected because it cannot apply to captured
+    text. A string is length-checked and compiled with default flags; an empty
+    string or invalid regex raises ``ValueError``.
+    """
+
+    if isinstance(pattern, re.Pattern):
+        if isinstance(pattern.pattern, bytes):
+            raise TypeError(
+                "bir additional_redaction_patterns compiled patterns must be str patterns, not bytes"
+            )
+        return cast("re.Pattern[str]", pattern)
+    if not isinstance(pattern, str):
+        raise TypeError(
+            "bir additional_redaction_patterns entries must be regex strings or compiled re.Pattern objects"
+        )
+    if not pattern:
+        raise ValueError("bir additional_redaction_patterns entries must not be empty")
+    if len(pattern) > _MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH:
+        raise ValueError(
+            f"bir additional_redaction_patterns entries must not exceed "
+            f"{_MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH} characters"
+        )
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"bir additional_redaction_patterns entry is not a valid regex: {exc}") from exc
 
 
 def _validate_event_name(value: Any, field: str) -> str:

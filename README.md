@@ -37,6 +37,12 @@ def answer_question(question: str) -> str:
 Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
+When capture is on, Bir redacts common secret-like fields and text before
+anything is written. Those built-in rules always apply and cannot be turned off,
+but you can widen them for your own credential names and formats with
+`configure(additional_secret_keys=[...], additional_redaction_patterns=[...])`.
+See [capture and privacy](docs/site/capture-privacy.md).
+
 ## Tracing generators and streaming
 
 `@observe()` also traces generator and async-generator functions across their

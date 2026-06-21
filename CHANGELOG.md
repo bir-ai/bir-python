@@ -19,6 +19,25 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `configure()` now accepts two additive redaction options,
+  `additional_secret_keys` and `additional_redaction_patterns`, so applications
+  can teach Bir their own credential field names and secret text formats. They
+  only ever widen redaction: the built-in rules and the `[redacted]` marker can
+  never be disabled, replaced, or reordered, and there is no switch to turn
+  defaults off. `additional_secret_keys` is an iterable of extra mapping-key
+  names matched by whole-name, case-insensitive equality (treating `-` and `_`
+  as equivalent), distinct from the built-in substring rules.
+  `additional_redaction_patterns` is an iterable of regex strings and/or
+  compiled `re.Pattern` objects whose every match is replaced with `[redacted]`,
+  running after every built-in text pattern. Both are validated and compiled once
+  during `configure()` (empty keys/patterns, invalid regexes, non-string entries,
+  bytes patterns, and over-large lists raise `ValueError`/`TypeError`
+  immediately), and the rules flow through every existing capture and persistence
+  path (captured inputs/outputs, repr fallbacks, error text, prompt and score
+  metadata, integration inputs/outputs, and dataset/experiment files). Passing
+  either argument replaces the previously configured additional rules of that
+  kind (an empty iterable clears them); omitting it leaves them unchanged. Stdlib
+  only (`re`); no schema, fixture, or dependency change.
 - `@observe()` now traces generator and async-generator functions across their
   whole iteration lifetime instead of closing the trace when the generator object
   is created. The wrapper stays lazy (no body runs and nothing is written until

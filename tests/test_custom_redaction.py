@@ -1,0 +1,326 @@
+"""Tests for the additive custom redaction rules configured via ``configure``.
+
+These cover the user-supplied ``additional_secret_keys`` and
+``additional_redaction_patterns`` options: that they widen redaction, that the
+built-in rules can never be disabled or replaced by them, the replace/clear
+semantics across ``configure`` calls, the validation/error paths, and that the
+custom rules flow through every capture and persistence path (captured strings,
+repr fallbacks, error text, prompt and score metadata, integration inputs and
+outputs, and experiment JSONL/summary files).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
+
+from bir import configure, generation, load_events, observe, prompt, score, trace
+from bir._sdk import (
+    _is_secret_key,
+    _redact_secret_text,
+    _reset_config_for_tests,
+    _safe_capture,
+    _safe_error,
+)
+from bir.evals import DatasetExample, EvalResult, custom_evaluator, exact_match, run_experiment
+from bir.integrations.openai import trace_chat_completion
+
+
+@contextmanager
+def temporary_workdir() -> Iterator[Path]:
+    previous = Path.cwd()
+    with tempfile.TemporaryDirectory() as directory:
+        workdir = Path(directory)
+        os.chdir(workdir)
+        try:
+            yield workdir
+        finally:
+            os.chdir(previous)
+
+
+def read_events(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class _Box:
+    """An object with no JSON form, so capture falls back to its redacted repr."""
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+
+    def __repr__(self) -> str:
+        return f"_Box({self._label})"
+
+
+class AdditionalSecretKeyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_additional_keys_redact_mapping_keys_case_insensitively(self) -> None:
+        configure(additional_secret_keys=["ssn", "Badge"])
+        captured = _safe_capture({"SSN": "123-45-6789", "badge": "A1", "name": "ok"})
+        self.assertEqual(captured, {"SSN": "[redacted]", "badge": "[redacted]", "name": "ok"})
+
+    def test_additional_keys_match_whole_name_not_substring(self) -> None:
+        # Exact-match, unlike the built-in substring rules: a key that merely
+        # contains the configured name is not redacted.
+        configure(additional_secret_keys=["session"])
+        self.assertTrue(_is_secret_key("session"))
+        self.assertTrue(_is_secret_key("SESSION"))
+        self.assertFalse(_is_secret_key("session_id"))
+        self.assertFalse(_is_secret_key("my_session"))
+
+    def test_additional_keys_treat_dash_and_underscore_as_equivalent(self) -> None:
+        configure(additional_secret_keys=["badge-id"])
+        self.assertTrue(_is_secret_key("badge_id"))
+        self.assertTrue(_is_secret_key("BADGE-ID"))
+
+    def test_builtin_secret_keys_still_apply_alongside_custom_keys(self) -> None:
+        configure(additional_secret_keys=["ssn"])
+        captured = _safe_capture({"api_key": "sk-builtin", "ssn": "123", "ok": "v"})
+        self.assertEqual(captured, {"api_key": "[redacted]", "ssn": "[redacted]", "ok": "v"})
+
+    def test_additional_keys_validation(self) -> None:
+        cases: list[tuple[str, Any, type[Exception]]] = [
+            ("bare string", "token", TypeError),
+            ("non-string entry", [123], TypeError),
+            ("empty entry", [""], ValueError),
+            ("too long entry", ["k" * 201], ValueError),
+            ("too many entries", [f"k{i}" for i in range(101)], ValueError),
+        ]
+        for label, value, expected in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(expected):
+                    configure(additional_secret_keys=cast(Any, value))
+
+
+class AdditionalRedactionPatternTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_patterns_redact_matches_in_captured_strings(self) -> None:
+        configure(additional_redaction_patterns=[r"CUST-\d+"])
+        self.assertEqual(_redact_secret_text("order CUST-123 shipped"), "order [redacted] shipped")
+        self.assertEqual(_safe_capture(["CUST-1", "fine"]), ["[redacted]", "fine"])
+
+    def test_compiled_patterns_are_accepted_and_keep_their_flags(self) -> None:
+        configure(additional_redaction_patterns=[re.compile(r"zztop", re.IGNORECASE)])
+        self.assertEqual(_redact_secret_text("band ZZTOP here"), "band [redacted] here")
+
+    def test_patterns_redact_repr_fallback(self) -> None:
+        configure(additional_redaction_patterns=[r"CUST-\d+"])
+        self.assertEqual(_safe_capture(_Box("CUST-7")), "_Box([redacted])")
+
+    def test_patterns_redact_error_text(self) -> None:
+        configure(additional_redaction_patterns=[r"CUST-\d+"])
+        self.assertEqual(_safe_error(RuntimeError("failed for CUST-9")), "failed for [redacted]")
+
+    def test_builtin_patterns_still_apply_alongside_custom_patterns(self) -> None:
+        configure(additional_redaction_patterns=[r"CUST-\d+"])
+        # Built-in api_key/sk- rules and the custom rule both fire.
+        self.assertEqual(
+            _redact_secret_text("api_key=sk-ABCD1234efgh and CUST-1"),
+            "api_key=[redacted] and [redacted]",
+        )
+
+    def test_patterns_validation(self) -> None:
+        cases: list[tuple[str, Any, type[Exception]]] = [
+            ("bare string", "abc", TypeError),
+            ("single compiled pattern", re.compile("a"), TypeError),
+            ("non-string entry", [123], TypeError),
+            ("bytes pattern", [re.compile(b"a")], TypeError),
+            ("empty entry", [""], ValueError),
+            ("invalid regex", ["("], ValueError),
+            ("too long entry", ["a" * 1001], ValueError),
+            ("too many entries", ["a"] * 101, ValueError),
+        ]
+        for label, value, expected in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(expected):
+                    configure(additional_redaction_patterns=cast(Any, value))
+
+
+class CustomRedactionConfigSemanticsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_default_config_has_no_custom_rules(self) -> None:
+        self.assertEqual(_redact_secret_text("CUST-1"), "CUST-1")
+        self.assertFalse(_is_secret_key("ssn"))
+
+    def test_passing_argument_replaces_previous_additional_rules(self) -> None:
+        configure(additional_secret_keys=["aaa"], additional_redaction_patterns=[r"AAA-\d+"])
+        configure(additional_secret_keys=["bbb"], additional_redaction_patterns=[r"BBB-\d+"])
+        self.assertFalse(_is_secret_key("aaa"))
+        self.assertTrue(_is_secret_key("bbb"))
+        self.assertEqual(_redact_secret_text("AAA-1 BBB-2"), "AAA-1 [redacted]")
+
+    def test_empty_iterable_clears_custom_rules_but_keeps_builtins(self) -> None:
+        configure(additional_secret_keys=["ssn"], additional_redaction_patterns=[r"CUST-\d+"])
+        configure(additional_secret_keys=[], additional_redaction_patterns=[])
+        self.assertFalse(_is_secret_key("ssn"))
+        self.assertEqual(_redact_secret_text("CUST-1"), "CUST-1")
+        # Built-in rules cannot be cleared this way.
+        self.assertTrue(_is_secret_key("api_key"))
+        self.assertEqual(_redact_secret_text("api_key=sk-ABCD1234efgh"), "api_key=[redacted]")
+
+    def test_omitting_argument_preserves_existing_custom_rules(self) -> None:
+        configure(additional_secret_keys=["ssn"], additional_redaction_patterns=[r"CUST-\d+"])
+        configure(sample_rate=0.5)
+        self.assertTrue(_is_secret_key("ssn"))
+        self.assertEqual(_redact_secret_text("CUST-1"), "[redacted]")
+
+    def test_reset_for_tests_clears_custom_rules(self) -> None:
+        configure(additional_secret_keys=["ssn"], additional_redaction_patterns=[r"CUST-\d+"])
+        _reset_config_for_tests()
+        self.assertFalse(_is_secret_key("ssn"))
+        self.assertEqual(_redact_secret_text("CUST-1"), "CUST-1")
+
+
+class CustomRedactionWritePathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_custom_rules_redacted_in_trace_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(
+                capture_inputs=True,
+                capture_outputs=True,
+                additional_secret_keys=["ssn"],
+                additional_redaction_patterns=[r"CUST-\d+"],
+            )
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def handle(payload: dict[str, Any]) -> str:
+                return "receipt CUST-456"
+
+            handle({"ssn": "123-45-6789", "note": "ref CUST-123"})
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("CUST-123", raw)
+            self.assertNotIn("CUST-456", raw)
+            self.assertNotIn("123-45-6789", raw)
+            self.assertIn("[redacted]", raw)
+
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertEqual(event["input"]["payload"], {"ssn": "[redacted]", "note": "ref [redacted]"})
+            self.assertEqual(event["output"], "receipt [redacted]")
+
+    def test_custom_rules_redacted_in_prompt_and_score_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(additional_secret_keys=["ssn"], additional_redaction_patterns=[r"CUST-\d+"])
+
+            @observe()
+            def answer() -> None:
+                with generation(
+                    "local.llm",
+                    prompt=prompt(
+                        "p",
+                        template="ref {ref}",
+                        variables={"ref": "CUST-123", "ssn": "secret"},
+                        capture_variables=True,
+                        capture_rendered=True,
+                    ),
+                ):
+                    pass
+                score("quality", 1.0, metadata={"note": "saw CUST-999", "ssn": "secret"})
+
+            answer()
+
+            raw = (workdir / ".bir" / "traces.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("CUST-123", raw)
+            self.assertNotIn("CUST-999", raw)
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(e for e in events if e["type"] == "generation")
+            prompt_metadata = generation_event["metadata"]["prompt"]
+            self.assertEqual(prompt_metadata["variables"], {"ref": "[redacted]", "ssn": "[redacted]"})
+            self.assertEqual(prompt_metadata["rendered"], "ref [redacted]")
+            score_event = next(e for e in events if e["type"] == "score")
+            self.assertEqual(score_event["metadata"], {"note": "saw [redacted]", "ssn": "[redacted]"})
+
+    def test_custom_pattern_redacted_in_openai_integration_io(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(capture_inputs=True, capture_outputs=True, additional_redaction_patterns=[r"CUST-\d+"])
+
+            class FakeCompletion:
+                model = "gpt-4o-mini"
+
+                def model_dump(self) -> dict[str, Any]:
+                    return {"choices": [{"message": {"content": "done CUST-456"}}]}
+
+            def fake_create(**kwargs: Any) -> FakeCompletion:
+                return FakeCompletion()
+
+            with trace("chat"):
+                trace_chat_completion(
+                    fake_create,
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": "look up CUST-123"}],
+                )
+
+            raw = (workdir / ".bir" / "traces.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("CUST-123", raw)
+            self.assertNotIn("CUST-456", raw)
+
+            generation_event = next(e for e in load_events() if e.type == "generation")
+            self.assertEqual(
+                generation_event.input["messages"],
+                [{"role": "user", "content": "look up [redacted]"}],
+            )
+            self.assertEqual(
+                generation_event.output["choices"][0]["message"]["content"],
+                "done [redacted]",
+            )
+
+    def test_custom_rules_redacted_in_experiment_jsonl_and_summary(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(additional_redaction_patterns=[r"CUST-\d+"])
+            result_path = workdir / "experiment.jsonl"
+
+            def task(example_input: dict[str, Any]) -> dict[str, Any]:
+                return {"answer": f"resolved {example_input['ref']}", "trace": "CUST-456"}
+
+            def evaluate(output: Any, expected: Any) -> EvalResult:
+                return EvalResult(name="leaky", value=1.0, metadata={"seen": "CUST-789"})
+
+            run_experiment(
+                "exp",
+                dataset=[DatasetExample(id="1", input={"ref": "CUST-123"}, expected={"answer": "x"})],
+                task=task,
+                evaluators=[custom_evaluator("leaky", evaluate), exact_match()],
+                path=result_path,
+                raise_on_error=False,
+            )
+
+            summary_path = result_path.with_suffix(".summary.json")
+            result_raw = result_path.read_text(encoding="utf-8")
+            summary_raw = summary_path.read_text(encoding="utf-8")
+            for needle in ("CUST-123", "CUST-456", "CUST-789"):
+                self.assertNotIn(needle, result_raw)
+                self.assertNotIn(needle, summary_raw)
+            self.assertIn("[redacted]", result_raw)
+
+
+if __name__ == "__main__":
+    unittest.main()
