@@ -10,6 +10,12 @@ payloads still follow Bir's [opt-in capture settings](capture-privacy.md).
 
 ## OpenAI
 
+OpenAI exposes two chat surfaces with different response and streaming shapes, so
+Bir ships a wrapper for each: `trace_chat_completion` for Chat Completions and
+`trace_response` for the Responses API.
+
+### Chat Completions
+
 ```python
 from bir import trace
 from bir.integrations.openai import trace_chat_completion
@@ -25,6 +31,28 @@ with trace("chat"):
 The wrapper records response model and token usage when present. Streaming chat
 completions are passed through and recorded after consumption; request streamed
 usage from OpenAI when token counts are needed.
+
+### Responses API
+
+```python
+from bir import trace
+from bir.integrations.openai import trace_response
+
+with trace("chat"):
+    response = trace_response(
+        client.responses.create,
+        model="gpt-4o",
+        input="What is Bir?",
+    )
+```
+
+The wrapper records the response model, the aggregated `output_text`, and the
+`input_tokens`/`output_tokens`/`total_tokens` usage when present, falling back to
+the full response shape when `output_text` is empty. With `stream=True` it
+returns a lazy iterable that yields the provider's events unchanged, assembles
+the output from `response.output_text.delta` events, and reads the final model
+and usage from the terminal `response.completed` event after the stream is
+consumed; request streamed usage from OpenAI when token counts are needed.
 
 ## Anthropic
 

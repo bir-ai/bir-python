@@ -19,6 +19,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `trace_response()` in `bir.integrations.openai`, a dependency-free wrapper for
+  OpenAI's Responses API (`client.responses.create`). It forwards arguments
+  unchanged, returns the provider response object, and records one generation with
+  the model, aggregated `output_text` (falling back to the full response shape),
+  and `input_tokens`/`output_tokens`/`total_tokens` usage. With `stream=True` it
+  returns a lazy iterable that yields the provider's events unchanged, assembles
+  output only from `response.output_text.delta` events, and finalizes the model and
+  usage from the terminal `response.completed` event on exhaustion, close, or error.
+  Re-exported from `bir.integrations`. Chat Completions support
+  (`trace_chat_completion`) is unchanged.
 - `run_experiment_async()`, an asynchronous experiment runner for async or sync
   tasks. It accepts coroutine functions, plain sync callables, and sync callables
   that return an awaitable (decided per call with `inspect.isawaitable`), runs up

@@ -8,7 +8,7 @@ from .langchain import BirCallbackHandler
 from .llamaindex import BirLlamaIndexHandler
 from .litellm import trace_completion
 from .mistral import trace_chat
-from .openai import trace_chat_completion
+from .openai import trace_chat_completion, trace_response
 from .vertexai import trace_generate_content as trace_vertex_generate_content
 
 __all__ = [
@@ -22,4 +22,5 @@ __all__ = [
     "trace_completion",
     "trace_chat",
     "trace_chat_completion",
+    "trace_response",
 ]
