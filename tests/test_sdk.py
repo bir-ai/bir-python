@@ -3802,6 +3802,182 @@ for batch in range(int(batches)):
             self.assertEqual(root["metadata"], {"service": {"name": "env-svc"}})
 
 
+class SetMetadataTests(unittest.TestCase):
+    """``set_metadata`` on the span/generation/tool_call/retrieval/trace managers."""
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_generation_set_metadata_merges_with_constructor_and_prompt(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                prompt_record = prompt("answer_question", version="v1")
+                with generation(
+                    "local.llm",
+                    metadata={"provider": "openai"},
+                    prompt=prompt_record,
+                ) as gen:
+                    gen.set_metadata({"route": "fast", "api_key": "sk-secret"})
+                    gen.set_output("ok")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            # Constructor metadata, the mid-body metadata, and the prompt block all survive.
+            self.assertEqual(metadata["provider"], "openai")
+            self.assertEqual(metadata["route"], "fast")
+            self.assertEqual(metadata["api_key"], "[redacted]")
+            self.assertEqual(cast(dict[str, Any], metadata["prompt"])["name"], "answer_question")
+            self.assertNotIn("sk-secret", json.dumps(generation_event))
+
+    def test_span_set_metadata_persists_redacted_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with span("retrieve_context") as current_span:
+                    current_span.set_metadata({"cache_hit": True, "token": "raw-span-token"})
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            self.assertEqual(span_event["metadata"], {"cache_hit": True, "token": "[redacted]"})
+
+    def test_span_without_set_metadata_keeps_empty_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with span("retrieve_context"):
+                    pass
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            self.assertEqual(span_event["metadata"], {})
+
+    def test_tool_call_set_metadata_merges_into_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with tool_call("search", metadata={"provider": "local"}) as call:
+                    call.set_metadata({"latency_ms": 12})
+                    call.set_output("done")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            tool_event = next(event for event in events if event["type"] == "tool_call")
+            self.assertEqual(tool_event["metadata"], {"provider": "local", "latency_ms": 12})
+
+    def test_retrieval_set_metadata_composes_with_kind(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with retrieval("vector_search", query="hi") as result:
+                    result.set_metadata({"index": "faiss", "documents_found": 2})
+                    result.add_document(id="doc-1")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            retrieval_event = next(event for event in events if event["name"] == "vector_search")
+            self.assertEqual(
+                retrieval_event["metadata"],
+                {"kind": "retrieval", "index": "faiss", "documents_found": 2},
+            )
+
+    def test_trace_context_set_metadata_merges_with_service_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(service_name="rag-api")
+
+            with trace("manual", metadata={"request_kind": "interactive"}) as current_trace:
+                current_trace.set_metadata({"route": "/answer", "secret": "raw-secret"})
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(
+                root["metadata"],
+                {
+                    "request_kind": "interactive",
+                    "route": "/answer",
+                    "secret": "[redacted]",
+                    "service": {"name": "rag-api"},
+                },
+            )
+
+    def test_set_metadata_repeated_calls_merge_with_later_keys_winning(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with span("work") as current_span:
+                    current_span.set_metadata({"attempt": 1, "stable": "keep"})
+                    current_span.set_metadata({"attempt": 2})
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            self.assertEqual(span_event["metadata"], {"attempt": 2, "stable": "keep"})
+
+    def test_async_with_set_metadata_persists_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with generation("local.llm") as gen:
+                    await asyncio.sleep(0)
+                    gen.set_metadata({"streamed": True})
+                    gen.set_output("ok")
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["metadata"], {"streamed": True})
+
+    def test_async_with_span_set_metadata_persists_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with span("retrieve_context") as current_span:
+                    await asyncio.sleep(0)
+                    current_span.set_metadata({"cache_hit": True})
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            span_event = next(event for event in events if event["type"] == "span")
+            self.assertEqual(span_event["metadata"], {"cache_hit": True})
+
+    def test_set_metadata_rejects_non_mapping_argument(self) -> None:
+        with temporary_workdir():
+            managers = (
+                trace("manual"),
+                span("work"),
+                generation("local.llm"),
+                tool_call("search"),
+                retrieval("vector_search", query="hi"),
+            )
+            for manager in managers:
+                with self.subTest(manager=type(manager).__name__):
+                    with self.assertRaisesRegex(TypeError, "set_metadata"):
+                        manager.set_metadata(cast(Any, ["not", "a", "mapping"]))
+
+
 class CurrentIdAccessorTests(unittest.TestCase):
     """``get_current_trace_id``/``get_current_span_id`` read-only accessors."""
 

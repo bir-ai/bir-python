@@ -1212,11 +1212,29 @@ def _record_score_event(
     )
 
 
+def _merge_metadata(target: dict[str, Any], metadata: Mapping[str, Any]) -> None:
+    """Merge user-supplied metadata into an event's pending metadata dict.
+
+    Shared by the ``set_metadata`` setter on every trace-work context manager so
+    context discovered mid-body (a resolved route, a cache-hit flag, a request
+    id) can be recorded before the event is written. The argument must be a
+    ``Mapping`` — mirroring the ``score()`` metadata check — and is applied with a
+    plain ``dict.update``, so later keys win, both within a single call and across
+    repeated calls. The merged dict is redacted by ``_safe_capture`` at the
+    owning context manager's ``__exit__`` exactly like constructor-supplied
+    metadata, so this never weakens redaction.
+    """
+
+    if not isinstance(metadata, Mapping):
+        raise TypeError("bir set_metadata() requires a mapping")
+    target.update(metadata)
+
+
 class _TraceContext:
     def __init__(self, *, name: str, metadata: Mapping[str, Any] | None) -> None:
         _validate_event_name(name, "trace name")
         self.name = name
-        self.metadata = metadata
+        self.metadata: dict[str, Any] = dict(metadata or {})
         self.id: str | None = None
         self.start_time: str | None = None
         self._dropped = False
@@ -1287,6 +1305,9 @@ class _TraceContext:
     ) -> bool:
         return self.__exit__(exc_type, exc, traceback)
 
+    def set_metadata(self, metadata: Mapping[str, Any]) -> None:
+        _merge_metadata(self.metadata, metadata)
+
     def _reset(self) -> None:
         if self._dropped_token is not None:
             _current_trace_dropped.reset(self._dropped_token)
@@ -1303,6 +1324,7 @@ class _TraceContext:
 class _Span:
     def __init__(self, name: str) -> None:
         self.name = name
+        self.metadata: dict[str, Any] = {}
         self.id: str | None = None
         self.trace_id: str | None = None
         self.parent_id: str | None = None
@@ -1344,6 +1366,7 @@ class _Span:
             end_time=_now(),
             status="error" if exc is not None else "success",
             error=_safe_error(exc) if exc is not None else None,
+            metadata=_safe_capture(dict(self.metadata or {})),
         )
         try:
             _write_event(event)
@@ -1368,6 +1391,9 @@ class _Span:
     ) -> bool:
         return self.__exit__(exc_type, exc, traceback)
 
+    def set_metadata(self, metadata: Mapping[str, Any]) -> None:
+        _merge_metadata(self.metadata, metadata)
+
 
 class _Generation:
     def __init__(
@@ -1384,7 +1410,7 @@ class _Generation:
         self.name = name
         self.model = model
         self.input = input
-        self.metadata = metadata
+        self.metadata: dict[str, Any] = dict(metadata or {})
         self.prompt_record = prompt_record
         self.capture_input = capture_input
         self.capture_output = capture_output
@@ -1469,6 +1495,9 @@ class _Generation:
     ) -> bool:
         return self.__exit__(exc_type, exc, traceback)
 
+    def set_metadata(self, metadata: Mapping[str, Any]) -> None:
+        _merge_metadata(self.metadata, metadata)
+
     def set_output(self, output: Any) -> None:
         self.output = output
 
@@ -1530,7 +1559,7 @@ class _ToolCall:
     ) -> None:
         self.name = name
         self.input = input
-        self.metadata = metadata
+        self.metadata: dict[str, Any] = dict(metadata or {})
         self.capture_input = capture_input
         self.capture_output = capture_output
         self.id: str | None = None
@@ -1603,6 +1632,9 @@ class _ToolCall:
         traceback: TracebackType | None,
     ) -> bool:
         return self.__exit__(exc_type, exc, traceback)
+
+    def set_metadata(self, metadata: Mapping[str, Any]) -> None:
+        _merge_metadata(self.metadata, metadata)
 
     def set_output(self, output: Any) -> None:
         self.output = output

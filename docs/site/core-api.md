@@ -102,6 +102,28 @@ with retrieval("vector_search", query="What is Bir?") as result:
 Document ranks must be non-negative integers and document scores must be
 non-negative finite numbers.
 
+## `set_metadata()`
+
+The `trace()`, `span()`, `generation()`, `tool_call()`, and `retrieval()`
+context managers each expose `set_metadata(...)` to attach metadata discovered
+while the body runs — a resolved route, a cache-hit flag, or a request id —
+before the event is written:
+
+```python
+from bir import span
+
+with span("retrieve_context") as current_span:
+    documents = lookup()
+    current_span.set_metadata({"cache_hit": False, "documents": len(documents)})
+```
+
+It merges into any metadata passed at creation time, with later keys winning
+across repeated calls, and the merged metadata is redacted at exit with the same
+rules as captured inputs and outputs. The generation `prompt` identity, the
+retrieval `kind`, and the trace `service` metadata are preserved. `set_metadata`
+works with both `with` and `async with`; the argument must be a mapping, and a
+non-mapping raises `TypeError`.
+
 ## `score()`
 
 Attach a finite numeric score to the active trace:

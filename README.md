@@ -78,6 +78,32 @@ written to the JSONL, and each asyncio task and thread sees its own ids. The
 accessors are read-only — there is no setter and no context is exposed for
 injection or cross-process propagation.
 
+## Attaching metadata discovered mid-body
+
+Every trace-work context manager — `trace()`, `span()`, `generation()`,
+`tool_call()`, and `retrieval()` — exposes `set_metadata(...)` so you can record
+context that only becomes known while the body runs (a resolved route, a
+cache-hit flag, a request id) before the event is written:
+
+```python
+from bir import generation, observe
+
+
+@observe()
+def answer(question: str) -> str:
+    with generation("local.llm", model="demo-model", metadata={"provider": "demo"}) as gen:
+        response = f"Answer: {question}"
+        gen.set_metadata({"route": "fast", "cache_hit": False})
+        gen.set_output(response)
+    return response
+```
+
+`set_metadata()` merges into any metadata passed at creation time — later keys
+win, including across repeated calls — and the merged metadata is redacted before
+it is written with the same rules as captured input and output, so secret-like
+fields never reach the JSONL. It works with both `with` and `async with`, and the
+argument must be a mapping.
+
 ## Tracing generators and streaming
 
 `@observe()` also traces generator and async-generator functions across their

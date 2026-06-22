@@ -19,6 +19,17 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `set_metadata(...)` method on the `trace()`, `span()`, `generation()`,
+  `tool_call()`, and `retrieval()` context managers, so metadata discovered while
+  the body runs (a resolved route, a cache-hit flag, a request id) can be recorded
+  before the event is written. It merges into any metadata supplied at creation
+  with a plain update — later keys win, including across repeated calls — and the
+  merged metadata is redacted at `__exit__` with the same rules as constructor
+  metadata, composing with the generation `prompt` block, the retrieval `kind`,
+  and the trace `service` metadata already injected. Spans, which previously
+  carried no metadata, now persist it. Works with both `with` and `async with`,
+  and the argument must be a mapping (a `TypeError` is raised otherwise). No new
+  public top-level symbol, runtime dependency, schema, or fixture change.
 - `get_current_trace_id()` and `get_current_span_id()` public accessors that
   return the active trace id and innermost open span/generation/tool-call id (or
   `None` outside any trace), for stamping application logs and metrics so they can
