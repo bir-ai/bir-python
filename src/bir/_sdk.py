@@ -1149,6 +1149,32 @@ def score(name: str, value: int | float, *, metadata: Mapping[str, Any] | None =
     )
 
 
+def get_current_trace_id() -> str | None:
+    """Return the active trace's id, or ``None`` outside any trace.
+
+    The value is the same id written to the ``trace_id`` field of every event
+    recorded while this trace is active, so an application log stamped with it can
+    later be correlated with the trace. Read from a task-local context, so each
+    asyncio task and thread observes its own active trace and never another's.
+    """
+
+    return _current_trace_id.get()
+
+
+def get_current_span_id() -> str | None:
+    """Return the innermost active span's id, or ``None`` outside any trace.
+
+    Inside a nested ``span()``/``generation()``/``tool_call()`` this is the
+    innermost open node's id; directly inside a trace with no open child it is the
+    trace root's id. The value is the same id written to the ``parent_id`` field
+    of any child event created at this point, so it names what an event recorded
+    now would attach to. Read from a task-local context, so each asyncio task and
+    thread observes its own ids and never another's.
+    """
+
+    return _current_parent_id.get()
+
+
 def _trace_context(
     *,
     name: str,

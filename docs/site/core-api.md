@@ -140,6 +140,35 @@ a template is present. To capture the payload, set `capture_template=True`,
 `capture_variables=True`, or `capture_rendered=True`. Those fields use the same
 best-effort redaction as other captured values.
 
+## `get_current_trace_id()` and `get_current_span_id()`
+
+Read the active ids to stamp your own logs and metrics so they can be correlated
+with Bir traces later:
+
+```python
+import logging
+
+from bir import get_current_span_id, get_current_trace_id, observe
+
+
+@observe()
+def answer(question: str) -> str:
+    logging.info(
+        "handling question",
+        extra={"trace_id": get_current_trace_id(), "span_id": get_current_span_id()},
+    )
+    return "ok"
+```
+
+Both return `None` outside any trace and never raise. `get_current_trace_id()`
+returns the active trace root id; `get_current_span_id()` returns the innermost
+open node — the current `span()`, `generation()`, or `tool_call()`, or the trace
+root when none is open. The values are exactly the `trace_id` and `parent_id`
+written to the JSONL for an event created at that point, and they are read from a
+task-local context, so concurrent asyncio tasks and threads each see their own
+ids. They are read-only: there is no setter and the underlying context is not
+exposed for injection or cross-process propagation.
+
 ## `configure()`
 
 Configure process-local defaults:

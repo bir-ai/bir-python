@@ -7,8 +7,9 @@ you intend to cut a release.
 ## Candidate Readiness
 
 - Confirm the public API is still intentionally small: `observe`, `span`,
-  `generation`, `tool_call`, `retrieval`, `score`, `configure`, `load_events`,
-  `load_traces`, and `send_events`.
+  `generation`, `tool_call`, `retrieval`, `score`, `get_current_trace_id`,
+  `get_current_span_id`, `configure`, `load_events`, `load_traces`, and
+  `send_events`.
 - Confirm input and output capture remains opt-in by default.
 - Confirm common secret-like keys and text patterns are redacted before local
   events are written.

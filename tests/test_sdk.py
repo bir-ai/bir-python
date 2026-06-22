@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import unittest
@@ -21,7 +22,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import bir
-from bir import configure, generation, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
+from bir import configure, generation, get_current_span_id, get_current_trace_id, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
 from bir._sdk import (
     _Config,
     _config_from_env,
@@ -3799,6 +3800,191 @@ for batch in range(int(batches)):
             self.assertIsNone(root["output"])
             # The env-provided service name still survives the configure() call.
             self.assertEqual(root["metadata"], {"service": {"name": "env-svc"}})
+
+
+class CurrentIdAccessorTests(unittest.TestCase):
+    """``get_current_trace_id``/``get_current_span_id`` read-only accessors."""
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_returns_none_outside_any_trace(self) -> None:
+        self.assertIsNone(get_current_trace_id())
+        self.assertIsNone(get_current_span_id())
+
+    def test_accessors_are_public_and_no_setter_exposed(self) -> None:
+        self.assertIn("get_current_trace_id", bir.__all__)
+        self.assertIn("get_current_span_id", bir.__all__)
+        self.assertIs(bir.get_current_trace_id, get_current_trace_id)
+        self.assertIs(bir.get_current_span_id, get_current_span_id)
+        # Only read accessors are public: the ContextVars and any setter stay private.
+        self.assertNotIn("_current_trace_id", bir.__all__)
+        self.assertNotIn("_current_parent_id", bir.__all__)
+        self.assertFalse(hasattr(bir, "_current_trace_id"))
+        self.assertFalse(hasattr(bir, "_current_parent_id"))
+        self.assertFalse(hasattr(bir, "set_current_trace_id"))
+        self.assertFalse(hasattr(bir, "set_current_span_id"))
+
+    def test_returns_root_ids_at_trace_level(self) -> None:
+        with temporary_workdir() as workdir:
+            captured: dict[str, str | None] = {}
+
+            @observe()
+            def answer() -> None:
+                captured["trace_id"] = get_current_trace_id()
+                captured["span_id"] = get_current_span_id()
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = events[0]
+            # At the trace root with no open child, both accessors return the root id.
+            self.assertEqual(captured["trace_id"], root["id"])
+            self.assertEqual(captured["span_id"], root["id"])
+
+    def test_span_accessor_matches_child_event_ids_in_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            captured: dict[str, str | None] = {}
+
+            @observe()
+            def answer() -> None:
+                with span("retrieve"):
+                    captured["trace_id"] = get_current_trace_id()
+                    captured["span_id"] = get_current_span_id()
+                    # A child event created here takes the active ids as its
+                    # trace_id/parent_id, so the accessors must equal what is written.
+                    score("relevance", 1.0)
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            span_event = next(event for event in events if event["type"] == "span")
+            score_event = next(event for event in events if event["type"] == "score")
+            # Inside the span the trace accessor is the root and the span accessor
+            # is the innermost open node.
+            self.assertEqual(captured["trace_id"], root["id"])
+            self.assertEqual(captured["span_id"], span_event["id"])
+            # The score recorded at that point carries exactly the captured ids.
+            self.assertEqual(score_event["trace_id"], captured["trace_id"])
+            self.assertEqual(score_event["parent_id"], captured["span_id"])
+
+    def test_innermost_node_id_tracks_nested_spans_and_generations(self) -> None:
+        with temporary_workdir() as workdir:
+            captured: dict[str, str | None] = {}
+
+            @observe()
+            def answer() -> None:
+                with span("outer"):
+                    captured["outer_span"] = get_current_span_id()
+                    with generation("inner_gen"):
+                        captured["inner_gen"] = get_current_span_id()
+                        captured["trace_at_depth"] = get_current_trace_id()
+                    # After the generation exits, the innermost id reverts to the span.
+                    captured["outer_span_again"] = get_current_span_id()
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            outer_span = next(event for event in events if event["type"] == "span")
+            inner_gen = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(captured["outer_span"], outer_span["id"])
+            self.assertEqual(captured["inner_gen"], inner_gen["id"])
+            self.assertEqual(captured["outer_span_again"], outer_span["id"])
+            self.assertEqual(captured["trace_at_depth"], root["id"])
+            # The generation nested under the span records the span as its parent.
+            self.assertEqual(inner_gen["parent_id"], outer_span["id"])
+
+    def test_trace_context_manager_exposes_ids(self) -> None:
+        with temporary_workdir():
+            with trace("manual") as manual_trace:
+                self.assertEqual(get_current_trace_id(), manual_trace.id)
+                self.assertEqual(get_current_span_id(), manual_trace.id)
+            # The ids clear once the trace context exits.
+            self.assertIsNone(get_current_trace_id())
+            self.assertIsNone(get_current_span_id())
+
+    def test_async_observe_returns_active_ids(self) -> None:
+        with temporary_workdir() as workdir:
+            captured: dict[str, str | None] = {}
+
+            @observe()
+            async def answer() -> None:
+                await asyncio.sleep(0)
+                captured["trace_id"] = get_current_trace_id()
+                captured["span_id"] = get_current_span_id()
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = events[0]
+            self.assertEqual(captured["trace_id"], root["id"])
+            self.assertEqual(captured["span_id"], root["id"])
+
+    def test_concurrent_async_tasks_observe_isolated_ids(self) -> None:
+        with temporary_workdir() as workdir:
+            seen_trace: dict[str, str | None] = {}
+            seen_span: dict[str, str | None] = {}
+
+            @observe()
+            async def task(value: str) -> str:
+                # Yield control so the gathered tasks interleave; leaked contextvars
+                # would make both read the same id.
+                await asyncio.sleep(0)
+                seen_trace[value] = get_current_trace_id()
+                seen_span[value] = get_current_span_id()
+                return value
+
+            async def main() -> None:
+                await asyncio.gather(task("a"), task("b"))
+
+            asyncio.run(main())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            written_trace_ids = {event["trace_id"] for event in events}
+            # Each task saw its own distinct trace id, together covering both roots.
+            self.assertNotEqual(seen_trace["a"], seen_trace["b"])
+            self.assertEqual({seen_trace["a"], seen_trace["b"]}, written_trace_ids)
+            # At each task's trace root the span id equals its own trace id.
+            self.assertEqual(seen_span["a"], seen_trace["a"])
+            self.assertEqual(seen_span["b"], seen_trace["b"])
+
+    def test_concurrent_threads_observe_isolated_ids(self) -> None:
+        with temporary_workdir() as workdir:
+            seen: dict[str, str | None] = {}
+            # Hold both threads inside their own trace at once so a leak across
+            # threads would be observable.
+            barrier = threading.Barrier(2)
+
+            @observe()
+            def work(value: str) -> str:
+                barrier.wait()
+                seen[value] = get_current_trace_id()
+                return value
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(work, ["a", "b"]))
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            written_trace_ids = {event["trace_id"] for event in events}
+            self.assertNotEqual(seen["a"], seen["b"])
+            self.assertEqual({seen["a"], seen["b"]}, written_trace_ids)
+
+    def test_ids_reset_to_none_after_trace_exits(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                pass
+
+            answer()
+
+            self.assertIsNone(get_current_trace_id())
+            self.assertIsNone(get_current_span_id())
 
 
 if __name__ == "__main__":

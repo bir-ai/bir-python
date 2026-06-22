@@ -19,6 +19,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `get_current_trace_id()` and `get_current_span_id()` public accessors that
+  return the active trace id and innermost open span/generation/tool-call id (or
+  `None` outside any trace), for stamping application logs and metrics so they can
+  be correlated with Bir traces. The values are exactly the `trace_id`/`parent_id`
+  written to the JSONL for an event created at that point, and are read from the
+  task-local context, so concurrent asyncio tasks and threads each see their own
+  ids. They are read-only — no setter or context object is exposed, and no
+  cross-process propagation is added. No new dependency, schema, or fixture change.
 - `bir stats` command that aggregates local traces into a quick usage, cost, and
   health summary: the total trace count with success/error splits, summed
   input/output/total token usage over generation events, summed cost grouped by

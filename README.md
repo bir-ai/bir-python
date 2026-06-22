@@ -50,6 +50,34 @@ but you can widen them for your own credential names and formats with
 `configure(additional_secret_keys=[...], additional_redaction_patterns=[...])`.
 See [capture and privacy](docs/site/capture-privacy.md).
 
+## Correlating your logs with traces
+
+Read the active ids with `get_current_trace_id()` and `get_current_span_id()` to
+stamp your application's own logs and metrics, so they line up with Bir traces
+later. Both return `None` outside any trace and never raise:
+
+```python
+import logging
+
+from bir import get_current_span_id, get_current_trace_id, observe
+
+
+@observe()
+def answer(question: str) -> str:
+    logging.info(
+        "handling question",
+        extra={"trace_id": get_current_trace_id(), "span_id": get_current_span_id()},
+    )
+    return "ok"
+```
+
+`get_current_trace_id()` returns the active trace root id and
+`get_current_span_id()` the innermost open span, generation, or tool call (the
+trace root when none is open). The values match the `trace_id`/`parent_id` later
+written to the JSONL, and each asyncio task and thread sees its own ids. The
+accessors are read-only — there is no setter and no context is exposed for
+injection or cross-process propagation.
+
 ## Tracing generators and streaming
 
 `@observe()` also traces generator and async-generator functions across their

@@ -9,6 +9,8 @@ from ._sdk import (
     TraceEvent,
     configure,
     generation,
+    get_current_span_id,
+    get_current_trace_id,
     load_events,
     load_traces,
     observe,
@@ -47,4 +49,6 @@ __all__ = [
     "tool_call",
     "retrieval",
     "score",
+    "get_current_trace_id",
+    "get_current_span_id",
 ]
