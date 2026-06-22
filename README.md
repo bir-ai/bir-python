@@ -77,6 +77,13 @@ separate tasks stay isolated. Yielded values are never buffered; with output
 capture enabled only a bounded yielded-item count is recorded under
 `metadata.generator.items`.
 
+The optional [provider integrations](docs/site/integrations.md) ship async
+counterparts (`trace_chat_completion_async`, `trace_messages_async`,
+`trace_completion_async`, and so on) for async clients such as `AsyncOpenAI`,
+`AsyncAnthropic`, and `litellm.acompletion`. Each awaits the provider coroutine
+inside an active trace and records one generation; the streaming wrappers resolve
+to an async iterator you consume with `async for`, never buffering the stream.
+
 ## Local persistence and concurrency
 
 Trace appends and size-based rotation are serialized across threads and local

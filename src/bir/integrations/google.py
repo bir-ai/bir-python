@@ -9,12 +9,13 @@ when it is present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -106,6 +107,106 @@ def _stream_generate_content(
 
         try:
             for chunk in stream:
+                text = _string_or_none(_value(chunk, "text"))
+                if text is not None:
+                    output_parts.append(text)
+
+                usage = _value(chunk, "usage_metadata")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
+
+
+async def trace_generate_content_async(
+    generate: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "google.generate_content",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Gemini ``generate_content`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_generate_content` for the
+    ``google-genai`` async client (``client.aio.models.generate_content``).
+    ``generate`` returns a coroutine; it is awaited inside a single Bir
+    ``generation`` event, arguments are forwarded unchanged, and the awaited
+    response is returned. The model is taken from the request ``model`` keyword
+    and usage from ``response.usage_metadata``. With ``stream=True`` the coroutine
+    resolves to an async iterator that yields the provider's chunks unchanged and
+    accumulates text and usage, finalizing when the stream is exhausted, closed,
+    or raises.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with Gemini ``generate_content`` keyword
+    arguments such as ``config``.
+    """
+
+    metadata: dict[str, Any] = {"integration": "google"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_generate_content_async(
+            generate,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await generate(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def _stream_generate_content_async(
+    generate: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await generate(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        # Gemini chunks carry no top-level model, so the request ``model`` keyword
+        # passed to ``generation()`` stands; only text and usage are accumulated.
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            async for chunk in stream:
                 text = _string_or_none(_value(chunk, "text"))
                 if text is not None:
                     output_parts.append(text)

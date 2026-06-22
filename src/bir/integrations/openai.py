@@ -12,12 +12,19 @@ Responses API.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
-from ._common import _is_streamed_response, _response_output, _string_or_none, _usage_tokens, _value
+from ._common import (
+    _is_async_streamed_response,
+    _is_streamed_response,
+    _response_output,
+    _string_or_none,
+    _usage_tokens,
+    _value,
+)
 
 
 def trace_chat_completion(
@@ -99,6 +106,105 @@ def _stream_chat_completion(
 
         try:
             for chunk in stream:
+                response_model = _string_or_none(_value(chunk, "model"))
+                if response_model is not None:
+                    gen.model = response_model
+
+                content = _chunk_delta_content(chunk)
+                if content is not None:
+                    output_parts.append(content)
+
+                usage = _value(chunk, "usage")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
+
+
+async def trace_chat_completion_async(
+    create: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "openai.chat.completions",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async OpenAI chat-completions ``create`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_chat_completion` for
+    ``AsyncOpenAI`` clients. ``create`` is normally
+    ``client.chat.completions.create`` returning a coroutine; it is awaited inside
+    a single Bir ``generation`` event, arguments are forwarded unchanged, and the
+    awaited response is returned. With ``stream=True`` the coroutine resolves to an
+    async iterator that yields the provider's events unchanged and finalizes the
+    model, output, and usage when the stream is exhausted, closed, or raises.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with OpenAI ``create`` keyword arguments.
+    """
+
+    metadata: dict[str, Any] = {"integration": "openai"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_chat_completion_async(
+            create,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await create(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def _stream_chat_completion_async(
+    create: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await create(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            async for chunk in stream:
                 response_model = _string_or_none(_value(chunk, "model"))
                 if response_model is not None:
                     gen.model = response_model
@@ -327,3 +433,102 @@ def _merge_response_usage(tokens: dict[str, int | float], event: Any) -> None:
     total_tokens = _usage_tokens(usage, "total_tokens")
     if total_tokens is not None:
         tokens["total_tokens"] = total_tokens
+
+
+async def trace_response_async(
+    create: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "openai.responses",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async OpenAI Responses ``create`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_response` for ``AsyncOpenAI``
+    clients. ``create`` is normally ``client.responses.create`` returning a
+    coroutine; it is awaited inside a single Bir ``generation`` event, arguments
+    are forwarded unchanged, and the awaited response is returned. With
+    ``stream=True`` the coroutine resolves to an async iterator that yields the
+    provider's events unchanged, assembles output from
+    ``response.output_text.delta`` events, and finalizes the model and usage from
+    the terminal ``response.completed`` event when the stream is exhausted,
+    closed, or raises.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with OpenAI ``create`` keyword arguments.
+    """
+
+    metadata: dict[str, Any] = {"integration": "openai"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_response_async(
+            create,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await create(*args, **kwargs)
+        _record_response_result(gen, response)
+        return response
+
+
+async def _stream_response_async(
+    create: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await create(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response_result(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        usage_tokens: dict[str, int | float] = {}
+
+        try:
+            async for event in stream:
+                model = _event_model(event)
+                if model is not None:
+                    gen.model = model
+
+                text = _event_delta_text(event)
+                if text is not None:
+                    output_parts.append(text)
+
+                _merge_response_usage(usage_tokens, event)
+
+                yield event
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, usage_tokens)

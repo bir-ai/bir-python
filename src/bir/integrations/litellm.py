@@ -12,7 +12,7 @@ and recorded as ``metadata["provider"]`` for the dashboard's provider breakdown.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from bir import generation
@@ -61,6 +61,50 @@ def trace_completion(
         capture_output=bir_capture_output,
     ) as gen:
         response = completion(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def trace_completion_async(
+    completion: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "litellm.completion",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await ``litellm.acompletion`` and record one Bir generation.
+
+    The asynchronous counterpart of :func:`trace_completion` for
+    ``litellm.acompletion``. ``completion`` returns a coroutine; it is awaited
+    inside a single Bir ``generation`` event, arguments are forwarded unchanged,
+    and the awaited response is returned. ``model`` and token ``usage`` are read
+    from the OpenAI-shaped response when present, and the provider is derived from
+    the request ``model`` id prefix and recorded as ``metadata["provider"]``.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with LiteLLM ``completion`` keyword arguments.
+    """
+
+    metadata: dict[str, Any] = {"integration": "litellm"}
+    provider = _provider_hint(kwargs.get("model"))
+    if provider is not None:
+        metadata["provider"] = provider
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await completion(*args, **kwargs)
         _record_response(gen, response)
         return response
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.mistral import trace_chat
+from bir.integrations.mistral import trace_chat, trace_chat_async
 
 
 @contextmanager
@@ -181,6 +182,110 @@ class MistralIntegrationTests(unittest.TestCase):
                 trace_chat(fake_complete, model="mistral-small-latest", messages=[])
 
             # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class MistralAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_complete_and_records_model_and_usage(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            created: list[FakeChatCompletion] = []
+
+            async def fake_complete(**kwargs: object) -> FakeChatCompletion:
+                completion = FakeChatCompletion(
+                    model="mistral-small-2506",
+                    usage=FakeUsage(prompt_tokens=12, completion_tokens=6, total_tokens=18),
+                    payload={
+                        "id": "chatcmpl-1",
+                        "model": "mistral-small-2506",
+                        "choices": [{"message": {"role": "assistant", "content": "Bir traces locally."}}],
+                    },
+                )
+                created.append(completion)
+                return completion
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    return await trace_chat_async(
+                        fake_complete,
+                        model="mistral-small-latest",
+                        messages=[{"role": "user", "content": "What is Bir?"}],
+                    )
+
+            response = asyncio.run(driver())
+            self.assertIs(response, created[0])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "mistral.chat")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "mistral-small-2506")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "mistral")
+            self.assertEqual(generation_event.output["choices"][0]["message"]["content"], "Bir traces locally.")
+
+    def test_forwards_metadata_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_complete(**kwargs: object) -> FakeChatCompletion:
+                received.update(kwargs)
+                return FakeChatCompletion(model="mistral-small-2506")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_chat_async(
+                        fake_complete,
+                        model="mistral-small-latest",
+                        messages=[],
+                        metadata={"mistral_request_id": "req-1"},
+                        bir_name="chat.turn",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            self.assertEqual(received["metadata"], {"mistral_request_id": "req-1"})
+            self.assertNotIn("bir_name", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+
+    def test_records_error_and_redacts_secret_when_complete_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_complete(**kwargs: object) -> FakeChatCompletion:
+                raise RuntimeError("request failed token=sk-secret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_chat_async(fake_complete, model="mistral-small-latest", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed token=[redacted]")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_complete(**kwargs: object) -> FakeChatCompletion:
+                calls.append(kwargs)
+                return FakeChatCompletion(model="mistral-small-2506")
+
+            async def driver() -> None:
+                await trace_chat_async(fake_complete, model="mistral-small-latest", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
             self.assertEqual(calls, [])
             self.assertEqual(load_events(), [])
 

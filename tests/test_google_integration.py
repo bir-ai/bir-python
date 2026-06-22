@@ -1,15 +1,46 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.google import trace_generate_content
+from bir.integrations.google import trace_generate_content, trace_generate_content_async
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built chunks, like the ``google-genai`` async stream.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the chunks. With ``error`` set it raises that exception
+    after the chunks are exhausted, modeling a mid-stream failure.
+    """
+
+    def __init__(self, chunks: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._chunks = list(chunks)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 @contextmanager
@@ -291,6 +322,177 @@ class GoogleIntegrationTests(unittest.TestCase):
                 trace_generate_content(fake_generate, model="gemini-2.5-flash", contents=[])
 
             # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class GoogleAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_generate_and_records_model_from_request_and_usage(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            created: list[FakeGenerateContentResponse] = []
+
+            async def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
+                response = FakeGenerateContentResponse(
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=12,
+                        candidates_token_count=6,
+                        total_token_count=18,
+                    ),
+                    payload={
+                        "candidates": [
+                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
+                        ],
+                    },
+                )
+                created.append(response)
+                return response
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    return await trace_generate_content_async(
+                        fake_generate, model="gemini-2.5-flash", contents="What is Bir?"
+                    )
+
+            response = asyncio.run(driver())
+            self.assertIs(response, created[0])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "google.generate_content")
+            self.assertEqual(generation_event.status, "success")
+            # Gemini responses omit a model, so it comes from the request keyword.
+            self.assertEqual(generation_event.model, "gemini-2.5-flash")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "google")
+            self.assertEqual(
+                generation_event.output["candidates"][0]["content"]["parts"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_forwards_config_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
+                received.update(kwargs)
+                return FakeGenerateContentResponse()
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(
+                        fake_generate,
+                        model="gemini-2.5-flash",
+                        contents=[],
+                        config={"temperature": 0.0},
+                        bir_name="chat.turn",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            self.assertEqual(received["config"], {"temperature": 0.0})
+            self.assertNotIn("bir_name", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+
+    def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
+                raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(fake_generate, model="gemini-2.5-flash", contents=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeGenerateContentChunk(text="Bir "),
+                FakeGenerateContentChunk(text="streams"),
+                FakeGenerateContentChunk(
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=11,
+                        candidates_token_count=4,
+                        total_token_count=15,
+                    ),
+                ),
+            ]
+
+            async def fake_generate(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(chunks)
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate, model="gemini-2.5-flash", contents="Stream it", stream=True
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            self.assertEqual(consumed, chunks)
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "gemini-2.5-flash")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_generate(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeGenerateContentChunk(text="partial api_key=AIzaSyExampleSecret123 ")],
+                    error=RuntimeError("stream failed api_key=AIzaSyExampleSecret123"),
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate, model="gemini-2.5-flash", contents="Stream it", stream=True
+                    )
+                    async for _chunk in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
+                calls.append(kwargs)
+                return FakeGenerateContentResponse()
+
+            async def driver() -> None:
+                await trace_generate_content_async(fake_generate, model="gemini-2.5-flash", contents=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
             self.assertEqual(calls, [])
             self.assertEqual(load_events(), [])
 

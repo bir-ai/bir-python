@@ -1,15 +1,46 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.anthropic import trace_messages
+from bir.integrations.anthropic import trace_messages, trace_messages_async
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built stream events, like ``AsyncMessageStream``.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the events. With ``error`` set it raises that exception
+    after the events are exhausted, modeling a mid-stream failure.
+    """
+
+    def __init__(self, chunks: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._chunks = list(chunks)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 @contextmanager
@@ -311,6 +342,217 @@ class AnthropicIntegrationTests(unittest.TestCase):
                 trace_messages(fake_create, model="claude-haiku-4-5", messages=[])
 
             # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class AnthropicAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_create_and_records_model_and_usage(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            created: list[FakeMessage] = []
+
+            async def fake_create(**kwargs: object) -> FakeMessage:
+                message = FakeMessage(
+                    model="claude-haiku-4-5-20251001",
+                    usage=FakeUsage(input_tokens=12, output_tokens=6),
+                    payload={
+                        "id": "msg_1",
+                        "model": "claude-haiku-4-5-20251001",
+                        "content": [{"type": "text", "text": "Bir traces locally."}],
+                    },
+                )
+                created.append(message)
+                return message
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    return await trace_messages_async(
+                        fake_create,
+                        model="claude-haiku-4-5",
+                        messages=[{"role": "user", "content": "What is Bir?"}],
+                    )
+
+            response = asyncio.run(driver())
+            self.assertIs(response, created[0])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "anthropic.messages")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "claude-haiku-4-5-20251001")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "anthropic")
+            self.assertEqual(generation_event.output["content"][0]["text"], "Bir traces locally.")
+
+    def test_forwards_metadata_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_create(**kwargs: object) -> FakeMessage:
+                received.update(kwargs)
+                return FakeMessage(model="claude-haiku-4-5")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_messages_async(
+                        fake_create,
+                        model="claude-haiku-4-5",
+                        messages=[],
+                        metadata={"user_id": "u-1"},
+                        bir_name="chat.turn",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            self.assertEqual(received["metadata"], {"user_id": "u-1"})
+            self.assertNotIn("bir_name", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+
+    def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_create(**kwargs: object) -> FakeMessage:
+                raise RuntimeError("request failed token=sk-ant-secret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_messages_async(fake_create, model="claude-haiku-4-5", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed token=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeMessageStartEvent(
+                    model="claude-haiku-4-5-20251001",
+                    usage=FakeUsage(input_tokens=11, output_tokens=1),
+                ),
+                FakeContentBlockDeltaEvent("Bir "),
+                FakeContentBlockDeltaEvent("streams"),
+                FakeMessageDeltaEvent(usage=FakeUsage(output_tokens=4)),
+            ]
+
+            async def fake_create(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(chunks)
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_messages_async(
+                        fake_create,
+                        model="claude-haiku-4-5",
+                        messages=[{"role": "user", "content": "Stream it"}],
+                        stream=True,
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            self.assertEqual(consumed, chunks)
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "claude-haiku-4-5-20251001")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_create(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeContentBlockDeltaEvent("partial api_key=sk-ant-secret123 ")],
+                    error=RuntimeError("stream failed api_key=sk-ant-secret123"),
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_messages_async(
+                        fake_create, model="claude-haiku-4-5", messages=[], stream=True
+                    )
+                    async for _chunk in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
+
+    def test_records_partial_output_when_stream_closed_early(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_create(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeContentBlockDeltaEvent("Bir "), FakeContentBlockDeltaEvent("streams")]
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_messages_async(
+                        fake_create, model="claude-haiku-4-5", messages=[], stream=True
+                    )
+                    iterator = stream.__aiter__()
+                    await iterator.__anext__()
+                    await stream.aclose()
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir ")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_create(**kwargs: object) -> FakeMessage:
+                calls.append(kwargs)
+                return FakeMessage(model="claude-haiku-4-5")
+
+            async def driver() -> None:
+                await trace_messages_async(fake_create, model="claude-haiku-4-5", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+    def test_stream_requires_active_trace_before_create(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_create(**kwargs: object) -> FakeAsyncStream:
+                calls.append(kwargs)
+                return FakeAsyncStream([FakeContentBlockDeltaEvent("hi")])
+
+            async def driver() -> None:
+                stream = await trace_messages_async(
+                    fake_create, model="claude-haiku-4-5", messages=[], stream=True
+                )
+                async for _chunk in stream:
+                    pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
             self.assertEqual(calls, [])
             self.assertEqual(load_events(), [])
 

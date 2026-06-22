@@ -67,3 +67,17 @@ def _is_streamed_response(response: Any) -> bool:
     except TypeError:
         return False
     return True
+
+
+def _is_async_streamed_response(response: Any) -> bool:
+    """Return ``True`` when ``response`` is an async stream of chunk events.
+
+    The async wrappers await the provider call and must then tell a real async
+    stream (an ``AsyncStream`` exposing ``__aiter__``) from the single response
+    object a provider returns when it ignores the streaming request. Only the
+    async-iterator protocol is accepted; whole-response shapes (pydantic models,
+    mappings, strings) expose no ``__aiter__`` and fall back to one-shot
+    recording, mirroring :func:`_is_streamed_response` for the sync path.
+    """
+
+    return hasattr(response, "__aiter__")

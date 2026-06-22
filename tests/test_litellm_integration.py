@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.litellm import trace_completion
+from bir.integrations.litellm import trace_completion, trace_completion_async
 
 
 @contextmanager
@@ -208,6 +209,136 @@ class LiteLLMIntegrationTests(unittest.TestCase):
                 trace_completion(fake_completion, model="anthropic/claude-3-5-sonnet", messages=[])
 
             # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class LiteLLMAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_completion_and_records_model_usage_and_provider(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            created: list[FakeModelResponse] = []
+
+            async def fake_completion(**kwargs: object) -> FakeModelResponse:
+                response = FakeModelResponse(
+                    model="claude-3-5-sonnet-20241022",
+                    usage=FakeUsage(prompt_tokens=12, completion_tokens=6, total_tokens=18),
+                    payload={
+                        "id": "chatcmpl-1",
+                        "model": "claude-3-5-sonnet-20241022",
+                        "choices": [{"message": {"role": "assistant", "content": "Bir traces locally."}}],
+                    },
+                )
+                created.append(response)
+                return response
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    return await trace_completion_async(
+                        fake_completion,
+                        model="anthropic/claude-3-5-sonnet",
+                        messages=[{"role": "user", "content": "What is Bir?"}],
+                    )
+
+            response = asyncio.run(driver())
+            self.assertIs(response, created[0])
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "litellm.completion")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "claude-3-5-sonnet-20241022")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "litellm")
+            # The provider is derived from the request model id prefix.
+            self.assertEqual(generation_event.metadata["provider"], "anthropic")
+            self.assertEqual(generation_event.output["choices"][0]["message"]["content"], "Bir traces locally.")
+
+    def test_derives_provider_from_prefix_and_omits_it_for_bare_model_id(self) -> None:
+        with temporary_workdir():
+            async def fake_prefixed(**kwargs: object) -> FakeModelResponse:
+                return FakeModelResponse(model="claude-3-5-sonnet-20241022")
+
+            async def fake_bare(**kwargs: object) -> FakeModelResponse:
+                return FakeModelResponse(model="gpt-4o-mini")
+
+            async def driver() -> None:
+                async with trace("prefixed"):
+                    await trace_completion_async(fake_prefixed, model="anthropic/claude-3-5-sonnet", messages=[])
+                async with trace("bare"):
+                    await trace_completion_async(fake_bare, model="gpt-4o-mini", messages=[])
+
+            asyncio.run(driver())
+
+            events = [event for event in load_events() if event.type == "generation"]
+            self.assertEqual(len(events), 2)
+            prefixed_event, bare_event = events
+            self.assertEqual(prefixed_event.metadata["provider"], "anthropic")
+            # A bare model id (no "/") yields no provider hint.
+            self.assertNotIn("provider", bare_event.metadata)
+
+    def test_forwards_metadata_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_completion(**kwargs: object) -> FakeModelResponse:
+                received.update(kwargs)
+                return FakeModelResponse(model="claude-3-5-sonnet-20241022")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_completion_async(
+                        fake_completion,
+                        model="anthropic/claude-3-5-sonnet",
+                        messages=[],
+                        metadata={"litellm_session_id": "sess-1"},
+                        bir_name="chat.turn",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            self.assertEqual(received["metadata"], {"litellm_session_id": "sess-1"})
+            self.assertNotIn("bir_name", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["provider"], "anthropic")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+
+    def test_records_error_and_redacts_secret_when_completion_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_completion(**kwargs: object) -> FakeModelResponse:
+                raise RuntimeError("request failed api_key=sk-ant-secret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_completion_async(fake_completion, model="anthropic/claude-3-5-sonnet", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_completion(**kwargs: object) -> FakeModelResponse:
+                calls.append(kwargs)
+                return FakeModelResponse(model="claude-3-5-sonnet-20241022")
+
+            async def driver() -> None:
+                await trace_completion_async(fake_completion, model="anthropic/claude-3-5-sonnet", messages=[])
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
             self.assertEqual(calls, [])
             self.assertEqual(load_events(), [])
 

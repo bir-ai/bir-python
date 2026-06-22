@@ -8,6 +8,61 @@ Provider wrappers forward arguments unchanged, return the provider response
 unchanged, and record a generation inside an active Bir trace. Input and output
 payloads still follow Bir's [opt-in capture settings](capture-privacy.md).
 
+## Async clients
+
+Every dependency-free provider wrapper has an asynchronous counterpart named with
+an `_async` suffix, for applications using async provider clients such as
+`AsyncOpenAI`, `AsyncAnthropic`, the `google-genai` async client,
+`litellm.acompletion`, and the async Mistral and Cohere clients. Each awaits the
+provider coroutine inside one Bir generation, forwards arguments unchanged, and
+returns the awaited provider result:
+
+```python
+from bir import trace
+from bir.integrations.openai import trace_chat_completion_async
+
+async with trace("chat"):
+    response = await trace_chat_completion_async(
+        async_client.chat.completions.create,
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+```
+
+For the streaming surfaces (OpenAI Chat Completions and Responses, Anthropic, and
+Gemini), passing `stream=True` resolves to an async iterator that yields the
+provider's events unchanged and finalizes the model, output, and usage when the
+stream is exhausted, closed (`aclose()`), or raises mid-stream:
+
+```python
+async with trace("chat"):
+    stream = await trace_chat_completion_async(
+        async_client.chat.completions.create,
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Stream it"}],
+        stream=True,
+    )
+    async for chunk in stream:
+        ...
+```
+
+The async wrappers, by provider:
+
+| Provider | Module | Async wrapper |
+| --- | --- | --- |
+| OpenAI Chat Completions | `bir.integrations.openai` | `trace_chat_completion_async` |
+| OpenAI Responses | `bir.integrations.openai` | `trace_response_async` |
+| Anthropic Messages | `bir.integrations.anthropic` | `trace_messages_async` |
+| Google Gemini | `bir.integrations.google` | `trace_generate_content_async` |
+| Mistral | `bir.integrations.mistral` | `trace_chat_async` |
+| Cohere | `bir.integrations.cohere` | `trace_chat_async` |
+| LiteLLM | `bir.integrations.litellm` | `trace_completion_async` |
+
+They require an active trace just like the sync wrappers — an async `@observe()`
+function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
+options. AWS Bedrock, Vertex AI, and the LangChain and LlamaIndex callback
+handlers have no async wrapper.
+
 ## OpenAI
 
 OpenAI exposes two chat surfaces with different response and streaming shapes, so

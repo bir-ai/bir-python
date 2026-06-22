@@ -19,6 +19,28 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Async counterparts for the dependency-free provider wrappers, for applications
+  using async provider clients (`AsyncOpenAI`, `AsyncAnthropic`, the `google-genai`
+  async client, `litellm.acompletion`, and the async Mistral and Cohere clients).
+  Each is named with an `_async` suffix and mirrors its sync wrapper exactly but
+  awaits the provider coroutine inside one Bir generation:
+  `trace_chat_completion_async` and `trace_response_async`
+  (`bir.integrations.openai`), `trace_messages_async`
+  (`bir.integrations.anthropic`), `trace_generate_content_async`
+  (`bir.integrations.google`), `trace_chat_async` (`bir.integrations.mistral` and
+  `bir.integrations.cohere`), and `trace_completion_async`
+  (`bir.integrations.litellm`). Arguments are forwarded unchanged, the awaited
+  provider result is returned unchanged, and `bir_*` options are never forwarded.
+  For the surfaces that stream synchronously today (OpenAI Chat Completions and
+  Responses, Anthropic, Gemini), passing `stream=True` resolves to an async
+  iterator that yields the provider's async-stream events unchanged via
+  `async for` and finalizes the model, output, and usage when the stream is
+  exhausted, closed (`aclose()`), or raises mid-stream (re-raised unchanged, the
+  persisted error redacted) — never buffering the stream. The wrappers require an
+  active trace and work under async `@observe()` functions and
+  `async with bir.trace(...)`. Re-exported from `bir.integrations`; sync wrappers
+  are unchanged. No new dependency, schema, or fixture change. AWS Bedrock,
+  Vertex AI, and the LangChain/LlamaIndex callback handlers are unchanged.
 - `configure()` now accepts two additive redaction options,
   `additional_secret_keys` and `additional_redaction_patterns`, so applications
   can teach Bir their own credential field names and secret text formats. They

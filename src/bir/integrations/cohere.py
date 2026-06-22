@@ -8,7 +8,7 @@ usage from the nested Cohere response shape when present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from bir import generation
@@ -53,6 +53,46 @@ def trace_chat(
         capture_output=bir_capture_output,
     ) as gen:
         response = chat(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def trace_chat_async(
+    chat: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "cohere.chat",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Cohere v2 ``chat`` callable and record one generation.
+
+    The asynchronous counterpart of :func:`trace_chat` for ``AsyncClientV2``
+    (``client.chat``). ``chat`` returns a coroutine; it is awaited inside a single
+    Bir ``generation`` event, arguments are forwarded unchanged, and the awaited
+    response is returned. The model comes from the request ``model`` keyword and
+    token usage is read from ``response.usage.tokens`` when present.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with Cohere ``chat`` keyword arguments.
+    """
+
+    metadata: dict[str, Any] = {"integration": "cohere"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await chat(*args, **kwargs)
         _record_response(gen, response)
         return response
 

@@ -8,12 +8,13 @@ reads the model and token usage from the response when they are present.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -101,6 +102,103 @@ def _stream_messages(
 
         try:
             for chunk in stream:
+                model = _chunk_model(chunk)
+                if model is not None:
+                    gen.model = model
+
+                text = _chunk_delta_text(chunk)
+                if text is not None:
+                    output_parts.append(text)
+
+                _merge_stream_usage(usage_tokens, chunk)
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, usage_tokens)
+
+
+async def trace_messages_async(
+    create: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "anthropic.messages",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Anthropic Messages ``create`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_messages` for ``AsyncAnthropic``
+    clients. ``create`` is normally ``client.messages.create`` returning a
+    coroutine; it is awaited inside a single Bir ``generation`` event, arguments
+    are forwarded unchanged, and the awaited response is returned. With
+    ``stream=True`` the coroutine resolves to an async iterator that yields the
+    provider's events unchanged and accumulates text and usage from the message
+    events, finalizing when the stream is exhausted, closed, or raises.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with Anthropic ``create`` keyword arguments.
+    """
+
+    metadata: dict[str, Any] = {"integration": "anthropic"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_messages_async(
+            create,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await create(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def _stream_messages_async(
+    create: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await create(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        usage_tokens: dict[str, int | float] = {}
+
+        try:
+            async for chunk in stream:
                 model = _chunk_model(chunk)
                 if model is not None:
                     gen.model = model
