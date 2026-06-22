@@ -104,6 +104,40 @@ it is written with the same rules as captured input and output, so secret-like
 fields never reach the JSONL. It works with both `with` and `async with`, and the
 argument must be a mapping.
 
+## Estimating cost from a local price table
+
+Cost is user-provided by default — Bir bundles no prices because provider prices
+go stale. If you would rather not call `set_cost()` on every call, supply your own
+per-token rates once with `configure(model_prices=...)` and Bir fills the cost
+from token usage:
+
+```python
+from bir import configure, generation, observe
+
+configure(
+    model_prices={
+        "gpt-4o-mini": {"input": 0.00000015, "output": 0.0000006},
+        "mistral-large": {"input": 0.000002, "output": 0.000006, "currency": "EUR"},
+    }
+)
+
+
+@observe()
+def answer(question: str) -> str:
+    with generation("chat", model="gpt-4o-mini") as gen:
+        gen.set_usage(input_tokens=1000, output_tokens=400)
+        # No set_cost(): input_cost/output_cost/total_cost are derived from the rates.
+    return "ok"
+```
+
+Each entry sets a non-negative `input` and/or `output` per-token rate plus an
+optional `currency` (default `USD`). The cost is derived only for a generation
+that has the matching token counts and no explicit `set_cost()` — an explicit cost
+always wins, and a usage without the needed token split is left without a cost.
+The table is validated at `configure()` time, ships no bundled prices, and keeping
+the rates current is your responsibility. With no table configured, cost behavior
+is unchanged. See [core API](docs/site/core-api.md).
+
 ## Tracing generators and streaming
 
 `@observe()` also traces generator and async-generator functions across their

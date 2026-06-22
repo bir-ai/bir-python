@@ -19,6 +19,21 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `configure(model_prices=...)`, an opt-in, local-only price table that fills a
+  generation's `input_cost`/`output_cost`/`total_cost` from its token usage. Each
+  entry maps a model name to a non-negative, finite `input` and/or `output`
+  per-token rate plus an optional `currency` (default `USD`); Bir bundles no
+  prices, so the rates are the user's responsibility. Cost is derived only for a
+  generation that has usage, a matching model, and no explicit `set_cost(...)`
+  (which always wins and is never overwritten), routing through the same cost
+  validation, currency handling, and total derivation as a manual `set_cost`. The
+  table is validated once at `configure()` time — a non-mapping table, a
+  non-string or empty model name, a non-mapping or empty rate entry, an unknown
+  rate key, a boolean/negative/non-finite rate, an invalid currency, or an
+  over-large table raises `ValueError`/`TypeError` immediately. Stdlib-only and
+  fully opt-in: with no table configured, generation cost behavior is byte-for-byte
+  unchanged. No new public top-level symbol, runtime dependency, schema, or fixture
+  change.
 - `set_metadata(...)` method on the `trace()`, `span()`, `generation()`,
   `tool_call()`, and `retrieval()` context managers, so metadata discovered while
   the body runs (a resolved route, a cache-hit flag, a request id) can be recorded

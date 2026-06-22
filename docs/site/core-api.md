@@ -61,6 +61,11 @@ Usage and cost setters require at least one field. Values must be non-negative
 and finite. Cost values are user-provided; Bir defaults currency to `USD` and
 does not calculate provider pricing.
 
+If you would rather not call `set_cost()` on every generation, you can supply a
+local price table with `configure(model_prices=...)` (see below) and Bir derives
+the cost from token usage for any generation that has usage, a matching model,
+and no explicit `set_cost()`. An explicit `set_cost()` always wins.
+
 Pass `input=`, `metadata=`, `prompt=`, `capture_input=`, or `capture_output=` to
 the context manager when needed. Capture flags default to the active trace or
 global configuration.
@@ -213,6 +218,35 @@ configure(
 Arguments that are omitted retain the current setting. Environment defaults are
 read once when `bir` is imported; explicit `configure()` arguments take
 precedence. See [CLI & Environment Config](cli-env.md).
+
+### Cost from a local price table
+
+`configure(model_prices=...)` is an opt-in, local-only price table that fills a
+generation's cost from its token usage. Bir bundles no prices — provider prices
+go stale — so the rates, and keeping them current, are yours to supply.
+
+```python
+configure(
+    model_prices={
+        "gpt-4o-mini": {"input": 0.00000015, "output": 0.0000006},
+        # Optional per-model currency (defaults to "USD").
+        "mistral-large": {"input": 0.000002, "output": 0.000006, "currency": "EUR"},
+    }
+)
+
+with generation("chat", model="gpt-4o-mini") as gen:
+    gen.set_usage(input_tokens=1000, output_tokens=400)
+    # No set_cost(): input_cost, output_cost, and total_cost are derived from the
+    # rates above (input rate × input tokens, output rate × output tokens).
+```
+
+Each entry sets a non-negative, finite `input` and/or `output` per-token rate and
+an optional `currency`. Cost is derived only when the generation has the matching
+token counts and no explicit `set_cost()`; a generation whose usage lacks the
+needed split is left without a cost. The table is validated at `configure()`
+time, so a bad rate, unknown key, invalid currency, or non-mapping table raises
+immediately. Passing `model_prices` replaces the previous table (an empty mapping
+clears it); with no table configured, cost behavior is unchanged.
 
 ## Event loading
 

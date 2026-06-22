@@ -74,6 +74,13 @@ _MAX_ADDITIONAL_SECRET_KEYS = 100
 _MAX_ADDITIONAL_REDACTION_PATTERNS = 100
 _MAX_ADDITIONAL_SECRET_KEY_LENGTH = 200
 _MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH = 1000
+# Upper bound on the opt-in ``model_prices`` table accepted by ``configure``. It
+# rejects an unboundedly large price table while leaving ample room for a
+# user-curated list. Bir bundles no prices; this only caps what a caller supplies.
+_MAX_MODEL_PRICES = 1000
+# The only keys accepted inside a single model's rate mapping: the per-token
+# ``input``/``output`` rates and an optional ``currency`` (default "USD").
+_MODEL_PRICE_RATE_KEYS = frozenset({"input", "output", "currency"})
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 _current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
@@ -81,6 +88,20 @@ _current_capture_outputs: ContextVar[bool | None] = ContextVar("bir_current_capt
 # Set once at trace-root creation so every descendant event of a sampled-out
 # trace is skipped. False means "keep this trace"; the default keeps everything.
 _current_trace_dropped: ContextVar[bool] = ContextVar("bir_current_trace_dropped", default=False)
+
+
+@dataclass(frozen=True)
+class _ModelPrice:
+    """Validated per-token rates and currency for one ``model_prices`` entry.
+
+    ``input``/``output`` are non-negative, finite per-token rates and either may
+    be ``None`` when only one side is priced; ``currency`` defaults to ``"USD"``.
+    Frozen so the whole price table stays hashable on the immutable ``_Config``.
+    """
+
+    input: int | float | None
+    output: int | float | None
+    currency: str
 
 
 @dataclass(frozen=True)
@@ -107,6 +128,12 @@ class _Config:
     # disabled, replaced, or reordered.
     additional_secret_keys: frozenset[str] = frozenset()
     additional_redaction_patterns: tuple[re.Pattern[str], ...] = ()
+    # Opt-in, local-only price table that auto-fills a generation's cost from its
+    # token usage. Empty by default so cost stays user-provided and no prices are
+    # bundled. Stored as a validated, name-sorted tuple of ``(model, _ModelPrice)``
+    # pairs so the frozen config stays hashable; an explicit ``set_cost`` on a
+    # generation always wins over a rate-derived cost.
+    model_prices: tuple[tuple[str, _ModelPrice], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -289,6 +316,7 @@ def configure(
     backup_count: int | None = None,
     additional_secret_keys: Iterable[str] | None = None,
     additional_redaction_patterns: Iterable[str | re.Pattern[str]] | None = None,
+    model_prices: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Configure local SDK behavior.
 
@@ -333,6 +361,26 @@ def configure(
     iterable clears them); omitting it leaves the current additional rules
     unchanged. The built-in rules always remain in force either way.
 
+    ``model_prices`` is an opt-in, local-only price table that auto-fills a
+    generation's cost from its token usage. It is a mapping of model name to a
+    rates mapping holding a non-negative, finite ``input`` and/or ``output``
+    per-token rate plus an optional ``currency`` (default ``"USD"``). Bir bundles
+    no prices, so the rates — and keeping them current — are yours to supply. When
+    a generation has usage and a model matching a configured entry but no
+    explicitly set cost, its ``input_cost``/``output_cost``/``total_cost`` are
+    derived from the matching rates at the configured currency exactly as a manual
+    ``set_cost(...)`` would record them (input rate times input tokens, output rate
+    times output tokens, total summed when both sides are priced). An explicit
+    ``set_cost(...)`` always wins and is never overwritten, and a generation whose
+    usage lacks the needed token split is left without a derived cost. The table is
+    validated once here, so a non-mapping table, a non-string or empty model name,
+    a non-mapping or empty rate entry, an unknown rate key, a boolean, negative, or
+    non-finite rate, an invalid currency, or an over-large table raises
+    ``ValueError``/``TypeError`` immediately. Passing ``model_prices`` replaces the
+    previously configured table (an empty mapping clears it); omitting it leaves
+    the current table unchanged. With no table configured, generation cost behavior
+    is unchanged.
+
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
     ``BIR_CAPTURE_OUTPUTS``, ``BIR_SAMPLE_RATE``, ``BIR_SERVICE_NAME``,
@@ -366,6 +414,8 @@ def configure(
         updates["additional_redaction_patterns"] = _validate_additional_redaction_patterns(
             additional_redaction_patterns
         )
+    if model_prices is not None:
+        updates["model_prices"] = _validate_model_prices(model_prices)
 
     _config = replace(_config, **updates)
 
@@ -1454,6 +1504,9 @@ class _Generation:
         metadata_payload = dict(self.metadata or {})
         if self.prompt_record is not None:
             metadata_payload["prompt"] = self.prompt_record.to_metadata()
+        # Derive cost from a configured price table only when the caller set none;
+        # an explicit set_cost() already populated self.cost and is never touched.
+        self._fill_cost_from_prices()
         event = _event(
             event_id=self.id,
             trace_id=self.trace_id,
@@ -1545,6 +1598,36 @@ class _Generation:
         validated_currency = _validate_currency(currency)
         self.cost = cost
         self.currency = validated_currency
+
+    def _fill_cost_from_prices(self) -> None:
+        """Derive cost from a configured price table when the caller set none.
+
+        Fires only when ``configure(model_prices=...)`` holds an entry whose name
+        matches this generation's model, usage is present, and no explicit
+        ``set_cost(...)`` already ran (``self.cost is None``). The per-token
+        ``input``/``output`` rates are multiplied by the matching token counts and
+        routed through ``set_cost`` so the same validation, currency handling, and
+        total derivation apply. An explicit cost always wins because this is a
+        no-op once ``self.cost`` is set, and a usage lacking the needed token split
+        (so neither side can be priced) leaves the cost unset.
+        """
+
+        if self.cost is not None or self.usage is None or self.model is None:
+            return
+        price = _price_for_model(self.model)
+        if price is None:
+            return
+        input_tokens = self.usage.get("input_tokens")
+        output_tokens = self.usage.get("output_tokens")
+        input_cost = (
+            price.input * input_tokens if price.input is not None and input_tokens is not None else None
+        )
+        output_cost = (
+            price.output * output_tokens if price.output is not None and output_tokens is not None else None
+        )
+        if input_cost is None and output_cost is None:
+            return
+        self.set_cost(input_cost=input_cost, output_cost=output_cost, currency=price.currency)
 
 
 class _ToolCall:
@@ -2446,6 +2529,78 @@ def _validate_currency(value: Any) -> str:
     if not value:
         raise ValueError("bir currency must not be empty")
     return value
+
+
+def _validate_model_prices(value: Any) -> tuple[tuple[str, _ModelPrice], ...]:
+    """Validate and normalize the opt-in ``model_prices`` table.
+
+    Accepts a mapping of model name to a rates mapping, validating each entry once
+    here so a bad table fails at ``configure`` time rather than on a later
+    generation. Returns a name-sorted tuple of ``(model, _ModelPrice)`` pairs so
+    the result is immutable and hashable on ``_Config``. An empty mapping is valid
+    and clears any previously configured table.
+    """
+
+    if not isinstance(value, Mapping):
+        raise TypeError("bir model_prices must be a mapping of model name to rates")
+    if len(value) > _MAX_MODEL_PRICES:
+        raise ValueError(f"bir model_prices must not exceed {_MAX_MODEL_PRICES} entries")
+    normalized: list[tuple[str, _ModelPrice]] = []
+    for model, rates in value.items():
+        if not isinstance(model, str):
+            raise TypeError("bir model_prices keys must be model-name strings")
+        if not model:
+            raise ValueError("bir model_prices keys must not be empty")
+        normalized.append((model, _validate_model_price(rates, model)))
+    normalized.sort(key=lambda item: item[0])
+    return tuple(normalized)
+
+
+def _validate_model_price(value: Any, model: str) -> _ModelPrice:
+    """Validate one model's rate mapping into a frozen ``_ModelPrice``.
+
+    Requires a mapping that sets at least one of the per-token ``input``/``output``
+    rates, each validated as a non-negative, finite number (rejecting booleans),
+    rejects any unknown rate key, and accepts an optional ``currency`` (default
+    ``"USD"``) validated like ``set_cost``'s currency.
+    """
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"bir model_prices[{model!r}] must be a mapping of rates")
+    unknown = [key for key in value if key not in _MODEL_PRICE_RATE_KEYS]
+    if unknown:
+        listed = ", ".join(sorted(repr(key) for key in unknown))
+        raise ValueError(f"bir model_prices[{model!r}] has unknown rate keys: {listed}")
+    input_rate = value.get("input")
+    output_rate = value.get("output")
+    if input_rate is None and output_rate is None:
+        raise ValueError(f"bir model_prices[{model!r}] must set at least one of 'input' or 'output'")
+    validated_input = (
+        _validate_non_negative_number(input_rate, f"model_prices[{model!r}].input")
+        if input_rate is not None
+        else None
+    )
+    validated_output = (
+        _validate_non_negative_number(output_rate, f"model_prices[{model!r}].output")
+        if output_rate is not None
+        else None
+    )
+    currency = value.get("currency", "USD")
+    return _ModelPrice(input=validated_input, output=validated_output, currency=_validate_currency(currency))
+
+
+def _price_for_model(model: str) -> _ModelPrice | None:
+    """Return the configured price entry whose model name matches, or ``None``.
+
+    Reads the immutable, validated table on the active config. The table is empty
+    by default, so with no ``configure(model_prices=...)`` this is a cheap miss
+    and generation cost behavior is unchanged.
+    """
+
+    for name, price in _config.model_prices:
+        if name == model:
+            return price
+    return None
 
 
 def _event_sort_key(event: TraceEvent) -> tuple[str, int, str, str]:
