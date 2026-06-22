@@ -38,9 +38,11 @@ Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
 Inspect them from the command line without a server: `bir traces` lists recorded
-traces, and `bir show <trace-id>` prints one trace as an indented tree of its
-spans, generations, tool calls, and scores (add `--json` for a structured form).
-See [CLI & environment](docs/site/cli-env.md).
+traces, `bir show <trace-id>` prints one trace as an indented tree of its spans,
+generations, tool calls, and scores, and `bir stats` summarizes trace counts,
+token usage, cost per currency, and latency (count, mean, and p95) for a quick
+cost or health check (add `--json` to any of them for a structured form). See
+[CLI & environment](docs/site/cli-env.md).
 
 When capture is on, Bir redacts common secret-like fields and text before
 anything is written. Those built-in rules always apply and cannot be turned off,

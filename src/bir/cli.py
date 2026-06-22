@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import __version__, _sdk
-from ._sdk import LoadedTrace, TraceEvent, _event_sort_key, load_traces, send_events
+from ._sdk import LoadedTrace, TraceEvent, _event_sort_key, load_events, load_traces, send_events
 from .evals import ExperimentSummary, compare_experiments, list_experiments, send_experiment
 from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
 
@@ -73,6 +73,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     show.add_argument("--json", action="store_true", help="Emit a nested JSON tree instead of an indented tree.")
     show.set_defaults(func=_cmd_show)
+
+    stats = subparsers.add_parser(
+        "stats",
+        help="Summarize local traces: counts, token usage, cost, and latency.",
+    )
+    stats.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
+    stats.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also read size-rotated trace files (oldest first) alongside the active file.",
+    )
+    stats.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
+    stats.set_defaults(func=_cmd_stats)
 
     tail = subparsers.add_parser("tail", help="Follow the trace file and print new events as they are written.")
     tail.add_argument("--path", help="Trace JSONL file to follow (default: .bir/traces.jsonl).")
@@ -303,6 +316,117 @@ def _format_event_line(event: TraceEvent, depth: int) -> str:
 
 def _format_usage(usage: dict[str, int | float]) -> str:
     return ", ".join(f"{key}={usage[key]}" for key in sorted(usage))
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    traces = load_traces(args.path, include_rotated=args.include_rotated)
+    events = load_events(args.path, include_rotated=args.include_rotated)
+    stats = _aggregate_stats(traces, events)
+
+    if args.json:
+        _dump_json(stats, sys.stdout)
+        return 0
+
+    _print_table(("METRIC", "VALUE"), _stats_rows(stats), sys.stdout)
+    return 0
+
+
+def _aggregate_stats(traces: list[LoadedTrace], events: list[TraceEvent]) -> dict[str, Any]:
+    """Summarize traces and events into a JSON-serializable figures mapping.
+
+    Trace-level figures (counts and latency) come from ``traces``; token and cost
+    figures are summed over generation events in ``events``. Costs are grouped by
+    currency code and never summed across currencies, so a store mixing USD and
+    EUR reports one line each. Latency mean and p95 are ``None`` when there are no
+    traces. The same mapping backs both the table and ``--json`` so their figures
+    cannot drift apart.
+    """
+
+    success = sum(1 for trace in traces if trace.status == "success")
+    error = sum(1 for trace in traces if trace.status == "error")
+
+    input_tokens: int | float = 0
+    output_tokens: int | float = 0
+    total_tokens: int | float = 0
+    costs: dict[str, dict[str, int | float]] = {}
+    for event in events:
+        if event.type != "generation":
+            continue
+        if event.usage:
+            input_tokens += event.usage.get("input_tokens", 0)
+            output_tokens += event.usage.get("output_tokens", 0)
+            total_tokens += event.usage.get("total_tokens", 0)
+        if event.cost:
+            # Fall back to the SDK's default currency so a cost recorded without
+            # an explicit code still lands in its own bucket rather than nowhere.
+            currency = event.currency or "USD"
+            bucket = costs.setdefault(currency, {"input_cost": 0, "output_cost": 0, "total_cost": 0})
+            bucket["input_cost"] += event.cost.get("input_cost", 0)
+            bucket["output_cost"] += event.cost.get("output_cost", 0)
+            bucket["total_cost"] += event.cost.get("total_cost", 0)
+
+    durations = sorted(trace.duration_ms for trace in traces)
+    latency: dict[str, Any] = {
+        "count": len(durations),
+        "mean": (sum(durations) / len(durations)) if durations else None,
+        "p95": _percentile(durations, 95) if durations else None,
+    }
+
+    return {
+        "traces": {"total": len(traces), "success": success, "error": error},
+        "tokens": {"input": input_tokens, "output": output_tokens, "total": total_tokens},
+        "cost": [{"currency": currency, **costs[currency]} for currency in sorted(costs)],
+        "latency_ms": latency,
+    }
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float:
+    """Return the nearest-rank ``percentile`` of pre-sorted ``sorted_values``.
+
+    Uses the nearest-rank method (sort, then index) so only the standard library
+    is needed: the ordinal rank ``ceil(percentile / 100 * N)`` selects the 1-based
+    position whose value is returned, clamped into range for safety. Callers pass
+    a non-empty list.
+    """
+
+    size = len(sorted_values)
+    rank = math.ceil(percentile / 100 * size)
+    index = min(max(rank, 1), size) - 1
+    return sorted_values[index]
+
+
+def _stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    """Flatten the stats mapping into aligned ``(metric, value)`` table rows."""
+
+    traces = stats["traces"]
+    tokens = stats["tokens"]
+    latency = stats["latency_ms"]
+    rows: list[tuple[str, str]] = [
+        ("traces", str(traces["total"])),
+        ("success", str(traces["success"])),
+        ("error", str(traces["error"])),
+        ("input_tokens", str(tokens["input"])),
+        ("output_tokens", str(tokens["output"])),
+        ("total_tokens", str(tokens["total"])),
+    ]
+    if stats["cost"]:
+        for entry in stats["cost"]:
+            value = (
+                f"input={_format_cost(entry['input_cost'])} "
+                f"output={_format_cost(entry['output_cost'])} "
+                f"total={_format_cost(entry['total_cost'])}"
+            )
+            rows.append((f"cost[{entry['currency']}]", value))
+    else:
+        rows.append(("cost", "-"))
+    rows.append(("latency_count", str(latency["count"])))
+    rows.append(("latency_mean", _format_ms(latency["mean"]) if latency["mean"] is not None else "-"))
+    rows.append(("latency_p95", _format_ms(latency["p95"]) if latency["p95"] is not None else "-"))
+    return rows
+
+
+def _format_cost(value: int | float) -> str:
+    return f"{value:.6f}"
 
 
 def _cmd_experiments(args: argparse.Namespace) -> int:

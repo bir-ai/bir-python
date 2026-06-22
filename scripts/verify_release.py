@@ -368,11 +368,13 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
 
     # The console_scripts entry point must be installed by the real wheel and be
     # invokable as ``bir``. ``--version`` exercises the SDK import path and
-    # ``traces`` exercises a subcommand (no local traces exist, so it exits 0).
+    # ``traces``/``stats`` exercise subcommands (no local traces exist, so they
+    # exit 0).
     if console_scripts():
         bir_script = smoke_env / "bin" / "bir"
         run([str(bir_script), "--version"], cwd=smoke_dir, label="installed bir --version")
         run([str(bir_script), "traces"], cwd=smoke_dir, label="installed bir traces")
+        run([str(bir_script), "stats"], cwd=smoke_dir, label="installed bir stats")
 
 
 def package_version() -> str:

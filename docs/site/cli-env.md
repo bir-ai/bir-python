@@ -10,6 +10,8 @@ bir traces                    # list local traces, newest first
 bir traces --limit 20 --json  # machine-readable output
 bir show <trace-id>           # print one trace as an indented event tree
 bir show <trace-id> --json    # nested {event, children} JSON tree
+bir stats                     # summarize counts, tokens, cost, and latency
+bir stats --json              # the same figures as machine-readable JSON
 bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
 bir send                      # send events to the default local server
@@ -21,6 +23,7 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 | --- | --- |
 | `bir traces [--path P] [--limit N] [--json] [--include-rotated]` | List trace time, status, duration, event count, and name. |
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
+| `bir stats [--path P] [--include-rotated] [--json]` | Summarize trace counts, token usage, cost per currency, and latency. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
@@ -38,7 +41,18 @@ on generations and the value on scores. `--json` emits a deterministic nested
 `{"event": ..., "children": [...]}` tree of the same data for scripts. An unknown
 trace id prints nothing to stdout and exits non-zero.
 
-`--include-rotated` on `bir traces`, `bir show`, and `bir send` also reads
+`bir stats` aggregates the same local traces into a one-screen summary: the total
+trace count with the success and error splits, summed input/output/total token
+usage over generation events, summed cost grouped by currency, and trace latency
+count, mean, and p95 (the nearest-rank 95th percentile, computed with the standard
+library). Costs in different currencies are reported on their own lines and never
+summed together, so a store mixing USD and EUR shows both. `--json` emits the same
+figures as a deterministic object for scripts. An empty store exits 0 with zeroed
+counts and `-` latency. Latency is read from each trace's root duration, so partial
+traces split across rotated files are counted only when `--include-rotated` brings
+in their root.
+
+`--include-rotated` on `bir traces`, `bir show`, `bir stats`, and `bir send` also reads
 size-rotated trace files (`traces.jsonl.1` ..) created by
 `configure(max_bytes=...)`, oldest-first alongside the active file. It is off by
 default, so these commands operate on the active file only unless the flag is
@@ -54,7 +68,7 @@ an invalid server response fail immediately. See
 
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
-and `experiments` is suitable for scripts.
+`stats`, and `experiments` is suitable for scripts.
 
 ## Environment configuration
 

@@ -12,18 +12,21 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import bir
 from bir import cli
-from bir._sdk import _reset_config_for_tests
+from bir._sdk import LoadedTrace, TraceEvent, _reset_config_for_tests
+from bir.cli import _aggregate_stats, _percentile
 from bir.evals import Dataset, DatasetExample, contains, custom_evaluator, exact_match, run_experiment
 
 
@@ -141,6 +144,105 @@ def run_faq_experiment(directory: Path) -> str:
         path=directory / "faq.jsonl",
     )
     return result.id
+
+
+def write_stats_traces(trace_path: Path) -> None:
+    """Record two successful traces (each with usage and USD cost) and one error trace.
+
+    Each successful ``ok`` call records a generation carrying 10/20 input/output
+    tokens and 0.001/0.002 USD input/output cost, plus a score. The ``boom`` call
+    raises so its trace root is recorded with an ``error`` status. The totals are
+    therefore 20/40/60 tokens and 0.002/0.004/0.006 USD across three traces.
+    """
+
+    bir.configure(trace_path=trace_path)
+
+    @bir.observe()
+    def ok(question: str) -> str:
+        with bir.generation("local.llm", model="demo-model") as gen:
+            gen.set_output("ok")
+            gen.set_usage(input_tokens=10, output_tokens=20)
+            gen.set_cost(input_cost=0.001, output_cost=0.002, currency="USD")
+        bir.score("helpfulness", 0.9)
+        return "ok"
+
+    @bir.observe()
+    def boom(question: str) -> str:
+        raise ValueError("nope")
+
+    ok("a")
+    ok("b")
+    try:
+        boom("c")
+    except ValueError:
+        pass
+
+
+def write_multi_currency_trace(trace_path: Path) -> None:
+    """Record one trace whose generations bill 0.01 USD and 0.02 EUR separately."""
+
+    bir.configure(trace_path=trace_path)
+
+    @bir.observe()
+    def mixed(question: str) -> str:
+        with bir.generation("usd.llm") as gen:
+            gen.set_cost(total_cost=0.01, currency="USD")
+        with bir.generation("eur.llm") as gen:
+            gen.set_cost(total_cost=0.02, currency="EUR")
+        return "ok"
+
+    mixed("a")
+
+
+def make_event(**overrides: Any) -> TraceEvent:
+    """Build a TraceEvent with safe defaults, overriding only the fields a test sets."""
+
+    fields: dict[str, Any] = dict(
+        id="e",
+        trace_id="t",
+        parent_id=None,
+        name="n",
+        type="trace",
+        start_time="2024-01-01T00:00:00",
+        end_time="2024-01-01T00:00:00",
+        status="success",
+        metadata={},
+        input=None,
+        output=None,
+        error=None,
+        raw={},
+    )
+    fields.update(overrides)
+    return TraceEvent(**fields)
+
+
+def make_generation(**overrides: Any) -> TraceEvent:
+    return make_event(type="generation", **overrides)
+
+
+def make_trace(trace_id: str, duration_ms: float, *, status: str = "success") -> LoadedTrace:
+    """Build a LoadedTrace whose root spans exactly ``duration_ms`` milliseconds."""
+
+    start = "2024-01-01T00:00:00"
+    end = (datetime.fromisoformat(start) + timedelta(milliseconds=duration_ms)).isoformat()
+    root = make_event(id=trace_id, trace_id=trace_id, type="trace", status=status, start_time=start, end_time=end)
+    return LoadedTrace(
+        id=trace_id, name="n", start_time=start, end_time=end, status=status, events=[root], root=root
+    )
+
+
+def stats_table_map(out: str) -> dict[str, str]:
+    """Parse a ``bir stats`` table into a ``{metric: value}`` mapping.
+
+    Columns are separated by two or more spaces, so splitting on that gap keeps
+    the cost value's single-spaced ``input=.. output=.. total=..`` text intact.
+    """
+
+    rows: dict[str, str] = {}
+    for line in out.splitlines()[1:]:  # skip the METRIC/VALUE header
+        metric, value = re.split(r"\s{2,}", line, maxsplit=1)
+        rows[metric] = value
+    return rows
 
 
 class CliBaseTest(unittest.TestCase):
@@ -336,6 +438,194 @@ class ShowCommandTests(CliBaseTest):
             self.assertEqual(code, 0)
             self.assertEqual(err, "")
             self.assertTrue(out.startswith("trace answer [success] "))
+
+
+class StatsCommandTests(CliBaseTest):
+    def test_table_reports_counts_tokens_cost_and_latency(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            code, out, err = run_cli("stats", "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(out.splitlines()[0].split(), ["METRIC", "VALUE"])
+            rows = stats_table_map(out)
+            self.assertEqual(rows["traces"], "3")
+            self.assertEqual(rows["success"], "2")
+            self.assertEqual(rows["error"], "1")
+            self.assertEqual(rows["input_tokens"], "20")
+            self.assertEqual(rows["output_tokens"], "40")
+            self.assertEqual(rows["total_tokens"], "60")
+            self.assertEqual(rows["cost[USD]"], "input=0.002000 output=0.004000 total=0.006000")
+            self.assertEqual(rows["latency_count"], "3")
+            self.assertTrue(rows["latency_mean"].endswith("ms"))
+            self.assertTrue(rows["latency_p95"].endswith("ms"))
+
+    def test_json_reports_figures_and_is_deterministic(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            code, out, err = run_cli("stats", "--path", str(trace_path), "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"], {"total": 3, "success": 2, "error": 1})
+            self.assertEqual(payload["tokens"], {"input": 20, "output": 40, "total": 60})
+            self.assertEqual(payload["latency_ms"]["count"], 3)
+            self.assertIsInstance(payload["latency_ms"]["mean"], float)
+            self.assertIsInstance(payload["latency_ms"]["p95"], float)
+            self.assertEqual(len(payload["cost"]), 1)
+            usd = payload["cost"][0]
+            self.assertEqual(usd["currency"], "USD")
+            self.assertAlmostEqual(usd["input_cost"], 0.002)
+            self.assertAlmostEqual(usd["output_cost"], 0.004)
+            self.assertAlmostEqual(usd["total_cost"], 0.006)
+
+            # Re-running over the same store yields byte-identical JSON.
+            _code, out_again, _err = run_cli("stats", "--path", str(trace_path), "--json")
+            self.assertEqual(out, out_again)
+
+    def test_currencies_are_reported_separately(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_multi_currency_trace(trace_path)
+
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--json")
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            # Two distinct currency lines, sorted by code and never summed together.
+            self.assertEqual([entry["currency"] for entry in payload["cost"]], ["EUR", "USD"])
+            by_currency = {entry["currency"]: entry for entry in payload["cost"]}
+            self.assertAlmostEqual(by_currency["EUR"]["total_cost"], 0.02)
+            self.assertAlmostEqual(by_currency["USD"]["total_cost"], 0.01)
+
+            # The table form lists both currencies as their own rows.
+            _code, table, _err = run_cli("stats", "--path", str(trace_path))
+            rows = stats_table_map(table)
+            self.assertIn("cost[EUR]", rows)
+            self.assertIn("cost[USD]", rows)
+
+    def test_empty_input_exits_zero_with_zeroed_output(self) -> None:
+        with temporary_workdir() as workdir:
+            missing = workdir / "absent.jsonl"
+
+            code, out, err = run_cli("stats", "--path", str(missing), "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(
+                json.loads(out),
+                {
+                    "cost": [],
+                    "latency_ms": {"count": 0, "mean": None, "p95": None},
+                    "tokens": {"input": 0, "output": 0, "total": 0},
+                    "traces": {"total": 0, "success": 0, "error": 0},
+                },
+            )
+
+            # The table form also exits 0, zeroing counts and dashing absent figures.
+            code, table, _err = run_cli("stats", "--path", str(missing))
+            self.assertEqual(code, 0)
+            rows = stats_table_map(table)
+            self.assertEqual(rows["traces"], "0")
+            self.assertEqual(rows["total_tokens"], "0")
+            self.assertEqual(rows["cost"], "-")
+            self.assertEqual(rows["latency_mean"], "-")
+            self.assertEqual(rows["latency_p95"], "-")
+
+    def test_include_rotated_counts_rotated_traces(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+
+            # The default read counts only the active file's single trace.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["traces"]["total"], 1)
+
+            # --include-rotated also counts the rotated sibling.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--include-rotated", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["traces"]["total"], 2)
+
+
+class AggregateStatsTests(unittest.TestCase):
+    """Unit-level coverage of the aggregation helper with controlled inputs."""
+
+    def test_sums_tokens_and_groups_cost_by_currency(self) -> None:
+        events = [
+            make_generation(
+                usage={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                cost={"input_cost": 0.001, "output_cost": 0.002, "total_cost": 0.003},
+                currency="USD",
+            ),
+            make_generation(
+                usage={"input_tokens": 4, "output_tokens": 6, "total_tokens": 10},
+                cost={"input_cost": 0.004, "output_cost": 0.006, "total_cost": 0.010},
+                currency="USD",
+            ),
+            make_generation(
+                usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                cost={"input_cost": 0.01, "output_cost": 0.02, "total_cost": 0.03},
+                currency="EUR",
+            ),
+            make_event(type="span"),  # not a generation: ignored
+            make_generation(),  # generation without usage or cost: contributes nothing
+        ]
+
+        stats = _aggregate_stats([], events)
+
+        self.assertEqual(stats["tokens"], {"input": 15, "output": 27, "total": 42})
+        self.assertEqual([entry["currency"] for entry in stats["cost"]], ["EUR", "USD"])
+        by_currency = {entry["currency"]: entry for entry in stats["cost"]}
+        self.assertAlmostEqual(by_currency["USD"]["input_cost"], 0.005)
+        self.assertAlmostEqual(by_currency["USD"]["output_cost"], 0.008)
+        self.assertAlmostEqual(by_currency["USD"]["total_cost"], 0.013)
+        self.assertAlmostEqual(by_currency["EUR"]["total_cost"], 0.03)
+
+    def test_latency_mean_and_p95_over_trace_durations(self) -> None:
+        traces = [make_trace(f"t{i}", duration) for i, duration in enumerate([100.0, 200.0, 300.0, 400.0])]
+
+        stats = _aggregate_stats(traces, [])
+
+        self.assertEqual(stats["traces"], {"total": 4, "success": 4, "error": 0})
+        self.assertEqual(stats["latency_ms"]["count"], 4)
+        self.assertAlmostEqual(stats["latency_ms"]["mean"], 250.0)
+        # Nearest-rank p95 of four values selects the largest: ceil(0.95*4)=4 -> index 3.
+        self.assertAlmostEqual(stats["latency_ms"]["p95"], 400.0)
+
+    def test_counts_success_and_error_traces(self) -> None:
+        traces = [
+            make_trace("ok1", 10.0),
+            make_trace("ok2", 20.0),
+            make_trace("bad", 30.0, status="error"),
+        ]
+
+        stats = _aggregate_stats(traces, [])
+
+        self.assertEqual(stats["traces"], {"total": 3, "success": 2, "error": 1})
+
+    def test_empty_inputs_yield_zeroed_figures(self) -> None:
+        stats = _aggregate_stats([], [])
+
+        self.assertEqual(stats["traces"], {"total": 0, "success": 0, "error": 0})
+        self.assertEqual(stats["tokens"], {"input": 0, "output": 0, "total": 0})
+        self.assertEqual(stats["cost"], [])
+        self.assertEqual(stats["latency_ms"], {"count": 0, "mean": None, "p95": None})
+
+
+class PercentileTests(unittest.TestCase):
+    def test_nearest_rank_selection(self) -> None:
+        self.assertEqual(_percentile([10.0], 95), 10.0)
+        self.assertEqual(_percentile([float(n) for n in range(1, 11)], 95), 10.0)
+        self.assertEqual(_percentile([float(n) for n in range(1, 21)], 95), 19.0)
+        self.assertEqual(_percentile([float(n) for n in range(1, 101)], 95), 95.0)
+        self.assertEqual(_percentile([1.0, 2.0, 3.0, 4.0], 50), 2.0)
 
 
 class ExperimentsCommandTests(CliBaseTest):

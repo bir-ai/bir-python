@@ -19,6 +19,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir stats` command that aggregates local traces into a quick usage, cost, and
+  health summary: the total trace count with success/error splits, summed
+  input/output/total token usage over generation events, summed cost grouped by
+  currency (different currencies are reported separately and never summed), and
+  trace latency count, mean, and p95. The p95 is the nearest-rank 95th percentile
+  computed with the standard library only. `--json` emits the same figures as a
+  deterministic object, `--path`/`--include-rotated` resolve the same files as
+  `bir traces`, and an empty store exits 0 with zeroed counts. It reuses the
+  public `load_traces`/`load_events` loaders and adds no runtime dependency or
+  schema change.
 - `bir show <trace-id>` command that prints one recorded trace as an indented
   event tree ordered by parent/child, showing each event's type, name, status,
   and duration plus the model and token usage on generations and the value on
