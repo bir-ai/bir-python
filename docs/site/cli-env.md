@@ -8,6 +8,8 @@ local data and sending it to a server.
 ```bash
 bir traces                    # list local traces, newest first
 bir traces --limit 20 --json  # machine-readable output
+bir show <trace-id>           # print one trace as an indented event tree
+bir show <trace-id> --json    # nested {event, children} JSON tree
 bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
 bir send                      # send events to the default local server
@@ -18,6 +20,7 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 | Command | What it does |
 | --- | --- |
 | `bir traces [--path P] [--limit N] [--json] [--include-rotated]` | List trace time, status, duration, event count, and name. |
+| `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
@@ -28,11 +31,19 @@ Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
 default; experiment listing uses `.bir/experiments`; send commands target
 `http://127.0.0.1:8000`.
 
-`--include-rotated` on `bir traces` and `bir send` also reads size-rotated trace
-files (`traces.jsonl.1` ..) created by `configure(max_bytes=...)`, oldest-first
-alongside the active file. It is off by default, so both commands operate on the
-active file only unless the flag is passed. `bir send --include-rotated`
-deduplicates events by ID when a rotated file overlaps the active one.
+`bir show TRACE_ID` reads the same files as `bir traces`, finds the trace with
+that id, and renders its events as a tree ordered by parent/child: each line
+shows the event type, name, status, and duration, plus the model and token usage
+on generations and the value on scores. `--json` emits a deterministic nested
+`{"event": ..., "children": [...]}` tree of the same data for scripts. An unknown
+trace id prints nothing to stdout and exits non-zero.
+
+`--include-rotated` on `bir traces`, `bir show`, and `bir send` also reads
+size-rotated trace files (`traces.jsonl.1` ..) created by
+`configure(max_bytes=...)`, oldest-first alongside the active file. It is off by
+default, so these commands operate on the active file only unless the flag is
+passed. `bir send --include-rotated` deduplicates events by ID when a rotated
+file overlaps the active one.
 
 `bir send-experiment` retries transient upload failures (network errors,
 timeouts, and HTTP 5xx) with exponential backoff. `--retries` (default `2`) and
@@ -42,8 +53,8 @@ an invalid server response fail immediately. See
 [Sending to a Server](sending.md#retry-behavior).
 
 Commands print failures to stderr and exit non-zero for missing or malformed
-files, server failures, and failed eval gates. JSON output on `traces` and
-`experiments` is suitable for scripts.
+files, server failures, and failed eval gates. JSON output on `traces`, `show`,
+and `experiments` is suitable for scripts.
 
 ## Environment configuration
 

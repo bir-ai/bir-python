@@ -99,6 +99,31 @@ def write_active_and_rotated_trace(trace_path: Path) -> None:
     answer("second")
 
 
+def write_rich_trace(trace_path: Path) -> str:
+    """Record one trace with a nested span, a generation, and a score; return its id.
+
+    The body produces every event type ``bir show`` renders specially: a span
+    nested inside another span (to exercise depth), a generation carrying a model
+    and token usage, and a score carrying a value.
+    """
+
+    bir.configure(trace_path=trace_path)
+
+    @bir.observe()
+    def answer(question: str) -> str:
+        with bir.span("outer"):
+            with bir.span("inner"):
+                pass
+        with bir.generation("local.llm", model="demo-model") as gen:
+            gen.set_output("ok")
+            gen.set_usage(input_tokens=12, output_tokens=24)
+        bir.score("helpfulness", 0.9)
+        return "ok"
+
+    answer("hello")
+    return bir.load_traces(trace_path)[0].id
+
+
 def run_faq_experiment(directory: Path) -> str:
     """Run a small deterministic experiment under ``directory`` and return its id."""
 
@@ -210,6 +235,107 @@ class TracesCommandTests(CliBaseTest):
             code, out, err = run_cli("traces", "--path", str(trace_path), "--include-rotated", "--json")
             self.assertEqual(code, 0)
             self.assertEqual(len(json.loads(out)), 2)
+
+
+class ShowCommandTests(CliBaseTest):
+    def test_renders_event_tree_with_salient_extras(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_id = write_rich_trace(trace_path)
+
+            code, out, err = run_cli("show", trace_id, "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            lines = out.splitlines()
+            # The root trace heads the tree, with every other event indented beneath it.
+            self.assertTrue(lines[0].startswith("trace answer [success] "))
+            self.assertTrue(all(line.startswith("  ") for line in lines[1:]))
+            # A generation surfaces its model and usage; a score surfaces its value.
+            gen_line = next(line for line in lines if "generation local.llm" in line)
+            self.assertIn("model=demo-model", gen_line)
+            self.assertIn("input_tokens=12", gen_line)
+            self.assertIn("output_tokens=24", gen_line)
+            score_line = next(line for line in lines if "score helpfulness" in line)
+            self.assertIn("value=0.9", score_line)
+
+    def test_nested_events_indent_by_depth(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_id = write_rich_trace(trace_path)
+
+            code, out, _ = run_cli("show", trace_id, "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            lines = out.splitlines()
+            outer = next(line for line in lines if "span outer" in line)
+            inner = next(line for line in lines if "span inner" in line)
+            # The inner span nests one level deeper than the outer span.
+            self.assertTrue(outer.startswith("  span outer"))
+            self.assertTrue(inner.startswith("    span inner"))
+
+    def test_json_output_is_a_deterministic_nested_tree(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_id = write_rich_trace(trace_path)
+
+            code, out, err = run_cli("show", trace_id, "--path", str(trace_path), "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(payload["event"]["id"], trace_id)
+            self.assertEqual(payload["event"]["type"], "trace")
+            self.assertIsNone(payload["event"]["parent_id"])
+            # The root's direct children are the span, generation, and score; all
+            # point back at the root.
+            child_types = sorted(child["event"]["type"] for child in payload["children"])
+            self.assertEqual(child_types, ["generation", "score", "span"])
+            self.assertTrue(all(child["event"]["parent_id"] == trace_id for child in payload["children"]))
+            # The salient extras ride along on the right node types.
+            generation = next(c for c in payload["children"] if c["event"]["type"] == "generation")
+            self.assertEqual(generation["event"]["model"], "demo-model")
+            self.assertEqual(generation["event"]["usage"]["input_tokens"], 12)
+            score = next(c for c in payload["children"] if c["event"]["type"] == "score")
+            self.assertEqual(score["event"]["value"], 0.9)
+            # The nested span is a grandchild, reached through the outer span.
+            outer = next(c for c in payload["children"] if c["event"]["name"] == "outer")
+            self.assertEqual([gc["event"]["name"] for gc in outer["children"]], ["inner"])
+
+            # Rendering again yields byte-identical output.
+            _code, out_again, _err = run_cli("show", trace_id, "--path", str(trace_path), "--json")
+            self.assertEqual(out, out_again)
+
+    def test_unknown_trace_id_exits_nonzero_with_clean_stdout(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_rich_trace(trace_path)
+
+            code, out, err = run_cli("show", "does-not-exist", "--path", str(trace_path))
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("bir:", err)
+            self.assertIn("not found", err)
+
+    def test_include_rotated_reads_rotated_trace(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+            # The older "first" trace was rotated into the sibling file.
+            rotated_id = bir.load_traces(trace_path, include_rotated=True)[0].id
+
+            # The default read resolves only the active file, so the rotated id is absent.
+            code, out, err = run_cli("show", rotated_id, "--path", str(trace_path))
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("not found", err)
+
+            # --include-rotated resolves the same files as `bir traces`, surfacing it.
+            code, out, err = run_cli("show", rotated_id, "--path", str(trace_path), "--include-rotated")
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertTrue(out.startswith("trace answer [success] "))
 
 
 class ExperimentsCommandTests(CliBaseTest):

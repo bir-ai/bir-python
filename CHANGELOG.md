@@ -19,6 +19,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir show <trace-id>` command that prints one recorded trace as an indented
+  event tree ordered by parent/child, showing each event's type, name, status,
+  and duration plus the model and token usage on generations and the value on
+  scores. `--json` emits a deterministic nested `{"event", "children"}` tree for
+  scripts, and `--path`/`--include-rotated` resolve the same files as
+  `bir traces`. An unknown trace id exits non-zero and prints nothing to stdout.
+  It reuses the public `load_traces` loader and adds no runtime dependency, schema
+  change, or fixture change.
 - Synchronous streaming for the Mistral, Cohere, and LiteLLM wrappers. Passing
   `stream=True` to `trace_chat` (`bir.integrations.mistral`),
   `bir.integrations.cohere.trace_chat`, or `trace_completion`

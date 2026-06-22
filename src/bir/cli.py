@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import __version__, _sdk
-from ._sdk import LoadedTrace, load_traces, send_events
+from ._sdk import LoadedTrace, TraceEvent, _event_sort_key, load_traces, send_events
 from .evals import ExperimentSummary, compare_experiments, list_experiments, send_experiment
 from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
 
@@ -62,6 +62,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also read size-rotated trace files (oldest first) alongside the active file.",
     )
     traces.set_defaults(func=_cmd_traces)
+
+    show = subparsers.add_parser("show", help="Show one recorded trace as an indented event tree.")
+    show.add_argument("trace_id", help="ID of the trace to show.")
+    show.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
+    show.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also read size-rotated trace files (oldest first) alongside the active file.",
+    )
+    show.add_argument("--json", action="store_true", help="Emit a nested JSON tree instead of an indented tree.")
+    show.set_defaults(func=_cmd_show)
 
     tail = subparsers.add_parser("tail", help="Follow the trace file and print new events as they are written.")
     tail.add_argument("--path", help="Trace JSONL file to follow (default: .bir/traces.jsonl).")
@@ -175,6 +186,123 @@ def _cmd_traces(args: argparse.Namespace) -> int:
     ]
     _print_table(("START", "STATUS", "DURATION", "EVENTS", "NAME"), rows, sys.stdout)
     return 0
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    trace = next(
+        (
+            candidate
+            for candidate in load_traces(args.path, include_rotated=args.include_rotated)
+            if candidate.id == args.trace_id
+        ),
+        None,
+    )
+    if trace is None:
+        print(
+            f"bir: trace {args.trace_id!r} not found in {_resolved_trace_path(args.path)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    children = _children_by_parent_id(trace.events)
+    if args.json:
+        _dump_json(_event_tree_to_dict(trace.root, children), sys.stdout)
+        return 0
+
+    for event, depth in _walk_event_tree(trace.root, children):
+        print(_format_event_line(event, depth))
+    return 0
+
+
+def _children_by_parent_id(events: list[TraceEvent]) -> dict[str | None, list[TraceEvent]]:
+    """Group events by ``parent_id``, ordering siblings by the SDK's event ordering."""
+
+    children: dict[str | None, list[TraceEvent]] = {}
+    for event in sorted(events, key=_event_sort_key):
+        children.setdefault(event.parent_id, []).append(event)
+    return children
+
+
+def _walk_event_tree(
+    root: TraceEvent, children: dict[str | None, list[TraceEvent]]
+) -> list[tuple[TraceEvent, int]]:
+    """Flatten the tree under ``root`` into ``(event, depth)`` pairs, parents first.
+
+    A ``seen`` guard keeps a malformed file whose ``parent_id`` links form a cycle
+    from recursing forever; each event is emitted at most once.
+    """
+
+    ordered: list[tuple[TraceEvent, int]] = []
+    seen: set[str] = set()
+
+    def visit(event: TraceEvent, depth: int) -> None:
+        if event.id in seen:
+            return
+        seen.add(event.id)
+        ordered.append((event, depth))
+        for child in children.get(event.id, []):
+            visit(child, depth + 1)
+
+    visit(root, 0)
+    return ordered
+
+
+def _event_tree_to_dict(
+    root: TraceEvent, children: dict[str | None, list[TraceEvent]]
+) -> dict[str, Any]:
+    """Build a nested ``{"event": ..., "children": [...]}`` mapping rooted at ``root``."""
+
+    seen: set[str] = set()
+
+    def build(event: TraceEvent) -> dict[str, Any]:
+        seen.add(event.id)
+        child_nodes: list[dict[str, Any]] = []
+        for child in children.get(event.id, []):
+            if child.id in seen:
+                continue
+            child_nodes.append(build(child))
+        return {"event": _event_to_dict(event), "children": child_nodes}
+
+    return build(root)
+
+
+def _event_to_dict(event: TraceEvent) -> dict[str, Any]:
+    """Represent one event with its identity and the salient extras shown in the tree."""
+
+    payload: dict[str, Any] = {
+        "id": event.id,
+        "parent_id": event.parent_id,
+        "type": event.type,
+        "name": event.name,
+        "status": event.status,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "duration_ms": event.duration_ms,
+    }
+    if event.model is not None:
+        payload["model"] = event.model
+    if event.usage is not None:
+        payload["usage"] = event.usage
+    if event.value is not None:
+        payload["value"] = event.value
+    return payload
+
+
+def _format_event_line(event: TraceEvent, depth: int) -> str:
+    """Render one tree row: indented type/name/status/duration plus salient extras."""
+
+    parts = [f"{event.type} {event.name} [{event.status}] {_format_ms(event.duration_ms)}"]
+    if event.model is not None:
+        parts.append(f"model={event.model}")
+    if event.usage is not None:
+        parts.append(f"usage={_format_usage(event.usage)}")
+    if event.value is not None:
+        parts.append(f"value={event.value}")
+    return "  " * depth + "  ".join(parts)
+
+
+def _format_usage(usage: dict[str, int | float]) -> str:
+    return ", ".join(f"{key}={usage[key]}" for key in sorted(usage))
 
 
 def _cmd_experiments(args: argparse.Namespace) -> int:

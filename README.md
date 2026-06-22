@@ -37,6 +37,11 @@ def answer_question(question: str) -> str:
 Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
+Inspect them from the command line without a server: `bir traces` lists recorded
+traces, and `bir show <trace-id>` prints one trace as an indented tree of its
+spans, generations, tool calls, and scores (add `--json` for a structured form).
+See [CLI & environment](docs/site/cli-env.md).
+
 When capture is on, Bir redacts common secret-like fields and text before
 anything is written. Those built-in rules always apply and cannot be turned off,
 but you can widen them for your own credential names and formats with
