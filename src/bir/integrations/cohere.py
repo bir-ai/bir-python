@@ -3,17 +3,25 @@
 The wrapper intentionally avoids importing the ``cohere`` package so the Bir SDK
 stays dependency-free. Applications pass a Cohere v2 ``client.chat`` callable;
 the wrapper invokes it inside a single Bir ``generation`` event and reads token
-usage from the nested Cohere response shape when present.
+usage from the nested Cohere response shape when present. The v2
+``client.chat_stream`` emits typed events, so ``stream=True`` records the
+accumulated text and final usage after the stream is consumed.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
-from ._common import _response_output, _string_or_none, _usage_tokens, _value
+from ._common import (
+    _is_streamed_response,
+    _response_output,
+    _string_or_none,
+    _usage_tokens,
+    _value,
+)
 
 
 def trace_chat(
@@ -34,6 +42,12 @@ def trace_chat(
     ``model`` keyword argument, and token usage is read from
     ``response.usage.tokens`` when present.
 
+    With ``stream=True`` (for example ``client.chat_stream``) the wrapper returns
+    a lazy iterable that yields the provider's events unchanged, assembles the
+    output from ``content-delta`` events (``delta.message.content.text``), and
+    reads the final usage from the terminal ``message-end``/``stream-end`` event
+    when the stream is exhausted, closed, or raises.
+
     Like ``bir.generation()``, this must run inside an active trace (for example a
     ``@observe()`` function or ``with bir.trace(...)``). The wrapper's own options
     are prefixed ``bir_`` so they never collide with Cohere ``chat`` keyword
@@ -43,6 +57,17 @@ def trace_chat(
     metadata: dict[str, Any] = {"integration": "cohere"}
     if bir_metadata:
         metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_chat(
+            chat,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
 
     with generation(
         bir_name,
@@ -55,6 +80,48 @@ def trace_chat(
         response = chat(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+def _stream_chat(
+    chat: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> Iterable[Any]:
+    with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = chat(*args, **kwargs)
+        if not _is_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            for event in stream:
+                text = _event_delta_text(event)
+                if text is not None:
+                    output_parts.append(text)
+
+                usage = _event_usage(event)
+                if usage is not None:
+                    last_usage = usage
+
+                yield event
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 async def trace_chat_async(
@@ -118,6 +185,27 @@ def _record_usage(gen: Any, usage: Any) -> None:
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
+
+
+def _event_delta_text(event: Any) -> str | None:
+    # Cohere v2 ``content-delta`` events carry incremental output text at
+    # ``delta.message.content.text``; other events (``message-start``,
+    # ``content-start``, ``content-end``, ``message-end``) expose no such text.
+    delta = _value(event, "delta")
+    message = _value(delta, "message")
+    content = _value(message, "content")
+    return _string_or_none(_value(content, "text"))
+
+
+def _event_usage(event: Any) -> Any:
+    # The terminal event carries token usage either on ``delta.usage`` (the v2
+    # ``message-end`` event) or on the nested ``response.usage`` (``stream-end``);
+    # both are usage objects with a ``tokens`` member ``_record_usage`` reads.
+    # Intermediate events expose neither, so the latest usage seen wins.
+    delta_usage = _value(_value(event, "delta"), "usage")
+    if delta_usage is not None:
+        return delta_usage
+    return _value(_value(event, "response"), "usage")
 
 
 def _request_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:

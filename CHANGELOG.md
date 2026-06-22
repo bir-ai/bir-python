@@ -19,6 +19,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Synchronous streaming for the Mistral, Cohere, and LiteLLM wrappers. Passing
+  `stream=True` to `trace_chat` (`bir.integrations.mistral`),
+  `bir.integrations.cohere.trace_chat`, or `trace_completion`
+  (`bir.integrations.litellm`) now returns a lazy iterable that yields the
+  provider's chunks unchanged in order and records the accumulated output text and
+  final token usage once the stream is consumed, instead of recording the
+  unconsumed stream object's repr with no usage. Mistral and LiteLLM read
+  OpenAI-shaped chunks (`choices[0].delta.content` and `usage` with
+  `prompt_tokens`/`completion_tokens`/`total_tokens`); Cohere v2 reads its typed
+  events (`content-delta` text at `delta.message.content.text` and the terminal
+  `message-end`/`stream-end` usage). The response model refines the request model
+  when chunks carry one. A provider that ignores streaming and returns a one-shot
+  response still records via the non-streaming path, and a mid-stream error
+  produces an error-status generation re-raised unchanged with the persisted error
+  text redacted. This matches the existing OpenAI/Anthropic/Gemini sync streaming
+  behavior; the async Mistral/Cohere/LiteLLM wrappers do not stream yet. No new
+  dependency, schema, or fixture change.
 - Async counterparts for the dependency-free provider wrappers, for applications
   using async provider clients (`AsyncOpenAI`, `AsyncAnthropic`, the `google-genai`
   async client, `litellm.acompletion`, and the async Mistral and Cohere clients).

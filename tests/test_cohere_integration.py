@@ -55,6 +55,50 @@ class FakeChatResponse:
         return dict(self._payload)
 
 
+class FakeContent:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+
+class FakeMessageDelta:
+    def __init__(self, content: object) -> None:
+        self.content = content
+
+
+class FakeEventDelta:
+    # A streaming event's ``delta`` carries either an incremental ``message``
+    # (``content-delta``) or terminal ``usage`` (``message-end``).
+    def __init__(self, *, message: object | None = None, usage: object | None = None) -> None:
+        self.message = message
+        self.usage = usage
+
+
+class FakeResponseSnapshot:
+    def __init__(self, *, usage: object | None = None) -> None:
+        self.usage = usage
+
+
+class FakeStreamEvent:
+    def __init__(self, *, delta: object | None = None, response: object | None = None) -> None:
+        self.delta = delta
+        self.response = response
+
+
+def _content_delta(text: str | None) -> FakeStreamEvent:
+    # A Cohere v2 ``content-delta`` event: text at ``delta.message.content.text``.
+    return FakeStreamEvent(delta=FakeEventDelta(message=FakeMessageDelta(FakeContent(text))))
+
+
+def _message_end(usage: object) -> FakeStreamEvent:
+    # A v2 ``message-end`` event carrying usage at ``delta.usage``.
+    return FakeStreamEvent(delta=FakeEventDelta(usage=usage))
+
+
+def _stream_end(usage: object) -> FakeStreamEvent:
+    # The older ``stream-end`` event carrying usage at ``response.usage``.
+    return FakeStreamEvent(response=FakeResponseSnapshot(usage=usage))
+
+
 class CohereIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -167,6 +211,106 @@ class CohereIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_events_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            events = [
+                _content_delta("Bir "),
+                _content_delta("streams"),
+                _message_end(FakeUsage(tokens=FakeTokens(input_tokens=12, output_tokens=6))),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_stream(**kwargs: object) -> list[FakeStreamEvent]:
+                received.update(kwargs)
+                return events
+
+            consumed: list[FakeStreamEvent] = []
+            with trace("chat"):
+                stream = trace_chat(
+                    fake_stream,
+                    model="command-a-03-2025",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                )
+                consumed = list(stream)
+
+            # The events are yielded unchanged in order.
+            self.assertEqual(consumed, events)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "command-a-03-2025")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+
+    def test_reads_streamed_usage_from_stream_end_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            events = [
+                _content_delta("Bir"),
+                _stream_end(FakeUsage(tokens=FakeTokens(input_tokens=5, output_tokens=2))),
+            ]
+
+            def fake_stream(**kwargs: object) -> list[FakeStreamEvent]:
+                return events
+
+            with trace("chat"):
+                stream = trace_chat(fake_stream, model="command-a-03-2025", messages=[], stream=True)
+                self.assertEqual(list(stream), events)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir")
+            self.assertEqual(generation_event.usage, {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def fake_chat(**kwargs: object) -> FakeChatResponse:
+                # A provider that ignores ``stream=True`` and returns one response.
+                return FakeChatResponse(
+                    usage=FakeUsage(tokens=FakeTokens(input_tokens=7, output_tokens=3)),
+                    payload={"message": {"content": "One shot."}},
+                )
+
+            consumed: list[FakeChatResponse] = []
+            with trace("chat"):
+                stream = trace_chat(fake_chat, model="command-a-03-2025", messages=[], stream=True)
+                consumed = list(stream)
+
+            # The non-streamed response is recorded in one piece; the iterator yields nothing.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "command-a-03-2025")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(generation_event.output["message"]["content"], "One shot.")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[FakeStreamEvent]:
+                yield _content_delta("partial api_key=sk-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-secret123")
+
+            def fake_stream(**kwargs: object) -> Iterator[FakeStreamEvent]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_chat(fake_stream, model="command-a-03-2025", messages=[], stream=True)
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

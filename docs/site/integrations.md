@@ -142,7 +142,9 @@ with trace("chat"):
 ```
 
 Bir reads the model, token usage, and `model_dump()` output when available and
-capture settings allow it.
+capture settings allow it. With `stream=True` (for example `client.chat.stream`)
+the wrapper returns a lazy iterable that yields the OpenAI-shaped chunks unchanged
+and records the accumulated text and final usage after the stream is consumed.
 
 ## Cohere
 
@@ -159,7 +161,10 @@ with trace("chat"):
 ```
 
 The wrapper records the request model and reads token usage from
-`response.usage.tokens` when present.
+`response.usage.tokens` when present. With `stream=True` (for example
+`client.chat_stream`) the wrapper yields the v2 events unchanged, accumulates text
+from `content-delta` events (`delta.message.content.text`), and reads usage from
+the terminal `message-end`/`stream-end` event after the stream is consumed.
 
 ## Google Gemini
 
@@ -231,7 +236,9 @@ with trace("chat"):
 ```
 
 The wrapper reads the OpenAI-shaped response and derives a provider metadata
-hint from the model prefix before `/`.
+hint from the model prefix before `/`. With `stream=True` the wrapper returns a
+lazy iterable that yields the OpenAI-shaped chunks unchanged and records the
+accumulated text and final usage after the stream is consumed.
 
 ## LangChain
 

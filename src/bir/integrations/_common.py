@@ -1,4 +1,4 @@
-"""Shared response-parsing helpers for the OpenAI, Anthropic, Google, and LiteLLM integrations.
+"""Shared response-parsing helpers for the dependency-free provider integrations.
 
 The wrappers read the model, token usage, and a serializable output from
 whatever object the provider call returns, and those values use the same shapes
@@ -45,6 +45,24 @@ def _response_output(response: Any) -> Any:
     if isinstance(response, Mapping):
         return dict(response)
     return response
+
+
+def _chunk_delta_content(chunk: Any) -> str | None:
+    """Return the incremental text from an OpenAI-shaped streaming chunk.
+
+    OpenAI Chat Completions, Mistral, and LiteLLM all emit chunks carrying output
+    text at ``choices[0].delta.content``. Chunks without a content delta (the
+    role-only opener, the usage-only final chunk, tool-call deltas) yield
+    ``None`` so the caller can skip them while accumulating the response text.
+    """
+
+    choices = _value(chunk, "choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+
+    delta = _value(choices[0], "delta")
+    content = _value(delta, "content")
+    return _string_or_none(content)
 
 
 def _is_streamed_response(response: Any) -> bool:

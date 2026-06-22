@@ -82,7 +82,11 @@ counterparts (`trace_chat_completion_async`, `trace_messages_async`,
 `trace_completion_async`, and so on) for async clients such as `AsyncOpenAI`,
 `AsyncAnthropic`, and `litellm.acompletion`. Each awaits the provider coroutine
 inside an active trace and records one generation; the streaming wrappers resolve
-to an async iterator you consume with `async for`, never buffering the stream.
+to an async iterator you consume with `async for`, never buffering the stream. The
+synchronous wrappers likewise accept `stream=True` — yielding the provider's
+chunks unchanged and recording the accumulated text and final token usage once
+the stream is consumed — across OpenAI (Chat Completions and Responses),
+Anthropic, Gemini, Mistral, Cohere, and LiteLLM.
 
 ## Local persistence and concurrency
 

@@ -56,6 +56,31 @@ class FakeModelResponse:
         return dict(self._payload)
 
 
+class FakeDelta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class FakeChoice:
+    def __init__(self, delta: FakeDelta) -> None:
+        self.delta = delta
+
+
+class FakeModelResponseChunk:
+    # LiteLLM normalizes streamed chunks to the OpenAI shape: a ``model``,
+    # ``choices[0].delta.content``, and a final ``usage`` when requested.
+    def __init__(
+        self,
+        *,
+        content: str | None = None,
+        usage: object | None = None,
+        model: str | None = "claude-3-5-sonnet-20241022",
+    ) -> None:
+        self.model = model
+        self.choices = [FakeChoice(FakeDelta(content))]
+        self.usage = usage
+
+
 class LiteLLMIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -196,6 +221,99 @@ class LiteLLMIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeModelResponseChunk(content="Bir "),
+                FakeModelResponseChunk(content="streams"),
+                FakeModelResponseChunk(
+                    content=None,
+                    usage=FakeUsage(prompt_tokens=11, completion_tokens=4, total_tokens=15),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_completion(**kwargs: object) -> list[FakeModelResponseChunk]:
+                received.update(kwargs)
+                return chunks
+
+            consumed: list[FakeModelResponseChunk] = []
+            with trace("chat"):
+                stream = trace_completion(
+                    fake_completion,
+                    model="anthropic/claude-3-5-sonnet",
+                    messages=[{"role": "user", "content": "Stream it"}],
+                    stream=True,
+                )
+                consumed = list(stream)
+
+            # The chunks are yielded unchanged in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            # The response model from the chunks refines the request model.
+            self.assertEqual(generation_event.model, "claude-3-5-sonnet-20241022")
+            # The provider hint is still derived on the streaming path.
+            self.assertEqual(generation_event.metadata["provider"], "anthropic")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def fake_completion(**kwargs: object) -> FakeModelResponse:
+                # A provider that ignores ``stream=True`` and returns one response.
+                return FakeModelResponse(
+                    model="claude-3-5-sonnet-20241022",
+                    usage=FakeUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+                    payload={"choices": [{"message": {"content": "One shot."}}]},
+                )
+
+            consumed: list[FakeModelResponse] = []
+            with trace("chat"):
+                stream = trace_completion(
+                    fake_completion, model="anthropic/claude-3-5-sonnet", messages=[], stream=True
+                )
+                consumed = list(stream)
+
+            # The non-streamed response is recorded in one piece; the iterator yields nothing.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "claude-3-5-sonnet-20241022")
+            self.assertEqual(generation_event.metadata["provider"], "anthropic")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(generation_event.output["choices"][0]["message"]["content"], "One shot.")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[FakeModelResponseChunk]:
+                yield FakeModelResponseChunk(content="partial api_key=sk-ant-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-ant-secret123")
+
+            def fake_completion(**kwargs: object) -> Iterator[FakeModelResponseChunk]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_completion(
+                    fake_completion, model="anthropic/claude-3-5-sonnet", messages=[], stream=True
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

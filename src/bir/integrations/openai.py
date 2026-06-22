@@ -18,6 +18,7 @@ from typing import Any
 from bir import generation
 
 from ._common import (
+    _chunk_delta_content,
     _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
@@ -245,16 +246,6 @@ def _record_usage(gen: Any, usage: Any) -> None:
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
-
-
-def _chunk_delta_content(chunk: Any) -> str | None:
-    choices = _value(chunk, "choices")
-    if not isinstance(choices, list) or not choices:
-        return None
-
-    delta = _value(choices[0], "delta")
-    content = _value(delta, "content")
-    return _string_or_none(content)
 
 
 def _request_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:

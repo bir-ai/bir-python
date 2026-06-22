@@ -8,16 +8,25 @@ reads the model and token usage from the OpenAI-shaped response when present.
 LiteLLM routes one ``completion`` call to many providers, so the provider is
 derived from the request ``model`` id (for example ``anthropic/claude-3-5-sonnet``)
 and recorded as ``metadata["provider"]`` for the dashboard's provider breakdown.
+LiteLLM normalizes streamed chunks to the OpenAI shape, so ``stream=True`` records
+the accumulated text and final usage after the stream is consumed.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
-from ._common import _response_output, _string_or_none, _usage_tokens, _value
+from ._common import (
+    _chunk_delta_content,
+    _is_streamed_response,
+    _response_output,
+    _string_or_none,
+    _usage_tokens,
+    _value,
+)
 
 
 def trace_completion(
@@ -39,6 +48,11 @@ def trace_completion(
     is derived from the request ``model`` id (the prefix before the first ``/``)
     and recorded as ``metadata["provider"]``.
 
+    With ``stream=True`` the wrapper returns a lazy iterable that yields the
+    provider's chunks unchanged and assembles the output from
+    ``choices[0].delta.content``, finalizing the model, output, and usage when the
+    stream is exhausted, closed, or raises.
+
     Like ``bir.generation()``, this must run inside an active trace (for example a
     ``@observe()`` function or ``with bir.trace(...)``). The wrapper's own options
     are prefixed ``bir_`` so they never collide with LiteLLM ``completion``
@@ -52,6 +66,17 @@ def trace_completion(
     if bir_metadata:
         metadata.update(bir_metadata)
 
+    if kwargs.get("stream") is True:
+        return _stream_completion(
+            completion,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
+
     with generation(
         bir_name,
         model=_string_or_none(kwargs.get("model")),
@@ -63,6 +88,52 @@ def trace_completion(
         response = completion(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+def _stream_completion(
+    completion: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> Iterable[Any]:
+    with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = completion(*args, **kwargs)
+        if not _is_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            for chunk in stream:
+                response_model = _string_or_none(_value(chunk, "model"))
+                if response_model is not None:
+                    gen.model = response_model
+
+                content = _chunk_delta_content(chunk)
+                if content is not None:
+                    output_parts.append(content)
+
+                usage = _value(chunk, "usage")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 async def trace_completion_async(
