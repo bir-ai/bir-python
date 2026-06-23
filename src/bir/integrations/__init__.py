@@ -2,7 +2,7 @@
 
 from . import cohere
 from .anthropic import trace_messages, trace_messages_async
-from .bedrock import trace_converse
+from .bedrock import trace_converse, trace_converse_stream
 from .google import trace_generate_content, trace_generate_content_async
 from .langchain import BirCallbackHandler
 from .llamaindex import BirLlamaIndexHandler
@@ -21,6 +21,7 @@ __all__ = [
     "trace_messages",
     "trace_messages_async",
     "trace_converse",
+    "trace_converse_stream",
     "trace_generate_content",
     "trace_generate_content_async",
     "trace_vertex_generate_content",

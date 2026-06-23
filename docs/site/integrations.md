@@ -201,7 +201,11 @@ with trace("chat"):
 Vertex binds the model to its `GenerativeModel` instance, so pass `bir_model` to
 record it. A response `model_version` refines that value. The wrapper is also
 exported as `bir.integrations.trace_vertex_generate_content` to avoid colliding
-with the Gemini wrapper.
+with the Gemini wrapper. With `stream=True` the wrapper returns a lazy iterable
+that yields Vertex's `GenerationResponse` chunks unchanged and records the
+accumulated text (each chunk's `text`, falling back to the first candidate's text
+parts) and the final `usage_metadata` after the stream is consumed, refining the
+model from a chunk `model_version` when present.
 
 ## AWS Bedrock
 
@@ -220,6 +224,29 @@ with trace("chat"):
 Pass a `boto3` `bedrock-runtime` client's `converse` method. Bir records
 `modelId` and the response's `inputTokens`, `outputTokens`, and `totalTokens`
 when present without importing `boto3`.
+
+The Converse stream API is a separate method, so it has a dedicated
+`trace_converse_stream` wrapper:
+
+```python
+from bir import trace
+from bir.integrations.bedrock import trace_converse_stream
+
+with trace("chat"):
+    stream = trace_converse_stream(
+        client.converse_stream,
+        modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        messages=[{"role": "user", "content": [{"text": "What is Bir?"}]}],
+    )
+    for event in stream:
+        ...
+```
+
+It yields the Converse stream's events (the items of the response `stream` member)
+unchanged, so iterate it directly instead of reaching into `response["stream"]`.
+Bir accumulates text from each `contentBlockDelta.delta.text` and records the
+`messageStop` stop reason and the terminal `metadata` event's token usage after
+the stream is consumed.
 
 ## LiteLLM
 

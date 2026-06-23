@@ -9,7 +9,7 @@ from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.bedrock import trace_converse
+from bir.integrations.bedrock import trace_converse, trace_converse_stream
 
 
 @contextmanager
@@ -66,6 +66,27 @@ def _converse_dict(*, usage: dict[str, object] | None) -> dict[str, object]:
     if usage is not None:
         response["usage"] = usage
     return response
+
+
+def _content_block_delta(text: str) -> dict[str, object]:
+    # A Converse stream ``contentBlockDelta`` event: text at delta.text.
+    return {"contentBlockDelta": {"delta": {"text": text}, "contentBlockIndex": 0}}
+
+
+def _message_stop(stop_reason: str) -> dict[str, object]:
+    # The ``messageStop`` event marking the end of the assistant turn.
+    return {"messageStop": {"stopReason": stop_reason}}
+
+
+def _stream_metadata(usage: object) -> dict[str, object]:
+    # The terminal ``metadata`` event carrying token usage at metadata.usage.
+    return {"metadata": {"usage": usage, "metrics": {"latencyMs": 42}}}
+
+
+def _converse_stream_response(events: object) -> dict[str, object]:
+    # boto3's ``converse_stream`` returns a dict whose ``stream`` member is an
+    # EventStream iterable of typed events alongside response metadata.
+    return {"stream": events, "ResponseMetadata": {"HTTPStatusCode": 200}}
 
 
 class BedrockIntegrationTests(unittest.TestCase):
@@ -181,6 +202,117 @@ class BedrockIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_events_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            events = [
+                _content_block_delta("Bir "),
+                _content_block_delta("streams"),
+                _message_stop("end_turn"),
+                _stream_metadata({"inputTokens": 12, "outputTokens": 6, "totalTokens": 18}),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                return _converse_stream_response(events)
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_converse_stream(
+                    fake_converse_stream,
+                    modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+                    messages=[{"role": "user", "content": [{"text": "Stream it"}]}],
+                )
+                consumed = list(stream)
+
+            # The stream's events are yielded unchanged and in order.
+            self.assertEqual(consumed, events)
+            self.assertEqual(received["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "bedrock.converse_stream")
+            self.assertEqual(generation_event.status, "success")
+            # Converse stream events carry no model, so the request modelId stands.
+            self.assertEqual(generation_event.model, "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.metadata["stop_reason"], "end_turn")
+
+    def test_streamed_usage_from_object_event_derives_total(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            # The terminal metadata event carries an attribute-style usage block
+            # without ``totalTokens``; the SDK derives the total from the halves.
+            events = [
+                _content_block_delta("Bir"),
+                _stream_metadata(FakeUsage(input_tokens=5, output_tokens=2)),
+            ]
+
+            def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                return _converse_stream_response(events)
+
+            with trace("chat"):
+                stream = trace_converse_stream(
+                    fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                )
+                self.assertEqual(list(stream), events)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir")
+            self.assertEqual(generation_event.usage, {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+
+    def test_stream_falls_back_when_response_is_not_a_stream(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                # A stub that ignored the streaming API and returned one response.
+                return _converse_dict(usage={"inputTokens": 7, "outputTokens": 3, "totalTokens": 10})
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_converse_stream(
+                    fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                )
+                consumed = list(stream)
+
+            # The non-streamed response is recorded in one piece; nothing is yielded.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "amazon.titan-text-premier-v1:0")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(
+                generation_event.output["output"]["message"]["content"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[dict[str, object]]:
+                yield _content_block_delta("partial api_key=sk-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-secret123")
+
+            def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                return _converse_stream_response(failing_stream())
+
+            with trace("chat"):
+                stream = trace_converse_stream(
+                    fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

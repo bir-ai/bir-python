@@ -88,6 +88,26 @@ Before publishing, verify the release with the SDK release checklist in
   text redacted. This matches the existing OpenAI/Anthropic/Gemini sync streaming
   behavior; the async Mistral/Cohere/LiteLLM wrappers do not stream yet. No new
   dependency, schema, or fixture change.
+- Synchronous streaming for the AWS Bedrock and Google Vertex AI wrappers,
+  completing sync streaming coverage across the provider wrappers. A new
+  `trace_converse_stream` (`bir.integrations.bedrock`, re-exported from
+  `bir.integrations`) wraps a `bedrock-runtime` `converse_stream` call: it returns
+  a lazy iterable that yields the Converse stream's events (the items of the
+  response `stream` member) unchanged and records the accumulated
+  `contentBlockDelta.delta.text`, the `messageStop` stop reason (as
+  `metadata.stop_reason`), and the terminal `metadata` event's
+  `inputTokens`/`outputTokens`/`totalTokens`, keeping the request `modelId` as the
+  model. Passing `stream=True` to `trace_generate_content`
+  (`bir.integrations.vertexai`) yields Vertex's `GenerationResponse` chunks
+  unchanged and records the accumulated text (each chunk's `text`, falling back to
+  the first candidate's text parts), refining the model from a chunk
+  `model_version` and reading the final `usage_metadata`
+  (`prompt_token_count`/`candidates_token_count`/`total_token_count`). A call that
+  did not actually stream still records via the one-shot path, and a mid-stream
+  error produces an error-status generation re-raised unchanged with the persisted
+  error text redacted. Neither provider SDK is imported, and the async wrappers
+  and non-streaming behavior are unchanged. No new dependency, schema, or fixture
+  change.
 - Async counterparts for the dependency-free provider wrappers, for applications
   using async provider clients (`AsyncOpenAI`, `AsyncAnthropic`, the `google-genai`
   async client, `litellm.acompletion`, and the async Mistral and Cohere clients).

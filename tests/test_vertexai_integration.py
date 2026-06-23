@@ -56,6 +56,47 @@ class FakeGenerationResponse:
         return dict(self._payload)
 
 
+class FakeStreamChunk:
+    # A streaming ``GenerationResponse`` chunk: ``text`` concatenates the candidate
+    # parts in the real SDK, with ``model_version`` and ``usage_metadata`` carried
+    # on the chunks that resolve them.
+    def __init__(
+        self,
+        *,
+        text: str | None = None,
+        model_version: str | None = None,
+        usage_metadata: object | None = None,
+        candidates: object | None = None,
+    ) -> None:
+        self.text = text
+        self.model_version = model_version
+        self.usage_metadata = usage_metadata
+        self.candidates = candidates
+
+
+class FakeRaisingTextChunk:
+    # A chunk whose ``text`` accessor raises (as the real Vertex accessor does when
+    # a chunk carries no single text part), forcing the candidate-parts fallback.
+    def __init__(
+        self,
+        *,
+        candidates: object | None = None,
+        usage_metadata: object | None = None,
+        model_version: str | None = None,
+    ) -> None:
+        self._candidates = candidates
+        self.usage_metadata = usage_metadata
+        self.model_version = model_version
+
+    @property
+    def text(self) -> str:
+        raise ValueError("Content has no parts")
+
+    @property
+    def candidates(self) -> object | None:
+        return self._candidates
+
+
 class VertexAIIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -180,6 +221,135 @@ class VertexAIIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeStreamChunk(text="Bir ", model_version="gemini-1.5-flash-002"),
+                FakeStreamChunk(text="streams"),
+                FakeStreamChunk(
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=12,
+                        candidates_token_count=6,
+                        total_token_count=18,
+                    ),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            def fake_generate(*args: object, **kwargs: object) -> list[FakeStreamChunk]:
+                received.update(kwargs)
+                return chunks
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate,
+                    "Stream it",
+                    bir_model="gemini-1.5-flash",
+                    stream=True,
+                )
+                consumed = list(stream)
+
+            # The chunks are yielded unchanged and in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "vertexai.generate_content")
+            self.assertEqual(generation_event.status, "success")
+            # ``bir_model`` seeds the model; a chunk ``model_version`` refines it.
+            self.assertEqual(generation_event.model, "gemini-1.5-flash-002")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.input["args"], ["Stream it"])
+            self.assertEqual(generation_event.input["stream"], True)
+
+    def test_streamed_text_falls_back_to_candidate_parts(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            # The first chunk exposes no ``text``; the second's ``text`` accessor
+            # raises. Both fall back to reading the candidate parts directly.
+            chunks = [
+                FakeStreamChunk(
+                    text=None,
+                    candidates=[{"content": {"parts": [{"text": "Bir"}]}}],
+                ),
+                FakeRaisingTextChunk(
+                    candidates=[{"content": {"parts": [{"text": " parts"}]}}],
+                    usage_metadata=FakeUsageMetadata(prompt_token_count=5, candidates_token_count=2),
+                ),
+            ]
+
+            def fake_generate(*args: object, **kwargs: object) -> list[object]:
+                return chunks
+
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                )
+                self.assertEqual(list(stream), chunks)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            # No chunk carried a ``model_version``, so ``bir_model`` stands.
+            self.assertEqual(generation_event.model, "gemini-1.5-flash")
+            self.assertEqual(generation_event.output, "Bir parts")
+            self.assertEqual(generation_event.usage, {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                # A provider that ignored ``stream=True`` and returned one response.
+                return FakeGenerationResponse(
+                    model_version="gemini-1.5-flash-002",
+                    usage_metadata=FakeUsageMetadata(prompt_token_count=7, candidates_token_count=3),
+                    payload={"candidates": [{"content": {"parts": [{"text": "One shot."}]}}]},
+                )
+
+            consumed: list[object] = []
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                )
+                consumed = list(stream)
+
+            # The non-streamed response is recorded in one piece; nothing is yielded.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "gemini-1.5-flash-002")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(
+                generation_event.output["candidates"][0]["content"]["parts"][0]["text"],
+                "One shot.",
+            )
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            def failing_stream() -> Iterator[FakeStreamChunk]:
+                yield FakeStreamChunk(text="partial api_key=sk-secret123 ")
+                raise RuntimeError("stream failed api_key=sk-secret123")
+
+            def fake_generate(*args: object, **kwargs: object) -> Iterator[FakeStreamChunk]:
+                return failing_stream()
+
+            with trace("chat"):
+                stream = trace_generate_content(
+                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                )
+                with self.assertRaises(RuntimeError):
+                    list(stream)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

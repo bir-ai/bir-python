@@ -181,7 +181,10 @@ to an async iterator you consume with `async for`, never buffering the stream. T
 synchronous wrappers likewise accept `stream=True` — yielding the provider's
 chunks unchanged and recording the accumulated text and final token usage once
 the stream is consumed — across OpenAI (Chat Completions and Responses),
-Anthropic, Gemini, Mistral, Cohere, and LiteLLM.
+Anthropic, Gemini, Mistral, Cohere, LiteLLM, and Vertex AI. AWS Bedrock's Converse
+stream is a distinct method rather than a `stream=True` flag, so it has its own
+`trace_converse_stream` wrapper that yields the stream's events unchanged and
+records the same way.
 
 ## Local persistence and concurrency
 
