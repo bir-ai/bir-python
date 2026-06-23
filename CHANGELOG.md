@@ -19,6 +19,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.otel.export_traces_to_otlp`, an opt-in OpenTelemetry/OTLP
+  exporter for replaying locally recorded Bir traces to an existing
+  observability backend. Install it with the new optional `otel` extra
+  (`pip install 'bir-sdk[otel]'`); normal runtime installs stay dependency-free,
+  and OpenTelemetry packages are imported lazily only when the exporter is
+  called. The exporter accepts a `LoadedTrace`, an iterable of loaded traces, or a
+  trace-file path loaded through `load_traces`, then maps each Bir trace to one
+  OpenTelemetry trace with parent/child span relationships, original
+  timestamps, success/error status, GenAI semantic-convention attributes for
+  model and token usage, and `bir.*` attributes for event ids, event type,
+  scores, total tokens, cost, and currency. It can build the default OTLP/HTTP
+  exporter from `endpoint`, `headers`, and `timeout`, or use an injected
+  `span_exporter` for custom transports and tests. The integration is re-exported
+  from `bir.integrations`, documented in the README, included in release package
+  verification, and covered by tests for dependency isolation, span-tree shape,
+  attribute mapping, exporter wiring, and error handling. No schema or fixture
+  change.
 - `bir.integrations.openai_agents.BirAgentsTracingProcessor`, a dependency-free
   bridge that implements the OpenAI Agents SDK tracing-processor interface
   (`on_trace_start`/`on_trace_end`, `on_span_start`/`on_span_end`, `shutdown`,
