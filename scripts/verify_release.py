@@ -40,6 +40,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/mistral.py",
     "bir/integrations/openai.py",
     "bir/integrations/openai_agents.py",
+    "bir/integrations/otel.py",
     "bir/integrations/vertexai.py",
     "bir/py.typed",
 }

@@ -15,10 +15,12 @@ from .openai import (
     trace_response_async,
 )
 from .openai_agents import BirAgentsTracingProcessor
+from .otel import export_traces_to_otlp
 from .vertexai import trace_generate_content as trace_vertex_generate_content
 
 __all__ = [
     "cohere",
+    "export_traces_to_otlp",
     "trace_messages",
     "trace_messages_async",
     "trace_converse",

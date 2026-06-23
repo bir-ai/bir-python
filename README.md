@@ -18,6 +18,11 @@ The distribution name is `bir-sdk`; the import name is `bir`. Runtime
 installation has no third-party dependencies. Bir also ships inline type
 annotations and a PEP 561 `py.typed` marker.
 
+An opt-in `otel` extra (`pip install 'bir-sdk[otel]'`) adds an OpenTelemetry/OTLP
+exporter that forwards recorded traces to an existing observability backend; the
+runtime install stays dependency-free without it. See
+[Forwarding traces to OpenTelemetry](#forwarding-traces-to-opentelemetry).
+
 ## Quickstart
 
 ```python
@@ -217,6 +222,43 @@ strand unsent events. Both `send_events()`/`bir send` and
 errors, timeouts, and HTTP 5xx) with bounded exponential backoff via `retries`
 and `backoff`, while HTTP 4xx and malformed inputs fail immediately. See
 [server uploads](docs/site/sending.md).
+
+## Forwarding traces to OpenTelemetry
+
+If you already run an OpenTelemetry backend, you can replay locally recorded Bir
+traces as OpenTelemetry spans and ship them over OTLP. This is opt-in and never
+runs on its own: nothing imports `opentelemetry` until you call the exporter, and
+it only reads your local JSONL — it never writes to or alters it.
+
+Install the extra, then forward loaded traces:
+
+```bash
+python -m pip install 'bir-sdk[otel]'
+```
+
+```python
+from bir import load_traces
+from bir.integrations.otel import export_traces_to_otlp
+
+export_traces_to_otlp(
+    load_traces(),
+    endpoint="http://localhost:4318/v1/traces",
+    service_name="rag-api",
+)
+```
+
+`export_traces_to_otlp()` also accepts a single `LoadedTrace`, an iterable of
+them, or a path to a trace file (loaded via `load_traces`). Each Bir trace
+becomes one OpenTelemetry trace: the trace root maps to a root span and every
+other event maps to a child span linked by `parent_id`, carrying over start/end
+times and `success`/`error` status. Attributes follow the GenAI semantic
+conventions where they exist (`gen_ai.request.model`,
+`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`) with `bir.*`
+attributes for the rest (event type, score value, token totals, cost, and the
+originating Bir ids). Pass `headers=` for backend auth, or inject your own
+configured `span_exporter=` for a different transport. Calling the exporter
+without the extra installed raises a clear error pointing you to
+`pip install 'bir-sdk[otel]'`.
 
 ## Evaluations and experiments
 
