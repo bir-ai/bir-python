@@ -19,6 +19,20 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.openai_agents.BirAgentsTracingProcessor`, a dependency-free
+  bridge that implements the OpenAI Agents SDK tracing-processor interface
+  (`on_trace_start`/`on_trace_end`, `on_span_start`/`on_span_end`, `shutdown`,
+  `force_flush`). Register it with `agents.add_trace_processor(...)` and each agent
+  run's trace becomes a Bir trace root; spans are mapped by their `span_data.type`
+  — model spans (`generation`, `response`) to generations with model and token
+  usage when present, tool spans (`function`, `mcp_tools`) to tool calls, and every
+  other kind (`agent`, `handoff`, `guardrail`, `custom`, ...) to a span — with
+  failed spans recorded as errors. Active traces and spans are tracked by their
+  Agents id so concurrent and nested runs stay isolated, and input/output capture
+  follows the same opt-in settings as the other integrations, overridable per
+  processor with `capture_inputs`/`capture_outputs`. The processor never imports the
+  `openai-agents` package, so it adds no runtime dependency, and it introduces no
+  schema or fixture change. Re-exported from `bir.integrations`.
 - `configure(model_prices=...)`, an opt-in, local-only price table that fills a
   generation's `input_cost`/`output_cost`/`total_cost` from its token usage. Each
   entry maps a model name to a non-negative, finite `input` and/or `output`

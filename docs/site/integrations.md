@@ -60,8 +60,8 @@ The async wrappers, by provider:
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
-options. AWS Bedrock, Vertex AI, and the LangChain and LlamaIndex callback
-handlers have no async wrapper.
+options. AWS Bedrock, Vertex AI, and the LangChain, LlamaIndex, and OpenAI Agents
+SDK callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -299,6 +299,30 @@ Pass the handler to LlamaIndex's callback manager. LLM and chat callbacks become
 generations; retrieval callbacks become retrieval events. Operations outside an
 explicit callback trace receive an implicit Bir trace root. The handler does not
 import LlamaIndex.
+
+## OpenAI Agents SDK
+
+```python
+from agents import Runner, add_trace_processor
+from bir.integrations.openai_agents import BirAgentsTracingProcessor
+
+add_trace_processor(BirAgentsTracingProcessor())
+
+result = Runner.run_sync(agent, "What is Bir?")
+```
+
+`BirAgentsTracingProcessor` implements the Agents SDK tracing-processor interface
+(`on_trace_start`/`on_trace_end` and `on_span_start`/`on_span_end`). Register it
+with `add_trace_processor` and each agent run's trace becomes a Bir trace root.
+Spans are mapped by their `span_data.type`: model spans (`generation` and
+`response`) become generations carrying the model and token usage when present,
+tool spans (`function` and `mcp_tools`) become tool calls, and every other kind
+(`agent`, `handoff`, `guardrail`, `custom`, ...) becomes a span. A failed span is
+recorded with error status. Active traces and spans are tracked by their Agents
+id, so concurrent and nested runs stay isolated. The processor does not import the
+`openai-agents` package, and input/output capture follows the same
+[opt-in settings](capture-privacy.md) as every other integration, overridable per
+processor with `capture_inputs`/`capture_outputs`.
 
 ## Wrapper-specific options
 

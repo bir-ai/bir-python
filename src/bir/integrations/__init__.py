@@ -14,6 +14,7 @@ from .openai import (
     trace_response,
     trace_response_async,
 )
+from .openai_agents import BirAgentsTracingProcessor
 from .vertexai import trace_generate_content as trace_vertex_generate_content
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "trace_vertex_generate_content",
     "BirCallbackHandler",
     "BirLlamaIndexHandler",
+    "BirAgentsTracingProcessor",
     "trace_completion",
     "trace_completion_async",
     "trace_chat",
