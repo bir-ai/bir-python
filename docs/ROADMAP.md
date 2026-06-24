@@ -1,218 +1,133 @@
-# Bir Python SDK — Prioritized Improvement Roadmap
+# Bir Python SDK — Improvement Roadmap
 
-Audited against repository state on 2026-06-22. This document is planning
-material only; none of the improvements below are implemented here. The previous
-edition of this file enumerated 11 improvements that have **all since shipped**
-(see the CHANGELOG `Unreleased` section and the git log: hermetic pyright/release
-verification, full-tree verification wheel, strict MkDocs CI, interprocess
-locks, rotated uploads, `send_experiment` retries, `run_experiment_async`,
-per-evaluator eval-gate tolerances, OpenAI Responses wrapper, generator-aware
-`@observe()`, and additive custom redaction). This edition starts from that newer
-baseline.
+> Generated analysis (audited 2026-06-24). Not committed automatically. Each
+> Phase-4 prompt is a standalone Claude Code task that a fresh session can paste
+> in and run end to end. Re-verify every claim against the current code before
+> relying on it — the repo evolves quickly and most of the original "candidate
+> areas" are already shipped.
 
 ## Phase 2 — Assessment
 
-### What already exists
+### What already exists (excluded from the roadmap)
 
-Bir is a zero-runtime-dependency (`dependencies = []`), local-first tracing and
-deterministic-evals SDK for Python 3.10+. The public surface is small and
-re-exported from `src/bir/__init__.py`: `observe`, `trace`, `span`, `generation`,
-`tool_call`, `retrieval`, `score`, `prompt`, `configure`, `load_events`,
-`load_traces`, `send_events`, plus the `TraceEvent`/`LoadedTrace`/
-`SendEventsResult`/`PromptRecord` dataclasses and `__version__`.
+The repo is well past MVP. The following candidate areas are **already done** and
+are intentionally not re-proposed:
 
-- **Core (`src/bir/_sdk.py`, ~2.5k lines):** sync, async, generator, and
-  async-generator `@observe()`; context managers for trace/span/generation/
-  tool_call/retrieval with matching `async with`; opt-in input/output capture;
-  bounded JSON-safe capture with built-in + user-additive redaction; sampling;
-  service/environment metadata; size-based rotation (`max_bytes`/`backup_count`);
-  interprocess-locked JSONL writes (`flock`/`msvcrt`); `send_events` with
-  retry/backoff, `mark_sent` sidecar, and `include_rotated`; strict line-level
-  loaders with schema-`1.0` validation; `BIR_*` environment configuration read at
-  import.
-- **Evals (`src/bir/evals.py`, ~1.9k lines):** deterministic evaluators,
-  `Dataset`, `run_experiment` + `run_experiment_async` (bounded concurrency,
-  dataset-ordered persistence), experiment load/list/send with retry/backoff, and
-  `compare_experiments`/`ExperimentDiff` with per-evaluator tolerances and a
-  missing-score policy.
-- **Integrations (`src/bir/integrations/`):** dependency-free provider wrappers
-  for OpenAI (Chat Completions + Responses), Anthropic, Google Gemini, Mistral,
-  Cohere, LiteLLM, AWS Bedrock Converse, and Vertex AI, plus LangChain and
-  LlamaIndex callback handlers. Shared response-shape helpers live in
-  `_common.py`. Wrappers forward provider args unchanged, prefix SDK options with
-  `bir_`, never import the provider package, and read model/usage/output from
-  mapping-or-attribute shapes.
-- **CLI (`src/bir/cli.py`):** stdlib-only `bir` console script with `traces`,
-  `tail`, `experiments`, `send`, `send-experiment`, and `eval-gate`.
-- **CI/release:** unit + example tests on Python 3.10–3.13; pyright and
-  `scripts/verify_release.py` (offline wheel build/inspect/smoke covering the full
-  package tree incl. integrations and `py.typed`) on 3.12; strict `mkdocs build`;
-  tag-driven PyPI Trusted Publishing.
-- **Docs:** README, CHANGELOG, a structured MkDocs site under `docs/site/`, and
-  `docs/SDK_RELEASE_CHECKLIST.md` / `docs/EVALUATOR_IMPLEMENTATION_GUIDE.md`.
+- **PEP 561 `py.typed`** — ships via `[tool.setuptools.package-data]`, present at
+  `src/bir/py.typed`.
+- **Environment-variable config** — `BIR_TRACE_PATH`, `BIR_CAPTURE_INPUTS`,
+  `BIR_CAPTURE_OUTPUTS`, `BIR_SAMPLE_RATE`, `BIR_SERVICE_NAME`,
+  `BIR_ENVIRONMENT`, `BIR_SOURCE` read once at import time.
+- **CI Python matrix** — 3.10/3.11/3.12/3.13 with `fail-fast: false`; pyright +
+  `verify_release.py` pinned to 3.12.
+- **`bir` CLI** — `traces`, `show`, `stats`, `tail`, `experiments`, `send`,
+  `send-experiment`, `eval-gate`, plus `bir --version`. Console script wired in
+  `pyproject.toml` and asserted by release verification.
+- **Trace-file rotation / size cap** — `configure(max_bytes=, backup_count=)`
+  with `load_events/load_traces(include_rotated=True)`.
+- **`send_events` resilience** — bounded retry/backoff plus opt-in
+  `mark_sent=True` sidecar; same for `send_experiment`.
+- **Integrations** — openai (Chat + Responses), anthropic, google, mistral,
+  cohere, litellm, langchain, llamaindex, **bedrock**, **vertexai**, **openai
+  agents** (tracing processor), plus the **OTLP exporter** behind `[otel]`.
+- **Streaming** — sync `stream=True` across OpenAI/Anthropic/Gemini/Mistral/
+  Cohere/LiteLLM/Bedrock/Vertex; async streaming for OpenAI/Anthropic/Gemini.
+- **Experiment regression detection** — `compare_experiments()` /
+  `ExperimentDiff` / `bir eval-gate` with per-evaluator tolerances and a
+  `missing_score` policy.
+- **Richer redaction** — JWT, AWS AKIA/ASIA, GCP `AIza`, Slack `xox*`, GitHub
+  `gh*_`, OpenAI `sk-`, labeled-secret + bearer rules, plus user-supplied
+  `additional_secret_keys` / `additional_redaction_patterns`.
+- **OTLP export behind an extra**, and a **strict MkDocs site** built in CI.
+- **Async experiment runner** — `run_experiment_async(max_concurrency=...)`.
+- **`configure(model_prices=...)`** local cost table, `set_metadata(...)` on every
+  context manager, `get_current_trace_id/span_id()`.
 
-### Conventions and idioms (follow these in every prompt)
+### Conventions / idioms the code follows
 
-- Frozen dataclasses for config and public records; config replaced atomically
-  with `dataclasses.replace`. Tests reset via `_reset_config_for_tests()`.
-- Centralized `_validate_*` / `_expect_*` helpers reject booleans-as-numbers,
-  non-finite floats, negatives, empties, and malformed stored data with clear
-  `ValueError`/`TypeError`.
-- Trace nesting via `ContextVar`; sync and `async with` paths share event
-  construction and preserve exception propagation; a storage failure re-raises the
-  user's original exception chained to the storage error.
-- Deterministic strict JSON everywhere: `json.dumps(..., sort_keys=True,
-  separators=(",", ":"), allow_nan=False)`, one object per line.
-- Capture is opt-in; all captured values flow through `_safe_capture` /
-  `_safe_repr` / `_safe_error` redaction before persistence.
-- Integrations are thin, lazy-import-free of the provider, and reuse `_common.py`.
-- Tests are primarily `unittest` with `tempfile`, fake provider objects, and
-  patched `urllib`/`time`; `pytest` runs only `tests/test_examples.py`. Each
-  integration has its own `tests/test_*_integration.py`.
+- Frozen dataclasses for config and public records (`_Config`, `TraceEvent`,
+  `LoadedTrace`, `PromptRecord`, eval result types).
+- Centralized `_validate_*` helpers (`_validate_event_name`,
+  `_validate_non_negative_int`, `_validate_number`, `_validate_sample_rate`,
+  `_validate_model_prices`, …) called from `configure()` and constructors.
+- JSONL writing is lock-serialized (in-process `Lock` + advisory
+  `_InterProcessFileLock`), `schema_version` `"1.0"`, deterministic
+  `sort_keys` / `allow_nan=False` serialization.
+- Redaction runs on **every** persistence path via `_safe_capture` /
+  `_redact_text`; built-in rules can never be disabled, user rules only widen.
+- Integrations are **lazy-import, dependency-free**: callables/clients are passed
+  in by the user, `bir_`-prefixed kwargs are stripped, shared parsing lives in
+  `integrations/_common.py`, and each public symbol is re-exported from
+  `integrations/__init__.py`.
+- Tests mix `unittest` and `pytest`; shared wire-contract fixtures live in
+  `tests/fixtures/` and are guarded by `scripts/fixtures.py check` (a job mirrored
+  in the separate `bir-app` repo).
 
-### Candidate-area status (done vs. missing)
+### Genuinely missing / improvable (this roadmap)
 
-| Candidate area | Status |
-|---|---|
-| PEP 561 `py.typed` marker | **Done** — ships, in package-data, checked by release verifier |
-| `BIR_*` environment configuration | **Done** — `BIR_TRACE_PATH/CAPTURE_INPUTS/CAPTURE_OUTPUTS/SAMPLE_RATE/SERVICE_NAME/ENVIRONMENT` |
-| CI Python matrix 3.10–3.13 | **Done** |
-| `bir` CLI (tail/inspect/list/send) | **Partly done** — list/tail/send exist; single-trace inspect, stats, and validate are missing |
-| Trace-file rotation / size cap | **Done** (size-based); time-based not present (deliberately not proposed) |
-| `send_events()` retry/backoff + mark-sent | **Done** |
-| Additional integrations | **Partly** — Bedrock + Vertex done; OpenAI Agents SDK, Pydantic AI, Instructor, DSPy, CrewAI, Haystack missing |
-| Streaming helpers / Anthropic parity | **Partly** — OpenAI (both), Anthropic, Gemini stream (sync); Mistral/Cohere/LiteLLM/Bedrock/Vertex do not; **no async streaming anywhere** |
-| Experiment regression detection + CI gate | **Done** — `compare_experiments`, `ExperimentDiff`, `bir eval-gate`, async runner |
-| Richer configurable redaction (JWT/AKIA/GCP) | **Done** — built-ins expanded + user-additive keys/patterns |
-| OpenTelemetry/OTLP export behind an extra | **Missing** |
-| MkDocs documentation site | **Done** + strict CI |
-
-### Genuinely missing or incomplete (this roadmap's focus)
-
-1. **No async support in any integration wrapper.** Every wrapper runs
-   `response = create(*args, **kwargs)` synchronously. Passing an async client
-   method (`AsyncOpenAI().chat.completions.create`, `AsyncAnthropic().messages.create`,
-   `litellm.acompletion`, …) returns an un-awaited coroutine and records garbage.
-   Async clients are the dominant production pattern; `@observe()` and
-   `run_experiment_async()` already support async, so the integrations are the
-   conspicuous gap.
-2. **Sync streaming covers only 3 of 8 providers.** Mistral, Cohere, and LiteLLM
-   (OpenAI-shaped) plus Bedrock `converse_stream` and Vertex streaming silently
-   record the unconsumed stream object's `repr` and no usage.
-3. **CLI can't inspect a single trace, summarize usage/cost, or validate a file.**
-   `bir traces` only lists; there is no tree view, no aggregate stats, and no
-   schema validator for a trace JSONL file.
-4. **No public way to read the active trace/span id** for log correlation
-   (`_current_trace_id` is private).
-5. **No way to enrich an event's metadata after creation** — metadata is fixed at
-   context-manager creation; spans carry none at all.
-6. **Cost is fully manual.** There is no opt-in, local helper to derive
-   generation cost from token usage and user-supplied rates.
-7. **No OpenTelemetry/OTLP bridge** to forward local traces into existing
-   observability backends.
-
-There are **no P0 correctness or packaging gaps**: the four required gates
-(`unittest`, example `pytest`, `pyright`, `verify_release.py`) and the release
-workflow are structurally complete. Accordingly this roadmap is honestly weighted
-to P1 functional gaps and P2 additive enhancements rather than manufactured
-blockers.
+Async **streaming** parity for Mistral/Cohere/LiteLLM; `python -m bir`; a CLI
+front-end for the OTLP exporter; a docs **deploy** (the site is built strictly but
+never published, despite `site_url` pointing at GitHub Pages); a small in-memory
+**test-capture** helper for users instrumenting their own code; a threaded
+`max_workers` for the **sync** experiment runner; a few additional dependency-free
+integrations (Instructor, Pydantic AI, DSPy, CrewAI); and a **flagged** cross-repo
+redaction expansion.
 
 ## Phase 3 — Prioritized improvements
 
 | # | Improvement | Category | Priority | Size | Risk | Depends on |
-|---:|---|---|---|---|---|---|
-| 1 | Async provider integration wrappers | integrations | P1 | L | med | — |
-| 2 | Sync streaming parity for Mistral, Cohere, LiteLLM | integrations | P1 | M | med | — |
-| 3 | `bir show <trace-id>` single-trace tree inspector | dx | P1 | M | low | — |
-| 4 | `bir stats` local usage/cost/latency summary | dx | P1 | S | low | — |
-| 5 | Public `get_current_trace_id()` / `get_current_span_id()` | core / dx | P2 | S | low | — |
-| 6 | Post-creation `set_metadata()` on event context managers | core | P2 | S | low | — |
-| 7 | `bir validate` trace-JSONL schema validator | dx / ci | P2 | S | low | — |
-| 8 | Optional local cost estimation from a user price table | core | P2 | M | med | — |
-| 9 | Bedrock `converse_stream` + Vertex AI streaming parity | integrations | P2 | M | med | 2 (shared idioms) |
-| 10 | OpenAI Agents SDK tracing-processor integration | integrations | P2 | M | med | — |
-| 11 | OpenTelemetry/OTLP export behind an optional `[otel]` extra | integrations | P2 | L | med–high | — |
+|---|-------------|----------|----------|------|------|------------|
+| 1 | `python -m bir` entry point (`__main__.py`) | dx | P0 | S | low | — |
+| 2 | Async `stream=True` for Mistral / Cohere / LiteLLM wrappers | integrations | P1 | M | low | — |
+| 3 | `bir export-otel` CLI subcommand (front-end for existing exporter) | dx | P1 | S | low | — |
+| 4 | MkDocs GitHub Pages deploy workflow (+ optional Material theme) | ci/release | P1 | M | low | — |
+| 5 | `bir.testing` in-memory trace-capture helper for users' tests | dx | P1 | M | low | — |
+| 6 | Threaded `max_workers` for the sync `run_experiment()` | evals | P1 | M | low | — |
+| 7 | Instructor integration (`trace_create`) | integrations | P2 | M | low | — |
+| 8 | Pydantic AI integration (instrument-events bridge) | integrations | P2 | M | low | — |
+| 9 | DSPy integration (LM-callback bridge) | integrations | P2 | M | low | — |
+| 10 | CrewAI integration (step/callback bridge) | integrations | P2 | M | low | — |
+| 11 | Expanded redaction: Stripe / Azure / PEM private-key blocks | core | P1 | M | **med** | CROSS-REPO |
 
-### Rationale and acceptance summary
+**Trade-off flags.** #11 touches the **shared redaction contract**
+(`tests/fixtures/redaction-cases.json` + `tests/test_redaction_parity.py`), which
+the separate `bir-app` server maintains an independent copy of. It is the one item
+here that is a coordinated, cross-repo change — do not ship the SDK side ahead of
+the server side. #4 only *publishes* docs; keep the strict build gate intact.
+Everything else is additive and stays inside the invariants.
 
-1. **Async provider wrappers.** Highest-leverage functional gap: production LLM
-   code is overwhelmingly async, and the sync-only wrappers break on async
-   clients. Acceptance: each covered provider gains an awaitable counterpart that
-   awaits the provider coroutine, records the same generation, and (where the sync
-   wrapper already streams) returns an async iterator that yields events unchanged
-   and finalizes on exhaustion/close/error. Trade-off: touches several modules, so
-   it is L; mitigated by shared `_common.py` helpers and one async-stream idiom.
-2. **Sync streaming parity (Mistral/Cohere/LiteLLM).** These are OpenAI/near-OpenAI
-   shaped, so they reuse the existing `_stream_chat_completion` idiom. Acceptance:
-   `stream=True` yields provider chunks unchanged, accumulates text, and reads
-   final usage after consumption; non-iterable responses fall back to one-shot
-   recording. Bedrock/Vertex are deliberately deferred to #9 (different stream
-   APIs).
-3. **`bir show`.** The only way to read a recorded trace today is to write Python.
-   Acceptance: `bir show <id>` prints the trace's events as an indented tree by
-   `parent_id` with type, name, status, duration, model, usage, and score values;
-   `--json` emits the structured tree; unknown id exits non-zero with a clear
-   message. stdlib only, built on `load_traces`.
-4. **`bir stats`.** Quick local cost/usage visibility without a server.
-   Acceptance: aggregate across loaded traces — trace count, success/error counts,
-   summed input/output/total tokens, summed cost per currency, and mean/p95
-   latency; `--json` for scripting; honors `--path`/`--include-rotated`.
-5. **`get_current_trace_id()` / `get_current_span_id()`.** Tiny, frequently needed
-   for correlating application logs with traces. Acceptance: public functions
-   returning the active ids or `None`; re-exported from `bir`; never raise outside
-   a trace.
-6. **`set_metadata()`.** Lets callers attach context discovered mid-body (e.g. a
-   resolved route, a cache hit) to the current generation/tool_call/retrieval/span/
-   trace. Acceptance: additive method that merges into the event's metadata,
-   redacted at write; spans gain metadata support; no schema change (metadata is
-   already free-form on every event).
-7. **`bir validate`.** Useful for debugging local files and for guarding the
-   cross-repo wire contract. Acceptance: validates each line of a trace JSONL file
-   with the existing strict parser, reports every offending line (not just the
-   first), and exits non-zero on any error; `--json` summary.
-8. **Optional local cost estimation.** Bir intentionally bundles no prices (they
-   go stale), but many users want cost dashboards. Acceptance: opt-in
-   `configure(model_prices=...)` (user-supplied per-token rates, no bundled
-   table); when set, a generation with usage but no explicit cost auto-fills cost;
-   explicit `set_cost` always wins; invalid tables fail fast. Trade-off: adds a
-   small config surface — justified, opt-in, and consistent with "cost is
-   user-provided."
-9. **Bedrock/Vertex streaming.** Completes streaming coverage. Acceptance:
-   `trace_converse_stream` consumes a Converse stream
-   (`contentBlockDelta`/`messageStop`/`metadata.usage`); Vertex streaming consumes
-   chunked `generate_content`. Separated from #2 because the event shapes differ.
-10. **OpenAI Agents SDK integration.** The candidate list's most stable
-    remaining framework target — it exposes a documented tracing-processor hook
-    analogous to LangChain callbacks. Acceptance: a dependency-free
-    `TracingProcessor`-style adapter mapping agent/LLM/tool spans to Bir
-    trace/generation/tool_call events, never importing the Agents SDK. Risk: the
-    hook API is younger than LangChain's, so the prompt instructs verifying the
-    current public interface first.
-11. **OTLP export.** The natural "send Bir to my existing backend" story; deferred
-    in the prior roadmap and still unbuilt. Acceptance: an optional `[otel]` extra
-    and a lazy-importing exporter that converts loaded Bir traces to OTel spans
-    (gen_ai.* attributes for model/usage) and ships them via OTLP; runtime
-    `dependencies` stay empty. Trade-off: sizable optional dep + semantic-
-    convention mapping, hence L / med–high and last.
+---
 
-## Phase 4 — Standalone Claude Code prompts
+## Phase 4 — Standalone prompts
 
-### 1. Async provider integration wrappers
+### 1. `python -m bir` entry point
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
 dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
 src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+The CLI lives in src/bir/cli.py with a `main()` entry point, wired as the `bir`
+console script in pyproject.toml ([project.scripts] bir = "bir.cli:main").
 
 TASK
-Add awaitable async counterparts to the dependency-free provider wrappers so applications using async provider clients (e.g. AsyncOpenAI, AsyncAnthropic, litellm.acompletion) get the same Bir generation events the sync wrappers produce.
+Add a `src/bir/__main__.py` so `python -m bir ...` runs the exact same CLI as the
+`bir` console script.
 
 WHY
-Every current wrapper runs `response = create(*args, **kwargs)` synchronously, so passing an async client method returns an un-awaited coroutine and records garbage. Async clients are the dominant production pattern, and `@observe()` plus `run_experiment_async()` already support async, leaving the integrations as the conspicuous gap.
+`python -m bir` is the dependency-free way to invoke the CLI when the console
+script isn't on PATH (fresh venvs, `pipx run`, CI), and users expect module
+execution to mirror the script.
 
 IMPLEMENTATION GUIDANCE
-Add async variants for the providers whose client methods are coroutines: OpenAI Chat Completions and Responses (src/bir/integrations/openai.py), Anthropic Messages (anthropic.py), Google Gemini (google.py), Mistral (mistral.py), Cohere (cohere.py), and LiteLLM (litellm.py). Mirror each existing sync wrapper exactly but `await` the provider call inside `async with generation(...)` (the generation/tool_call/retrieval/trace context managers already implement `__aenter__`/`__aexit__`). Name them with an `_async` suffix (e.g. `trace_chat_completion_async`, `trace_response_async`, `trace_messages_async`, `trace_generate_content_async`, `trace_chat_async`, `trace_completion_async`) and re-export from src/bir/integrations/__init__.py. For providers whose sync wrapper already streams (OpenAI both, Anthropic, Gemini), the async wrapper must return an async iterator (`async def` generator) that yields the provider's async-stream events unchanged via `async for`, accumulates text/usage with the existing `_common.py` helpers, and finalizes model/usage/output in a `finally` on exhaustion/close/error — never buffering the stream. Reuse `_value`, `_usage_tokens`, `_string_or_none`, `_response_output`, and `_is_streamed_response`; add a small async-aware stream detector only if needed (an async stream exposes `__aiter__`). Keep the `bir_`-prefixed option names identical to the sync wrappers. Do not import any provider package; tests use fake async clients/streams.
+- Create src/bir/__main__.py that imports `main` from `bir.cli` and calls
+  `raise SystemExit(main())` under `if __name__ == "__main__":`, matching how
+  cli.main already returns an int exit code.
+- Confirm cli.main reads sys.argv (or an optional argv parameter) so behavior is
+  identical to the console script. Do not change cli.main's signature unless needed
+  for parity.
+- Ensure the new module ships in the wheel (it is under src/bir, already covered by
+  setuptools package discovery — verify, don't duplicate package-data).
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
@@ -222,16 +137,14 @@ CONSTRAINTS (do not violate)
 - Keep the public API small; re-export new public symbols from the right __init__.py.
 
 ACCEPTANCE CRITERIA
-- Each covered provider has an async wrapper that awaits the provider coroutine and records one generation with model/output/usage when present, returning the provider's awaited result unchanged.
-- For providers that stream synchronously today, the async wrapper returns an async iterator that yields the original async events in order and finalizes usage/model/output on exhaustion, `aclose()`, and mid-stream error (re-raised unchanged, persisted error redacted).
-- Provider arguments are forwarded unchanged; `bir_*` options are not forwarded.
-- Async wrappers require an active trace and work under `@observe()` async functions and `async with bir.trace(...)`.
-- Importing every integration module still succeeds with no provider package installed.
-- Existing sync wrappers are unchanged.
+- `PYTHONPATH=src python -m bir --version` prints the same string as `bir --version`.
+- `PYTHONPATH=src python -m bir traces` behaves identically to the console script.
+- The exit code from `python -m bir` matches `cli.main`'s return value.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add/extend tests under tests/ in the existing style (tests/test_cli.py), e.g. a
+test that runs `python -m bir --version` (or imports and invokes the module) and
+asserts parity with the console-script path and the exit code.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -240,12 +153,13 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md (mention `python -m bir` alongside the `bir` command) and add a
+CHANGELOG.md entry under an "Unreleased" section (create it if missing). Update
+docs/SDK_RELEASE_CHECKLIST.md only if the release contract changes.
 
 OUT OF SCOPE
-Do not add async support to Bedrock/Vertex (boto3/vertexai async is niche) or to the LangChain/LlamaIndex callback handlers; do not change sync wrapper behavior, import provider packages, calculate prices, or change the event schema.
+Do not add CLI subcommands, change argument parsing, or alter the console-script
+entry point. No new dependencies.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -253,40 +167,71 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 2. Sync streaming parity for Mistral, Cohere, and LiteLLM
+### 2. Async streaming parity for Mistral / Cohere / LiteLLM
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
 dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
 src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+Integrations are lazy-import and dependency-free; shared parsing lives in
+src/bir/integrations/_common.py. Sync `stream=True` is already supported across
+OpenAI/Anthropic/Gemini/Mistral/Cohere/LiteLLM/Bedrock/Vertex. Async streaming is
+supported for OpenAI/Anthropic/Gemini via `_is_async_streamed_response`, but the
+async Mistral (`trace_chat_async`), Cohere (`trace_chat_async`), and LiteLLM
+(`trace_completion_async`) wrappers currently await and record one-shot only —
+passing `stream=True` records the unconsumed async stream object's repr with no
+usage.
 
 TASK
-Add synchronous streaming support to the Mistral, Cohere, and LiteLLM wrappers so `stream=True` records accumulated output text and final token usage instead of the unconsumed stream object's repr.
+Add async `stream=True` support to `trace_chat_async` (mistral and cohere) and
+`trace_completion_async` (litellm), matching the existing async streaming behavior
+already implemented for OpenAI/Anthropic/Gemini.
 
 WHY
-Only OpenAI (Chat + Responses), Anthropic, and Gemini handle `stream=True` today. For Mistral/Cohere/LiteLLM the current wrappers pass the stream iterator to `_response_output`, recording a meaningless generator repr and no usage while the user still consumes the stream.
+It completes async streaming coverage so applications using the async Mistral,
+Cohere, and LiteLLM clients get accurate accumulated output and final token usage
+instead of a useless repr, consistent with every other provider wrapper.
 
 IMPLEMENTATION GUIDANCE
-Follow the existing `_stream_chat_completion` pattern in src/bir/integrations/openai.py. In each of mistral.py, litellm.py, and cohere.py: when `kwargs.get("stream") is True`, delegate to a `_stream_*` helper that opens `generation(...)`, calls the provider, checks `_is_streamed_response(stream)`, and otherwise yields each chunk unchanged while accumulating text and the latest usage, finalizing in a `finally` with `gen.set_output(...)` and `_record_usage(...)`. Mistral and LiteLLM emit OpenAI-shaped chunks, so reuse the chunk-delta/usage logic (`choices[0].delta.content`, `usage` with `prompt_tokens`/`completion_tokens`/`total_tokens`); factor a shared `_chunk_delta_content` into `_common.py` only if it cleanly serves more than one module. Cohere v2 streams typed events (`content-delta` carrying `delta.message.content.text`, and a terminal `message-end`/`stream-end` carrying `delta.usage` or `response.usage.tokens`); read text and usage from those shapes via `_value`/`_usage_tokens`. Keep `bir_`-prefixed options and metadata identical to the non-streaming path. Do not import provider packages; test with fake chunk/event objects.
+- Study how the OpenAI/Anthropic async wrappers detect and consume an async stream
+  (`_is_async_streamed_response` in integrations/_common.py and the async iterator
+  returned by the OpenAI wrapper) and mirror that shape exactly.
+- Reuse the existing per-provider chunk parsers already used by the SYNC streaming
+  path (OpenAI-shaped `choices[0].delta.content` + `usage` for Mistral/LiteLLM via
+  `_chunk_delta_content`; Cohere v2 typed events `content-delta`/`message-end`). Do
+  not duplicate parsing logic — factor shared bits into _common.py if needed.
+- Return a lazy async iterator that yields the provider's async-stream events
+  unchanged via `async for`, never buffering, and finalizes model/output/usage on
+  exhaustion, `aclose()`, or a mid-stream error (re-raised unchanged, error text
+  redacted). A provider that ignores streaming and returns a one-shot response must
+  still record via the non-streaming path.
+- Keep `bir_`-prefixed options out of the forwarded provider kwargs.
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; the existing async wrapper names are unchanged (no new
+  public symbol expected).
 
 ACCEPTANCE CRITERIA
-- `stream=True` on Mistral, Cohere, and LiteLLM returns a lazy iterable that yields the provider's chunks unchanged in order.
-- Accumulated text and final usage are recorded after the stream is consumed; the response model refines the request model when chunks carry one.
-- A provider that ignores streaming (returns a one-shot response) still records correctly via the existing non-streaming path.
-- Mid-stream exceptions produce an error-status generation and are re-raised unchanged with redacted persisted error text.
-- Non-streaming behavior for all three wrappers is unchanged; no provider package is imported.
+- `await trace_chat_async(..., stream=True)` (mistral, cohere) and
+  `await trace_completion_async(..., stream=True)` (litellm) resolve to an async
+  iterator that yields provider events unchanged.
+- Once consumed, the recorded generation has the accumulated output text and the
+  final token usage; the response model refines the request model when chunks carry
+  one.
+- A mid-stream error yields an error-status generation, re-raised unchanged with
+  redacted error text; `aclose()` finalizes cleanly without buffering.
+- Sync wrappers and the non-streaming async path are byte-for-byte unchanged.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add/extend tests under tests/ in the existing style (test_mistral_integration.py,
+test_cohere_integration.py, test_litellm_integration.py), covering happy-path async
+streaming, the one-shot fallback, `aclose()` early, and a mid-stream error, using
+fake async-iterator clients (no real network, no provider SDK installed).
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -295,12 +240,14 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md (the streaming section currently notes the async Mistral/Cohere/
+LiteLLM wrappers do not stream yet — update it) and docs/site/integrations.md, and
+add a CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md
+only if the release contract changes.
 
 OUT OF SCOPE
-Do not add Bedrock `converse_stream` or Vertex streaming (separate event shapes — a different task), do not add async streaming, and do not change the event schema or import provider packages.
+Do not touch the sync wrappers, other providers, Bedrock/Vertex, or the callback
+handlers. No new dependencies.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -308,40 +255,61 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 3. `bir show <trace-id>` single-trace tree inspector
+### 3. `bir export-otel` CLI subcommand
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
 dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
 src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+The CLI is in src/bir/cli.py (subcommands: traces, show, stats, tail, experiments,
+send, send-experiment, eval-gate). An OTLP exporter already exists in Python at
+`bir.integrations.otel.export_traces_to_otlp(...)`, gated behind the optional
+`otel` extra (opentelemetry packages imported lazily; runtime stays dep-free).
 
 TASK
-Add a stdlib-only `bir show <trace-id>` CLI subcommand that prints one recorded trace as an indented event tree, with a `--json` structured form.
+Add a stdlib-only `bir export-otel` CLI subcommand that loads local traces and
+forwards them to an OTLP endpoint by calling the existing
+`export_traces_to_otlp(...)`.
 
 WHY
-`bir traces` only lists trace summaries; the sole way to inspect a recorded trace's nested spans/generations/tool calls/scores today is to write Python. A local tree view closes a clear DX gap without a server.
+The exporter is currently reachable only from Python; a CLI front-end lets users
+replay local traces to an OTLP backend from the terminal with no script, matching
+how every other capability (send, eval-gate) is exposed.
 
 IMPLEMENTATION GUIDANCE
-Add the subcommand in src/bir/cli.py's `_build_parser` next to `traces`, with a positional `trace_id`, plus `--path` and `--include-rotated` (mirroring `traces`) and `--json`. Implement `_cmd_show`: call `load_traces(args.path, include_rotated=args.include_rotated)`, find the `LoadedTrace` whose `id == trace_id` (exit 1 with a clear stderr message if absent), and render `trace.events` as a tree using each `TraceEvent.parent_id` under the root. For each node print an indented line with type, name, status, duration (reuse `_format_ms`), and the salient extras already on `TraceEvent`: `model`, `usage`, and `value` for scores. Sort siblings by the module's existing event ordering (reuse `_event_sort_key` from `_sdk` if helpful, or `start_time`). For `--json`, emit a nested `{event, children:[...]}` structure via the existing `_dump_json`. Keep all formatting in the small table/format helper style already in cli.py.
+- Add an `export-otel` subparser in src/bir/cli.py following the existing add_parser
+  idioms. Options: `--path` and `--include-rotated` (resolved exactly like
+  `bir traces`/`bir send`), `--endpoint` (required), repeatable `--header
+  KEY=VALUE`, and `--service-name`/`--timeout` passthrough.
+- Implement `_cmd_export_otel` that loads with the public `load_traces(...)` and
+  calls `export_traces_to_otlp(...)`. Import `bir.integrations.otel` lazily inside
+  the command so the CLI keeps importing with no opentelemetry installed; when the
+  extra is missing, catch the import error and print a clear message pointing to
+  `pip install 'bir-sdk[otel]'`, exiting non-zero.
+- Return an int exit code consistent with the other `_cmd_*` functions; print a
+  short summary (number of traces exported).
 
 CONSTRAINTS (do not violate)
-- Keep `dependencies = []`; any new dep is an optional extra only.
+- Keep `dependencies = []`; the otel packages stay in the optional `otel` extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; this adds a CLI subcommand only — no new top-level symbol.
 
 ACCEPTANCE CRITERIA
-- `bir show <id>` prints the trace's events as an indented tree ordered by parent/child, showing type, name, status, duration, and model/usage/score value where present.
-- `bir show <id> --json` prints a deterministic nested JSON tree.
-- An unknown trace id exits non-zero with a clear message and prints nothing to stdout.
-- `--path` and `--include-rotated` resolve the same files as `bir traces`.
-- The command adds no runtime dependency and reuses the public loaders.
+- `bir export-otel --endpoint http://localhost:4318/v1/traces` exports loaded traces
+  via the existing exporter and prints a summary.
+- With the `otel` extra NOT installed, the command exits non-zero with a clear
+  "install bir-sdk[otel]" message and the rest of the CLI still imports/runs.
+- `--header K=V` (repeatable), `--service-name`, `--path`, `--include-rotated`, and
+  `--timeout` are honored.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add/extend tests under tests/ in the existing style (tests/test_cli.py), injecting a
+fake exporter (e.g. patching export_traces_to_otlp or passing a fake span exporter)
+so no opentelemetry install or network is required. Cover the happy path, header
+parsing, malformed `--header`, and the missing-extra error path.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -350,12 +318,13 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md (the OTLP section) and docs/site/cli-env.md + docs/site/sending.md
+as appropriate, and add a CHANGELOG.md entry under "Unreleased". Update
+docs/SDK_RELEASE_CHECKLIST.md only if the release contract changes.
 
 OUT OF SCOPE
-Do not add color/TUI dependencies, paging, editing/deleting traces, server calls, or a web view; do not change existing subcommands.
+Do not modify the exporter's behavior or attribute mapping, add it to the base
+dependencies, or change other subcommands.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -363,54 +332,77 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 4. `bir stats` local usage/cost/latency summary
+### 4. MkDocs GitHub Pages deploy workflow
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Docs are a MkDocs site under
+docs/site/ with mkdocs.yml at the repo root (docs_dir: docs/site). The docs
+toolchain is isolated in the optional `docs` extra. CI (.github/workflows/ci.yml)
+already runs `mkdocs build --strict` on every PR and push to main, but the site is
+never published — `site_url` already points at https://bir-ai.github.io/bir-python/.
 
 TASK
-Add a stdlib-only `bir stats` CLI subcommand that aggregates local traces into a quick usage/cost/latency summary, with a `--json` form.
+Add a GitHub Actions workflow that deploys the MkDocs site to GitHub Pages on push
+to `main` (only after the strict build passes), without weakening the existing
+strict-build gate.
 
 WHY
-There is no local way to see totals (how many traces, how many tokens, how much cost, how slow) without writing a script. A compact summary makes the local-first workflow useful for cost/health checks without a server.
+The documentation is built and validated but never published, so the advertised
+`site_url` 404s. A deploy workflow ships the docs users are told to read.
 
 IMPLEMENTATION GUIDANCE
-Add the subcommand in src/bir/cli.py with `--path`, `--include-rotated`, and `--json`. Implement `_cmd_stats`: load via `load_traces(...)` and `load_events(...)`, then aggregate over events — total traces, success/error trace counts, summed `usage` input/output/total tokens across generation events, summed `cost` per `currency` (do not mix currencies; group by currency code), and latency stats over trace `duration_ms` (count, mean, and p95 computed with stdlib only — sort and index, no numpy). Render a small aligned table with the existing `_print_table`/`_format_ms`/`_format_scores`-style helpers; `--json` emits a deterministic object via `_dump_json`. Empty input prints zeros/`-` and exits 0. Keep currency handling explicit so a deployment mixing USD and EUR shows both lines rather than a wrong sum.
+- Add .github/workflows/docs-deploy.yml triggered on push to main (and
+  workflow_dispatch). Use the official Pages actions: actions/configure-pages,
+  build with the `docs` extra and `mkdocs build --strict`, upload `site/` via
+  actions/upload-pages-artifact, deploy via actions/deploy-pages. Set
+  `permissions: pages: write, id-token: write` and a `concurrency` group so
+  overlapping deploys don't race.
+- Keep the existing CI strict-build job intact as the PR gate; the deploy job must
+  itself run the strict build so a broken docs change can't publish.
+- (Optional, only if low-risk) switch the theme to mkdocs-material by adding
+  `mkdocs-material` to the `docs` extra and `theme: name: material` in mkdocs.yml;
+  if you do, keep `strict: true` green and update the README docs build note. If
+  this risks the strict build, leave the default `mkdocs` theme and note it.
 
 CONSTRAINTS (do not violate)
-- Keep `dependencies = []`; any new dep is an optional extra only.
+- Keep `dependencies = []`; doc tooling stays in the optional `docs` extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; this is CI/docs only — no code or API change.
 
 ACCEPTANCE CRITERIA
-- `bir stats` prints trace count, success/error counts, summed input/output/total tokens, summed cost per currency, and latency count/mean/p95.
-- `bir stats --json` emits the same figures as deterministic JSON.
-- Costs in different currencies are reported separately, never summed together.
-- `--path` and `--include-rotated` behave as in `bir traces`; empty input exits 0 with zeroed output.
-- No runtime dependency is added; p95 is computed with the standard library only.
+- A new workflow builds the docs with `--strict` and deploys `site/` to GitHub Pages
+  on push to main, with correct `pages`/`id-token` permissions and a concurrency
+  group.
+- The PR-time strict build gate in ci.yml is unchanged (still blocks bad docs).
+- `mkdocs build --strict` still passes locally and in CI (theme change, if any,
+  included).
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+No Python unit tests are expected for a workflow; if a theme/extra change is made,
+keep tests/test_docs_ci.py green and run `mkdocs build --strict` locally to prove
+the site builds. Note in your report that the deploy itself can only be fully
+exercised on GitHub.
 
 VERIFY (run these and report results)
+- python -m pip install -e ".[docs]" && mkdocs build --strict
 - PYTHONPATH=src python -m unittest discover -s tests
 - PYTHONPATH=src python -m pytest tests/test_examples.py
 - pyright
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md's documentation section to mention the published site URL and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes.
 
 OUT OF SCOPE
-Do not add charts, time-bucketing, per-model breakdowns beyond totals (unless trivially free), provider price lookups, server calls, or new dependencies.
+Do not remove or weaken the strict-build CI gate, do not add runtime dependencies,
+and do not restructure the docs content/navigation beyond what a theme change
+requires.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -418,40 +410,62 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 5. Public `get_current_trace_id()` / `get_current_span_id()`
+### 5. `bir.testing` in-memory trace-capture helper
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py writes
+line-delimited JSON to `.bir/traces.jsonl` (configurable via
+`configure(trace_path=...)`); `load_events()`/`load_traces()` read it back. Public
+API is re-exported from src/bir/__init__.py.
 
 TASK
-Expose two public accessors, `get_current_trace_id()` and `get_current_span_id()`, that return the active trace and current parent/span ids (or `None`), for correlating application logs with Bir traces.
+Add a small, public `bir.testing` module exposing a context manager (e.g.
+`capture_traces()`) that routes trace writes to a temporary location and yields a
+handle to read back the captured events/traces in-memory, so users can assert on
+their own instrumentation in tests without touching their real `.bir/` directory.
 
 WHY
-The active ids live only in the private `_current_trace_id` / `_current_parent_id` ContextVars, so applications cannot stamp their own logs/metrics with the trace id. A tiny read-only accessor is a high-value, low-risk DX addition.
+Users instrumenting their apps currently have to point `configure(trace_path=...)`
+at a temp file and call `load_events()` by hand in every test. A first-class,
+self-cleaning helper is a high-leverage DX win that mirrors what the SDK's own tests
+already do internally.
 
 IMPLEMENTATION GUIDANCE
-In src/bir/_sdk.py add `get_current_trace_id() -> str | None` returning `_current_trace_id.get()` and `get_current_span_id() -> str | None` returning `_current_parent_id.get()` (the parent id is the innermost active span/generation/trace node). Add concise docstrings noting they return `None` outside any trace and that the values are the same ids written to the JSONL `trace_id`/`parent_id` fields. Re-export both from src/bir/__init__.py and add them to `__all__`. Do not expose the ContextVars themselves or any setter. Confirm correctness under nested spans (inside `with span(...)` the span id is returned), `@observe()` (sync and async), and concurrent asyncio tasks (each task sees its own ids).
+- Add src/bir/testing.py. Implement `capture_traces()` as a context manager that:
+  swaps `_config.trace_path` to a fresh temp file (using the existing configure /
+  internal config plumbing) on enter, restores the prior config on exit, and yields
+  an object with methods like `.events()` and `.traces()` that call the public
+  `load_events`/`load_traces` against the temp path.
+- Reuse public loaders; do not reimplement JSONL parsing. Ensure capture-opt-in and
+  redaction behavior are unchanged (the helper only redirects where events are
+  written, never what or whether they are captured).
+- Restore the prior config (including a user-set trace_path) on exit even on
+  exception. Clean up the temp file/directory. Document that it mutates global
+  config for its duration (like `configure`).
+- Re-export `capture_traces` (and any small handle type) from `bir.testing` only;
+  keep the top-level API minimal (prefer `from bir.testing import capture_traces`).
 
 CONSTRAINTS (do not violate)
-- Keep `dependencies = []`; any new dep is an optional extra only.
+- Keep `dependencies = []`; any new dep is an optional extra only (stdlib `tempfile` only).
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; scope new symbols to `bir.testing` rather than the top level.
 
 ACCEPTANCE CRITERIA
-- `get_current_trace_id()` / `get_current_span_id()` return the active ids inside a trace and `None` outside one, without raising.
-- Inside a nested `span()`/`generation()` the span accessor returns the innermost node's id; the trace accessor returns the root id.
-- Values match the `trace_id`/`parent_id` later written to the JSONL for events created at that point.
-- Concurrent asyncio tasks observe isolated ids.
-- Both symbols are importable from `bir` and listed in `__all__`; no setter or ContextVar is exposed.
+- `with capture_traces() as cap: ...; cap.events()` returns the TraceEvents written
+  inside the block and nothing from outside it.
+- The prior `configure(...)` state (including a user-set trace_path) is fully
+  restored after the block, even on exception.
+- Redaction and opt-in capture behavior are identical to writing to a real file.
+- The temp file/directory is cleaned up on exit.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add tests/test_testing.py in the existing style covering: events captured inside the
+block, isolation from prior/outer traces, config restoration after a normal exit and
+after an exception, and that capture/redaction still apply.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -460,12 +474,14 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Add a short "Testing your instrumentation" section to README.md and/or
+docs/site/core-api.md, and add a CHANGELOG.md entry under "Unreleased". Update
+docs/SDK_RELEASE_CHECKLIST.md only if the release contract changes.
 
 OUT OF SCOPE
-Do not add id setters, context injection/extraction, W3C traceparent propagation, or any cross-process correlation; do not change how ids are generated or stored.
+Do not add a pytest plugin or fixture auto-registration, do not change how/what is
+captured, and do not alter the default trace path behavior outside the context
+manager.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -473,40 +489,65 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 6. Post-creation `set_metadata()` on event context managers
+### 6. Threaded `max_workers` for the sync experiment runner
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Evals live in src/bir/evals.py.
+`run_experiment()` runs a task over a Dataset sequentially and persists per-example
+results, JSONL rows, and a summary in dataset order under `.bir/experiments/`.
+`run_experiment_async(max_concurrency=...)` already runs async/sync tasks
+concurrently while preserving dataset order. There is no concurrency for the purely
+synchronous `run_experiment()`.
 
 TASK
-Add a `set_metadata(...)` method to the span, generation, tool_call, retrieval, and trace context managers so callers can attach metadata discovered during the body before the event is written.
+Add an opt-in `max_workers` parameter to `run_experiment()` that runs examples
+concurrently using a stdlib thread pool while preserving dataset-ordered results,
+JSONL rows, and summary aggregates.
 
 WHY
-Event metadata is currently fixed at context-manager creation, and spans carry none at all, so context discovered mid-body (a resolved route, a cache-hit flag, a request id) cannot be recorded. The event schema already has a free-form `metadata` object on every event, so this is additive with no wire change.
+Sync tasks that are I/O-bound (network LLM calls behind a sync client) currently run
+one example at a time; a thread pool gives a large speedup without forcing users
+onto the async runner, matching the concurrency the async runner already offers.
 
 IMPLEMENTATION GUIDANCE
-In src/bir/_sdk.py add `set_metadata(self, metadata: Mapping[str, Any]) -> None` (merge/update semantics into an instance dict) to `_Generation`, `_ToolCall` (so `_Retrieval` inherits it), and `_TraceContext`. Give `_Span` a `metadata` attribute and pass it through its `_event(...)` call (spans currently pass no metadata, defaulting to `{}`), then add the same setter. Validate the argument is a `Mapping` (raise `TypeError` otherwise) following the `score()` metadata check. At `__exit__`, the merged metadata must pass through the existing `_safe_capture(...)` redaction exactly like the constructor-supplied metadata, and must compose correctly with generation `prompt` metadata and the retrieval `kind`/trace `service` metadata already injected. Keep merge semantics simple and documented (later keys win). Do not change `score()` (it is not a context manager) unless trivially consistent.
+- Default `max_workers=1` so existing behavior is byte-for-byte unchanged
+  (sequential, single attempt). Validate it as a positive int with the existing
+  `_validate_non_negative_int`-style helpers (reuse, don't invent).
+- Use `concurrent.futures.ThreadPoolExecutor`; run each example's task+evaluators in
+  a worker but assemble the persisted results, JSONL rows, and summary strictly in
+  dataset order regardless of completion order (mirror how `run_experiment_async`
+  orders output).
+- Preserve identical semantics to the sequential path for redaction,
+  `raise_on_error`, `record_traces` (each example must keep an isolated trace tree —
+  note trace context is contextvar-based and not shared across threads by default,
+  which is the desired isolation), and the persisted schema. Do not change
+  `_EXPERIMENT_SCHEMA_VERSION` or the on-disk shape.
 
 CONSTRAINTS (do not violate)
-- Keep `dependencies = []`; any new dep is an optional extra only.
+- Keep `dependencies = []`; stdlib `concurrent.futures` only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+  The experiment JSONL/summary shape and tests/fixtures/valid-experiment.json must
+  stay identical.
+- Keep the public API small; `max_workers` is an additive keyword argument only.
 
 ACCEPTANCE CRITERIA
-- `with generation(...) as gen: gen.set_metadata({...})` merges into the written generation metadata, redacted, without dropping constructor metadata or the `prompt` block.
-- The setter works on span, tool_call, retrieval, and trace context managers (sync and `async with`); spans now persist metadata.
-- Non-mapping arguments raise `TypeError`; repeated calls merge with later keys winning.
-- Redaction still applies to all merged metadata; no raw secret appears in the JSONL.
-- No new public top-level symbol is required; the event schema_version is unchanged.
+- `run_experiment(..., max_workers=N)` (N>1) executes examples concurrently but
+  persists results/rows/summary in dataset order, identical to the sequential run
+  for the same inputs.
+- `max_workers=1` (default) is behaviorally unchanged from today.
+- `raise_on_error`, `record_traces` isolation, redaction, and the persisted schema
+  match the sequential path; invalid `max_workers` raises a clear error.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Extend tests/test_evals.py in the existing style: assert order-preservation under
+concurrency, equivalence of the persisted output to the sequential run, trace-tree
+isolation with `record_traces=True`, `raise_on_error` behavior, and validation of
+bad `max_workers`. Use a task with controlled timing/barriers to prove real
+concurrency without flakiness.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -515,12 +556,13 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md (evals section) and docs/site/evals-experiments.md, and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes.
 
 OUT OF SCOPE
-Do not add new event fields or types, do not make metadata mutable after write, and do not change capture defaults or the redaction marker.
+Do not change `run_experiment_async`, the evaluator APIs, the experiment schema, or
+the comparison/gate code.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -528,40 +570,68 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 7. `bir validate` trace-JSONL schema validator
+### 7. Instructor integration
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Optional integrations live in
+src/bir/integrations/ and are lazy-import and dependency-free: the user passes the
+provider callable/client in, `bir_`-prefixed kwargs are stripped, shared parsing is
+in src/bir/integrations/_common.py, and each public symbol is re-exported from
+src/bir/integrations/__init__.py. Existing wrappers (openai, anthropic, litellm,
+etc.) follow `trace_<verb>(callable, /, *args, bir_name=..., bir_metadata=...,
+bir_capture_input=..., bir_capture_output=..., **kwargs)` returning the provider
+result unchanged and recording one generation inside the active trace.
 
 TASK
-Add a stdlib-only `bir validate [path]` CLI subcommand that validates a trace JSONL file against the schema-1.0 event contract and reports every offending line.
+Add a dependency-free Instructor integration that wraps an Instructor-patched
+client's structured-output create call (e.g. `client.chat.completions.create`
+returning a Pydantic model or `(model, completion)`), recording one generation with
+model and token usage without importing `instructor`.
 
 WHY
-There is no local way to check whether a trace file is well-formed before reading or sending it, and the schema is a shared contract with the separate bir-app repo. A validator aids debugging and guards that contract.
+Instructor is a very common structured-output layer over OpenAI-compatible clients;
+a wrapper lets those users trace structured calls with the same one-line pattern as
+every other provider, with zero added dependency.
 
 IMPLEMENTATION GUIDANCE
-Add the subcommand in src/bir/cli.py with an optional positional `path` (default to the configured trace path via the existing `_resolved_trace_path`) and `--json`. Implement `_cmd_validate` by reusing the existing strict per-line parser in src/bir/_sdk.py — read the file line by line and run each non-empty line through `_trace_event_from_payload` (or a thin loader that surfaces per-line `ValueError`s) so the rules already enforced by `load_events` (schema_version, required fields, type/status vocab, datetime ordering, JSON-compatibility) are applied. Unlike `load_events`, do not stop at the first bad line: collect `(line_number, message)` for every failure and report them all. Print a human summary (`OK: N events` or a list of `line K: <error>`) and, with `--json`, a deterministic `{valid, event_count, errors:[...]}` object. Exit 0 when valid, 1 when any error is found or the file is missing. If reusing the private parser cleanly requires a tiny internal helper in `_sdk.py`, add one without widening the public API.
+- Add src/bir/integrations/instructor.py with `trace_create(create, /, *args,
+  bir_name="instructor.create", bir_metadata=..., bir_capture_input=...,
+  bir_capture_output=..., **kwargs)` mirroring the openai wrapper's structure.
+- Read model from `kwargs["model"]` (refined from the response when available) and
+  token usage from the OpenAI-shaped usage block; Instructor can return either the
+  parsed model or `create_with_completion`-style `(model, raw_completion)` — handle
+  both by reading usage from the raw completion when present, and serialize the
+  parsed model via `_response_output` (`model_dump`/`dict` fallback). Reuse
+  `_common.py` helpers (`_value`, `_usage_tokens`, `_string_or_none`,
+  `_response_output`); add shared helpers there only if genuinely reused.
+- Provide an async counterpart `trace_create_async` if the async create coroutine
+  shape is straightforward; otherwise scope to sync and note it. Never import
+  instructor/openai. Re-export the public symbol(s) from integrations/__init__.py.
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; re-export new public symbols from src/bir/integrations/__init__.py.
 
 ACCEPTANCE CRITERIA
-- `bir validate` on a well-formed file prints an OK summary and exits 0.
-- A file with one or more malformed lines reports each offending line number and reason and exits 1.
-- `--json` emits `{valid, event_count, errors}` deterministically.
-- A missing file exits non-zero with a clear message.
-- Validation rules match the existing strict loader exactly; no runtime dependency is added.
+- `trace_create(create, model="gpt-4o-mini", response_model=...)` returns the
+  provider result unchanged and records one generation with the model and token
+  usage when present.
+- Works inside an active trace; raises the same "requires an active trace" error as
+  other wrappers when used outside one.
+- Both the parsed-model and `(model, completion)` return shapes record usage
+  correctly; `bir_`-prefixed options are never forwarded to `create`.
+- `instructor` is never imported.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add tests/test_instructor_integration.py in the existing integration-test style with
+a fake `create` callable returning both shapes (parsed model and model+completion),
+covering happy path, missing usage, capture opt-in, redaction, and the
+no-active-trace error. No real network or instructor install.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -570,12 +640,14 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update docs/site/integrations.md and README.md's integration list, and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes. Add the new module to scripts/verify_release.py's
+import smoke list if integration modules are enumerated there.
 
 OUT OF SCOPE
-Do not introduce a second/divergent schema definition, do not auto-fix or rewrite files, do not validate experiment files (separate format), and do not change the schema or fixtures.
+Do not modify other integrations, _common.py beyond genuinely shared helpers, or the
+core SDK.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -583,40 +655,63 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 8. Optional local cost estimation from a user-supplied price table
+### 8. Pydantic AI integration
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Optional integrations live in
+src/bir/integrations/ and are lazy-import and dependency-free. Two patterns exist:
+call wrappers (`trace_<verb>(callable, ...)`) and event-bridge handlers that map a
+framework's own callbacks/events into Bir traces without importing the framework
+(e.g. BirCallbackHandler for LangChain, BirLlamaIndexHandler for LlamaIndex,
+BirAgentsTracingProcessor for the OpenAI Agents SDK). Shared parsing is in
+_common.py; public symbols are re-exported from integrations/__init__.py.
 
 TASK
-Add an opt-in `configure(model_prices=...)` price table that auto-fills a generation's cost from its token usage, shipping no bundled prices.
+Add a dependency-free Pydantic AI integration that maps a Pydantic AI agent run into
+a Bir trace — turning model requests into generations (with model + token usage) and
+tool calls into tool_call events — without importing `pydantic_ai`.
 
 WHY
-Bir deliberately treats cost as user-provided and bundles no price table (provider prices go stale). Many users still want local cost dashboards; letting them supply their own per-token rates yields cost without Bir owning a list of prices.
+Pydantic AI is a popular typed-agent framework; a dependency-free bridge lets its
+users get Bir traces with the same opt-in capture and redaction guarantees as the
+other agent integrations.
 
 IMPLEMENTATION GUIDANCE
-Extend the frozen `_Config` in src/bir/_sdk.py with an immutable `model_prices` mapping (default empty) and add a `model_prices` keyword to `configure(...)`, validated once into a normalized, hashable structure: a mapping of model name -> rates with non-negative finite `input` and/or `output` per-token rates (and an optional explicit `currency`, default "USD"). Reuse the existing `_validate_non_negative_number` style; reject booleans, negatives, NaN/inf, unknown rate keys, and oversized tables with clear errors. In `_Generation.__exit__`, when `self.cost is None`, `self.usage` is present, and `self.model` matches a configured price, derive `input_cost`/`output_cost`/`total_cost` via the existing `set_cost(...)` path (so the same validation, currency handling, and total derivation apply) before building the event. An explicit `set_cost(...)` by the caller must always win — never overwrite a user-set cost. Add the configured-rates note to `_reset_config_for_tests()` coverage. This is purely local and opt-in: with no `model_prices` set, behavior is byte-for-byte unchanged. Keep the surface minimal (one config field) and document the trade-off that rates are the user's responsibility.
+- Pick the lowest-coupling hook Pydantic AI exposes for instrumentation (its
+  event/usage stream or an instrumentation/processor interface) and implement a
+  handler class (e.g. `BirPydanticAIHandler`) mirroring the structure of
+  BirAgentsTracingProcessor: open a Bir trace per run, map model spans to
+  generations and tool spans to tool_calls, mark failures as errors, and track
+  active spans by the framework's own id so concurrent/nested runs stay isolated.
+- Read model and token usage from the framework's usage objects via duck-typed
+  access (reuse `_common.py` helpers); never import pydantic_ai. Respect opt-in
+  capture, overridable per handler with `capture_inputs`/`capture_outputs`.
+- Re-export `BirPydanticAIHandler` from integrations/__init__.py. If Pydantic AI's
+  current API does not offer a clean dependency-free seam, document the exact hook
+  you used and keep the surface minimal.
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; re-export new public symbols from src/bir/integrations/__init__.py.
 
 ACCEPTANCE CRITERIA
-- With no `model_prices` configured, generation cost behavior is unchanged.
-- With a price table set, a generation that has usage and a matching model but no explicit cost gets `input_cost`/`output_cost`/`total_cost` filled from the rates, in the configured currency.
-- An explicit `gen.set_cost(...)` always takes precedence and is never overwritten.
-- Invalid tables (negative/non-finite/boolean rates, unknown keys, non-mapping, oversized) raise clear `ValueError`/`TypeError` at `configure()` time.
-- No price data is bundled in the package; the feature is stdlib-only and the event schema_version is unchanged.
+- A simulated Pydantic AI run drives the handler to produce one Bir trace whose model
+  events are generations (model + usage when present) and tool events are tool_calls,
+  with failures recorded as errors.
+- Concurrent/nested runs stay isolated by framework id; capture follows the opt-in
+  settings and is overridable per handler.
+- `pydantic_ai` is never imported.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add tests/test_pydantic_ai_integration.py in the existing bridge-handler test style
+(see test_openai_agents_integration.py / test_langchain_integration.py), feeding
+synthetic framework events, asserting the produced Bir events, isolation, error
+mapping, capture opt-in, and redaction. No real framework install.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -625,12 +720,14 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update docs/site/integrations.md and README.md's agent-framework section, and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes. Add the module to scripts/verify_release.py's import
+smoke list if integration modules are enumerated there.
 
 OUT OF SCOPE
-Do not bundle any provider price list, fetch prices over the network, add tiered/cached pricing, change the cost fields/schema, or make pricing the default.
+Do not modify other integrations or the core SDK; do not add pydantic_ai as a
+dependency.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -638,40 +735,56 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 9. Bedrock `converse_stream` + Vertex AI streaming parity
+### 9. DSPy integration
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Optional integrations live in
+src/bir/integrations/ and are lazy-import and dependency-free. Patterns: call
+wrappers (`trace_<verb>(callable, ...)`) and event-bridge handlers (LangChain,
+LlamaIndex, OpenAI Agents). Shared parsing is in _common.py; public symbols are
+re-exported from integrations/__init__.py.
 
 TASK
-Add synchronous streaming support to the AWS Bedrock and Google Vertex AI wrappers so their streaming APIs record accumulated output text and final token usage.
+Add a dependency-free DSPy integration that records DSPy language-model calls as Bir
+generations (model + token usage) without importing `dspy`.
 
 WHY
-The Mistral/Cohere/LiteLLM streaming work (if already done) leaves Bedrock and Vertex without streaming because their stream shapes differ from the OpenAI-style chunk. Completing them gives uniform streaming coverage across all provider wrappers.
+DSPy is a widely used program-of-thought / prompt-optimization framework; tracing
+its underlying LM calls with the standard opt-in capture and redaction lets DSPy
+users see real cost/latency without a new dependency.
 
 IMPLEMENTATION GUIDANCE
-For Bedrock (src/bir/integrations/bedrock.py): add a `trace_converse_stream` wrapper (and re-export it) for `bedrock-runtime`'s `converse_stream`. The Converse stream returns a response whose `"stream"` is an iterable of typed events — accumulate text from `contentBlockDelta.delta.text`, capture the stop on `messageStop`, and read usage from the terminal `metadata.usage` (`inputTokens`/`outputTokens`/`totalTokens`). Yield events unchanged and finalize in a `finally`. Keep the request `modelId` as the model. For Vertex (src/bir/integrations/vertexai.py): support `stream=True` on `trace_generate_content` (Vertex returns an iterator of response chunks) — accumulate `chunk.text`/candidate text and read final `usage_metadata` (`prompt_token_count`/`candidates_token_count`/`total_token_count`), preferring a chunk `model_version` for the model over `bir_model`. Reuse `_value`/`_usage_tokens`/`_string_or_none`/`_is_streamed_response`; fall back to one-shot recording when the call did not actually stream. Do not import boto3 or vertexai; use fake stream objects in tests.
+- Choose the cleanest dependency-free seam: either a `trace_lm(lm_call, /, *args,
+  bir_name="dspy.lm", ...)` wrapper around a DSPy LM `__call__`/`request`, or a
+  callback/inspection hook DSPy exposes for LM calls. Mirror the existing wrapper
+  signature (`bir_`-prefixed options stripped, provider result returned unchanged,
+  one generation recorded inside the active trace).
+- Read model and OpenAI-shaped token usage via `_common.py` helpers; serialize the
+  output with `_response_output`. Never import dspy. Provide an async variant only if
+  the call shape is clearly async.
+- Re-export the public symbol(s) from integrations/__init__.py. Document exactly
+  which DSPy surface you wrap.
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; re-export new public symbols from src/bir/integrations/__init__.py.
 
 ACCEPTANCE CRITERIA
-- `trace_converse_stream(...)` yields the Converse stream events unchanged and records accumulated text plus `inputTokens`/`outputTokens`/`totalTokens` from the terminal metadata event.
-- Vertex `trace_generate_content(..., stream=True)` yields chunks unchanged and records accumulated text plus `usage_metadata` token counts, refining the model from a chunk `model_version` when present.
-- A non-streaming response on either path still records via the existing one-shot logic.
-- Mid-stream errors yield an error-status generation and re-raise unchanged with redacted persisted error text.
-- Neither provider SDK is imported, and non-streaming behavior is unchanged.
+- Wrapping a DSPy LM call records one generation with model and token usage when
+  present and returns the provider result unchanged.
+- Works only inside an active trace (same error as other wrappers otherwise);
+  `bir_`-prefixed options are never forwarded.
+- `dspy` is never imported.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add tests/test_dspy_integration.py in the existing integration-test style with a fake
+LM call, covering happy path, missing usage, capture opt-in, redaction, and the
+no-active-trace error. No real network or dspy install.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -680,12 +793,13 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update docs/site/integrations.md and README.md's integration list, and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes. Add the module to scripts/verify_release.py's import
+smoke list if integration modules are enumerated there.
 
 OUT OF SCOPE
-Do not add async streaming, do not implement Bedrock `invoke_model_with_response_stream` (raw model stream — a different API), and do not change the event schema or import provider packages.
+Do not modify other integrations or the core SDK; do not add dspy as a dependency.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -693,40 +807,59 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 10. OpenAI Agents SDK tracing-processor integration
+### 10. CrewAI integration
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Optional integrations live in
+src/bir/integrations/ and are lazy-import and dependency-free. Event-bridge handlers
+(BirCallbackHandler for LangChain, BirLlamaIndexHandler for LlamaIndex,
+BirAgentsTracingProcessor for OpenAI Agents) map a framework's own callbacks into Bir
+traces without importing the framework. Shared parsing is in _common.py; public
+symbols are re-exported from integrations/__init__.py.
 
 TASK
-Add a dependency-free OpenAI Agents SDK integration that maps Agents SDK traces/spans into Bir trace/generation/tool_call events via the SDK's tracing-processor hook.
+Add a dependency-free CrewAI integration that maps a CrewAI crew/agent run into a Bir
+trace — agent/task steps as spans, LLM calls as generations, tool usage as
+tool_calls — without importing `crewai`.
 
 WHY
-The OpenAI Agents SDK is a widely used agent framework with a documented tracing-processor interface (analogous to the LangChain callback surface Bir already supports). Bridging it lets agent runs appear as Bir traces without importing the Agents SDK.
+CrewAI is a popular multi-agent orchestration framework; a dependency-free bridge
+gives CrewAI users Bir traces with the same opt-in capture and redaction guarantees
+as the other agent integrations.
 
 IMPLEMENTATION GUIDANCE
-First verify the current public tracing-processor interface of the OpenAI Agents SDK (the method names and span/trace objects it passes); implement against that, adapting if the surface has shifted. Model the implementation on src/bir/integrations/langchain.py: a `BirAgentsTracingProcessor` class with the processor lifecycle methods (e.g. on trace start/end and span start/end) that opens a Bir `_trace_context` for an agent run root and maps spans by kind — model/LLM spans to `generation(...)`, tool/function spans to `tool_call(...)`, and others to `span(...)` — tracking active runs by span id in a dict exactly as the LangChain handler tracks `run_id`. Read model and token usage from the span's data via mapping-or-attribute access and the `_common.py`-style helpers; honor `capture_inputs`/`capture_outputs` overrides. Put the class in a new module (e.g. src/bir/integrations/openai_agents.py) and re-export it from src/bir/integrations/__init__.py. Never import the `agents`/`openai-agents` package; tests pass fake trace/span objects matching the interface you verified.
+- Use CrewAI's step/callback or event hooks (e.g. step_callback / task_callback or
+  its event bus) as the dependency-free seam. Implement a handler (e.g.
+  `BirCrewAIHandler`) mirroring BirAgentsTracingProcessor: open one Bir trace per
+  crew run, map LLM events to generations (model + usage), tool events to tool_calls,
+  and agent/task steps to spans; record failures as errors; track active nodes by the
+  framework's own ids so concurrent/nested runs stay isolated.
+- Read model/usage via duck-typed access and `_common.py` helpers; never import
+  crewai. Respect opt-in capture, overridable per handler with
+  `capture_inputs`/`capture_outputs`. Re-export `BirCrewAIHandler` from
+  integrations/__init__.py. Document the exact hook used.
 
 CONSTRAINTS (do not violate)
 - Keep `dependencies = []`; any new dep is an optional extra only.
 - Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
 - Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
   repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep the public API small; re-export new public symbols from src/bir/integrations/__init__.py.
 
 ACCEPTANCE CRITERIA
-- An agent run processed by the handler produces a Bir trace whose nested events map model spans to generations (with model/usage when present) and tool spans to tool calls.
-- Span start/end and error paths open and close the matching Bir context managers, preserving redaction and capture-opt-in behavior.
-- Concurrent or nested spans are tracked by id without leaking context between runs.
-- Importing the module and constructing the processor succeed with no Agents SDK installed.
-- The integration adds no runtime dependency and follows the existing callback-handler idioms.
+- A simulated CrewAI run drives the handler to produce one Bir trace with LLM events
+  as generations, tool events as tool_calls, and steps as spans; failures recorded as
+  errors.
+- Concurrent/nested runs stay isolated by framework id; capture follows opt-in
+  settings and is overridable per handler.
+- `crewai` is never imported.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Add tests/test_crewai_integration.py in the existing bridge-handler test style,
+feeding synthetic framework events and asserting the produced Bir events, isolation,
+error mapping, capture opt-in, and redaction. No real framework install.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
@@ -735,12 +868,13 @@ VERIFY (run these and report results)
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update docs/site/integrations.md and README.md's agent-framework section, and add a
+CHANGELOG.md entry under "Unreleased". Update docs/SDK_RELEASE_CHECKLIST.md only if
+the release contract changes. Add the module to scripts/verify_release.py's import
+smoke list if integration modules are enumerated there.
 
 OUT OF SCOPE
-Do not import or require the Agents SDK, do not implement other frameworks (Pydantic AI, DSPy, CrewAI, Haystack) in this change, and do not change the event schema. If verification shows the tracing-processor interface is not yet stable enough to target safely, stop and report that finding instead of guessing.
+Do not modify other integrations or the core SDK; do not add crewai as a dependency.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
@@ -748,57 +882,103 @@ do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main
 committing.
 ```
 
-### 11. OpenTelemetry/OTLP export behind an optional `[otel]` extra
+### 11. Expanded redaction (Stripe / Azure / PEM private-key blocks) — CROSS-REPO
 
 ```text
 CONTEXT
 Repo: bir-python (PyPI package `bir-sdk`, import name `bir`) — a minimal, zero-runtime-
-dependency, local-first LLM tracing + evals SDK. Core in src/bir/_sdk.py, evals in
-src/bir/evals.py, optional integrations in src/bir/integrations/, tests in tests/.
+dependency, local-first LLM tracing + evals SDK. Best-effort capture redaction lives
+in src/bir/_sdk.py (`_redact_text` and the secret-key rules), already covering
+labeled secrets, bearer tokens, OpenAI `sk-`, JWTs, AWS AKIA/ASIA, GCP `AIza`, Slack
+`xox*`, and GitHub `gh*_`. Users can widen redaction with
+`configure(additional_secret_keys=..., additional_redaction_patterns=...)`. The
+redaction rules are a SHARED CONTRACT with the separate `bir-app` server repo:
+tests/fixtures/redaction-cases.json (guarded by tests/test_redaction_parity.py and
+scripts/fixtures.py check) must match an independently maintained redactor in
+bir-app.
 
 TASK
-Add an optional OpenTelemetry/OTLP exporter, behind a new `[otel]` extra, that converts loaded Bir traces into OpenTelemetry spans and ships them to an OTLP endpoint.
+Add built-in best-effort redaction for additional common credential formats — Stripe
+secret/restricted keys (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`), Azure-style
+keys, and PEM private-key blocks (`-----BEGIN ... PRIVATE KEY-----` ...
+`-----END ... PRIVATE KEY-----`) — without weakening any existing rule.
 
 WHY
-Teams that already run an observability backend want Bir's local traces forwarded there. An opt-in OTLP bridge provides that without compromising the zero-runtime-dependency, local-first defaults.
+These are high-value secrets that frequently appear in captured payloads and are not
+yet covered; adding them strengthens the default privacy posture.
 
 IMPLEMENTATION GUIDANCE
-Add a new module (e.g. src/bir/integrations/otel.py) exposing a small function/class such as `export_traces_to_otlp(traces, *, endpoint=..., service_name=...)` that lazily imports `opentelemetry` (sdk + OTLP exporter) inside the function body and raises a clear, actionable error if the extra is not installed — mirroring how provider wrappers avoid hard imports. Map each `LoadedTrace`/`TraceEvent` to an OTel span: the trace root to a root span and child events to child spans using `parent_id`; set start/end from the ISO timestamps; set status from `success`/`error`; and attach attributes using GenAI semantic conventions where they exist (e.g. `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens`) plus `bir.*` attributes for the rest (event type, score value). Accept already-loaded traces (and/or a path that it loads via `load_traces`). Add `[project.optional-dependencies] otel = [...]` to pyproject.toml; keep `dependencies = []`. Guard the test so it skips cleanly when opentelemetry is absent, or use a minimal fake tracer/exporter to assert the mapping without a real backend. Document that this is opt-in and never imported by default.
+- THIS IS A CROSS-REPO CONTRACT CHANGE. Loudly flag it: the new patterns and any new
+  entries in tests/fixtures/redaction-cases.json must be mirrored by bir-app's
+  independent redactor and its copy of the fixture BEFORE or WITH this change. Do not
+  let the SDK ship ahead of the server. Confirm the coordination plan in your report
+  and add an explicit CROSS-REPO note in the CHANGELOG entry (mirroring how the 0.2.0
+  redaction expansion was documented).
+- Add the new `re.sub` rules in `_redact_text` after the existing built-in patterns
+  and before the user-supplied `additional_redaction_patterns` loop, each replacing
+  its whole match with the `[redacted]` marker. Anchor them tightly to avoid
+  over-redaction (PEM block spanning multiple lines via a non-greedy, DOTALL-scoped
+  match; Stripe/Azure with word boundaries and length classes like the existing
+  AKIA/AIza rules).
+- Update tests/fixtures/redaction-cases.json with positive and negative cases and
+  regenerate the checksum manifest with scripts/fixtures.py (use whatever regenerate
+  command the repo provides; run `scripts/fixtures.py check` to confirm). Built-in
+  rules must remain impossible to disable.
 
 CONSTRAINTS (do not violate)
-- Keep `dependencies = []`; any new dep is an optional extra only.
-- Capture stays opt-in; never weaken redaction (keep tests/test_redaction_parity.py green).
-- Do NOT change schema_version "1.0" or tests/fixtures/* (shared contract with the bir-app
-  repo) unless the task explicitly is a schema change — if so, call it out loudly.
-- Keep the public API small; re-export new public symbols from the right __init__.py.
+- Keep `dependencies = []`; stdlib `re` only.
+- Capture stays opt-in; NEVER weaken redaction — only widen. tests/test_redaction_parity.py
+  must stay green.
+- This task DOES change tests/fixtures/redaction-cases.json (and its checksum), which
+  is a shared contract with the bir-app repo — call this out loudly and ensure
+  parity; do NOT change schema_version "1.0" or any other fixture.
+- Keep the public API small; no new public symbol (built-in rules only).
 
 ACCEPTANCE CRITERIA
-- A new `[otel]` optional extra is declared; runtime `dependencies` stays empty and importing `bir` never imports opentelemetry.
-- The exporter converts a Bir trace into a parent/child OTel span tree with correct timestamps, status, and model/usage/score attributes (GenAI semantic conventions where applicable).
-- Calling the exporter without the extra installed raises a clear, actionable error.
-- The exporter accepts loaded traces (and optionally a trace path) and does not alter the local JSONL.
-- Tests assert the span mapping without requiring a live OTLP backend and skip cleanly when opentelemetry is unavailable; `verify_release.py` still passes with no provider/otel packages installed.
+- Stripe (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`), Azure-style keys, and PEM
+  private-key blocks are redacted to `[redacted]` in captured strings, repr
+  fallbacks, error text, prompt/score metadata, and integration payloads.
+- No existing redaction case regresses; no over-redaction of benign text in the
+  negative fixture cases.
+- tests/test_redaction_parity.py and scripts/fixtures.py check both pass with the
+  updated fixture + manifest.
 
 TESTS
-Add/extend tests under tests/ in the existing style (unittest + pytest), covering the happy
-path, edge cases, and any validation/error paths.
+Extend tests/test_custom_redaction.py / the redaction unit tests with positive and
+negative cases for each new format (including a multi-line PEM block and a
+benign-string negative case), plus the parity test against the updated fixture.
 
 VERIFY (run these and report results)
 - PYTHONPATH=src python -m unittest discover -s tests
 - PYTHONPATH=src python -m pytest tests/test_examples.py
+- python scripts/fixtures.py check
 - pyright
 - python scripts/verify_release.py
 
 DOCS
-Update README.md (add/adjust the relevant section) and add a CHANGELOG.md entry under an
-"Unreleased" section (create it if missing). Update docs/SDK_RELEASE_CHECKLIST.md only if the
-release contract changes.
+Update README.md (capture/privacy section) and docs/site/capture-privacy.md, and add
+a CHANGELOG.md entry under "Unreleased" with a prominent CROSS-REPO CONTRACT note
+(mirroring the 0.2.0 Security entry). Update docs/SDK_RELEASE_CHECKLIST.md if the
+redaction contract is part of the release gate.
 
 OUT OF SCOPE
-Do not make OpenTelemetry a runtime dependency, do not auto-export on every write, do not add live span context propagation into the core SDK, and do not change the Bir event schema or fixtures.
+Do not refactor the existing redaction rules, do not change the user-supplied
+redaction config behavior, and do not touch unrelated fixtures or the event schema.
 
 NOTES
 Do not bump the version, build, publish, or push tags unless explicitly asked. If you commit,
 do NOT add a `Co-Authored-By: Claude` trailer (repo convention). Branch off main before
-committing.
+committing. Coordinate the cross-repo fixture change with the bir-app maintainers.
 ```
+
+### Also-considered (deferred)
+
+- **Haystack integration** — same dependency-free bridge pattern as #8/#10; defer
+  behind the higher-traffic frameworks.
+- **Opt-in LLM-judge evaluator** — deliberately excluded: it would require a
+  network/provider call, conflicting with the "first useful workflow never requires a
+  server / deterministic, local-first evals" invariants. Only revisit as a clearly
+  opt-in, provider-callable-injected evaluator that never runs by default.
+- **Cross-process / W3C trace-context propagation** — the accessors are intentionally
+  read-only with no setter; adding propagation is a larger design change, not a quick
+  win.
