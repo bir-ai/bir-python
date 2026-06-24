@@ -60,10 +60,10 @@
       "type": ["string", "null"]
     },
     "value": {
-      "type": "number"
+      "type": ["number", "null"]
     },
     "model": {
-      "type": "string"
+      "type": ["string", "null"]
     },
     "usage": {
       "type": ["object", "null"],
@@ -127,7 +127,12 @@
         "required": ["type"]
       },
       "then": {
-        "required": ["value"]
+        "required": ["value"],
+        "properties": {
+          "value": {
+            "type": "number"
+          }
+        }
       }
     }
   ],
