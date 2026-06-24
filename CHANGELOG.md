@@ -8,6 +8,8 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+## 0.2.0 - 2026-06-24
+
 ### Security
 
 - Expanded best-effort capture redaction to recognize JWTs, AWS access key IDs,
@@ -19,6 +21,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `configure(source=...)` and the `BIR_SOURCE` environment variable, which tag
+  trace roots with `metadata.source`. This is the SDK-side counterpart to the
+  `source` field the Bir server and dashboard already filter on (the product's
+  Playground records `"playground"`), so SDK-generated traces become filterable
+  by origin alongside product-generated ones. The value must be a non-empty
+  string, is recorded only on trace roots, and an explicit `source` in a
+  `trace(metadata=...)` block still wins. No event-schema or fixture change
+  (`metadata.source` is already part of the `1.0` event metadata the server
+  reads). Stdlib only.
 - `bir.integrations.otel.export_traces_to_otlp`, an opt-in OpenTelemetry/OTLP
   exporter for replaying locally recorded Bir traces to an existing
   observability backend. Install it with the new optional `otel` extra

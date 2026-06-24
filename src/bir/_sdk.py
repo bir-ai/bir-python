@@ -111,6 +111,11 @@ class _Config:
     capture_outputs: bool = False
     service_name: str | None = None
     environment: str | None = None
+    # Optional trace-source tag recorded on trace roots under ``metadata.source``.
+    # It mirrors the ``source`` field the product's Playground writes and that the
+    # server/dashboard filter on by exact match, giving SDK callers a first-class
+    # way to tag where a trace came from. ``None`` records nothing.
+    source: str | None = None
     sample_rate: float = 1.0
     # ``max_bytes is None`` keeps the historical behavior of a single trace file
     # that grows without bound. When set, the active file is rotated before a
@@ -311,6 +316,7 @@ def configure(
     capture_outputs: bool | None = None,
     service_name: str | None = None,
     environment: str | None = None,
+    source: str | None = None,
     sample_rate: float | None = None,
     max_bytes: int | None = None,
     backup_count: int | None = None,
@@ -322,6 +328,15 @@ def configure(
 
     ``service_name`` and ``environment`` are recorded on trace root events
     under ``metadata.service`` so traces can be filtered by deployment later.
+
+    ``source`` tags every trace root with ``metadata.source`` so traces can be
+    filtered by where they originated. It is the SDK-side counterpart to the
+    ``source`` the Bir server/dashboard already filter on (the product's
+    Playground records ``"playground"``); the server matches it by exact,
+    trimmed value, so pick a stable label such as ``"checkout-api"``. Like the
+    trace ``metadata`` argument, an explicit ``source`` in a ``trace(metadata=...)``
+    block still wins over this configured default. Defaults to ``None`` (no source
+    recorded).
 
     ``sample_rate`` is the probability (``0.0`` to ``1.0``) that a trace is
     recorded. It is decided once per trace root; when a trace is sampled out the
@@ -384,7 +399,7 @@ def configure(
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
     ``BIR_CAPTURE_OUTPUTS``, ``BIR_SAMPLE_RATE``, ``BIR_SERVICE_NAME``,
-    ``BIR_ENVIRONMENT``), which is read once at import time, and otherwise to the
+    ``BIR_ENVIRONMENT``, ``BIR_SOURCE``), which is read once at import time, and otherwise to the
     hardcoded default. Explicit arguments to this function take precedence over
     the environment.
     """
@@ -402,6 +417,8 @@ def configure(
         updates["service_name"] = _validate_event_name(service_name, "service_name")
     if environment is not None:
         updates["environment"] = _validate_event_name(environment, "environment")
+    if source is not None:
+        updates["source"] = _validate_event_name(source, "source")
     if sample_rate is not None:
         updates["sample_rate"] = _validate_sample_rate(sample_rate)
     if max_bytes is not None:
@@ -1808,6 +1825,8 @@ def _event(
         service_metadata = _service_metadata()
         if service_metadata is not None:
             event_metadata.setdefault("service", service_metadata)
+        if _config.source is not None:
+            event_metadata.setdefault("source", _config.source)
     event: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
         "id": event_id,
@@ -2731,6 +2750,7 @@ def _config_from_env() -> _Config:
     capture_outputs = _env_value("BIR_CAPTURE_OUTPUTS")
     service_name = _env_value("BIR_SERVICE_NAME")
     environment = _env_value("BIR_ENVIRONMENT")
+    source = _env_value("BIR_SOURCE")
     sample_rate = _env_value("BIR_SAMPLE_RATE")
     return _Config(
         trace_path=Path(trace_path) if trace_path is not None else defaults.trace_path,
@@ -2753,6 +2773,11 @@ def _config_from_env() -> _Config:
             _validate_event_name(environment, "BIR_ENVIRONMENT")
             if environment is not None
             else defaults.environment
+        ),
+        source=(
+            _validate_event_name(source, "BIR_SOURCE")
+            if source is not None
+            else defaults.source
         ),
         sample_rate=(
             _parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate

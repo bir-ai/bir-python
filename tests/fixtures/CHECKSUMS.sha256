@@ -1,0 +1,24 @@
+# Shared cross-repo contract fixtures -- DO NOT EDIT BY HAND.
+#
+# Committed identically in BOTH repos (bir and bir-python). Regenerate
+# it (and re-sync the fixtures) from a checkout with both repos side by
+# side:
+#
+#     python scripts/fixtures.py sync
+#
+# CI verifies each repo's fixtures against this manifest:
+#
+#     python scripts/fixtures.py check
+#
+# Canonical source per fixture (whose copy wins on sync):
+#     event-schema-v1.json   -> bir-python (SDK)
+#     valid-events.jsonl     -> bir-python (SDK)
+#     redaction-cases.json   -> bir-python (SDK)
+#     valid-experiment.json  -> bir        (product/server)
+#
+# Fallback verification without this script:
+#     (cd tests/fixtures && shasum -a 256 -c CHECKSUMS.sha256)
+a6392356108d2484248e1da1c485e7f39a1a0ce389a4b5de86dd2aea9fb152b8  event-schema-v1.json
+b862e01f9dc5ee0737f855f9daff3c9da7ce188a86d1aabb5bcad8ad1c5a28b1  redaction-cases.json
+f0381dc1e849df0e015a75dbf3fb5d5bfbd1cddf0674c803f8a24c87556b2d90  valid-events.jsonl
+b6b3bf83dce597329bd53f53725db394c078a16a7e0fea66b3528f6f46a770e1  valid-experiment.json

@@ -3262,6 +3262,69 @@ for batch in range(int(batches)):
         with self.assertRaisesRegex(TypeError, "environment"):
             configure(environment=cast(Any, 123))
 
+    def test_configure_attaches_source_to_trace_root_events(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(source="checkout-api")
+
+            @observe()
+            def answer() -> str:
+                with span("retrieve_context"):
+                    pass
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(root["metadata"], {"source": "checkout-api"})
+            for event in events:
+                if event["type"] != "trace":
+                    self.assertNotIn("source", cast(dict[str, Any], event["metadata"]))
+
+    def test_configure_combines_source_with_service_metadata(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(service_name="rag-api", environment="production", source="checkout-api")
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(
+                events[0]["metadata"],
+                {"service": {"name": "rag-api", "environment": "production"}, "source": "checkout-api"},
+            )
+
+    def test_trace_events_omit_source_by_default(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertNotIn("source", cast(dict[str, Any], events[0]["metadata"]))
+
+    def test_trace_context_keeps_explicit_source(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(source="checkout-api")
+
+            with trace("manual", metadata={"source": "override"}):
+                pass
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(events[0]["metadata"], {"source": "override"})
+
+    def test_configure_rejects_invalid_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "source"):
+            configure(source="")
+        with self.assertRaisesRegex(TypeError, "source"):
+            configure(source=cast(Any, 123))
+
     def test_storage_errors_are_not_swallowed(self) -> None:
         with temporary_workdir() as workdir:
             configure(trace_path=workdir)

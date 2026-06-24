@@ -82,6 +82,7 @@ Bir reads these variables once when the `bir` package is imported:
 | `BIR_SAMPLE_RATE` | Trace recording probability from `0.0` to `1.0`. | `1.0` |
 | `BIR_SERVICE_NAME` | Service name on trace roots. | unset |
 | `BIR_ENVIRONMENT` | Deployment environment on trace roots. | unset |
+| `BIR_SOURCE` | Trace source tag on trace roots (`metadata.source`). | unset |
 
 ```bash
 export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
@@ -90,6 +91,7 @@ export BIR_CAPTURE_OUTPUTS=false
 export BIR_SAMPLE_RATE=0.1
 export BIR_SERVICE_NAME=rag-api
 export BIR_ENVIRONMENT=production
+export BIR_SOURCE=checkout-api
 ```
 
 Boolean values accept `1`, `true`, `yes`, and `on`, or `0`, `false`, `no`, and

@@ -21,6 +21,31 @@ export BIR_ENVIRONMENT=production
 
 Explicit configuration takes precedence over environment defaults.
 
+## Trace source
+
+Use `configure(source=...)` to tag trace roots with where they originated. The
+value is optional, must be a non-empty string, and is recorded under
+`metadata.source`. It is the SDK-side counterpart to the `source` the Bir
+server and dashboard already filter on (the built-in Playground records
+`"playground"`), so SDK traces become filterable by source alongside
+product-generated ones.
+
+```python
+from bir import configure
+
+configure(source="checkout-api")
+```
+
+The same default can come from the environment:
+
+```bash
+export BIR_SOURCE=checkout-api
+```
+
+The server matches `source` by exact, trimmed value, so pick a stable label. An
+explicit `source` in a `trace(metadata={"source": ...})` block still wins over
+the configured default.
+
 ## Sampling
 
 Use `configure(sample_rate=...)` to bound local trace volume. `sample_rate` is
