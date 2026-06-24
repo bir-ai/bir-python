@@ -8,6 +8,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Fixed
+
+- Release verification wheel metadata now preserves `pyproject.toml` optional
+  extras (`dev`, `docs`, and `otel`) as extra-scoped `Requires-Dist` entries
+  while keeping the base install free of unconditional runtime dependencies.
+
 ## 0.2.0 - 2026-06-24
 
 ### Security

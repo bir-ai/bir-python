@@ -187,6 +187,39 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
         # The import package is still shipped as "bir/", unchanged.
         self.assertIn("bir/__init__.py", names)
 
+    def test_optional_extras_are_declared_in_wheel_metadata(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+
+        with zipfile.ZipFile(wheel) as archive:
+            metadata = archive.read(f"bir_sdk-{version}.dist-info/METADATA").decode("utf-8")
+
+        lines = metadata.splitlines()
+        self.assertIn("Provides-Extra: dev", lines)
+        self.assertIn('Requires-Dist: pytest>=8.0; extra == "dev"', lines)
+        self.assertIn("Provides-Extra: docs", lines)
+        self.assertIn('Requires-Dist: mkdocs>=1.5; extra == "docs"', lines)
+        self.assertIn("Provides-Extra: otel", lines)
+        self.assertIn('Requires-Dist: opentelemetry-sdk>=1.20; extra == "otel"', lines)
+        self.assertIn(
+            'Requires-Dist: opentelemetry-exporter-otlp-proto-http>=1.20; extra == "otel"',
+            lines,
+        )
+
+    def test_wheel_metadata_has_no_unconditional_runtime_dependencies(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+
+        with zipfile.ZipFile(wheel) as archive:
+            metadata = archive.read(f"bir_sdk-{version}.dist-info/METADATA").decode("utf-8")
+
+        unconditional_requirements = [
+            line
+            for line in metadata.splitlines()
+            if line.startswith("Requires-Dist: ") and "; extra ==" not in line
+        ]
+        self.assertEqual(unconditional_requirements, [])
+
 
 class VerifyReleaseEntryPointTests(unittest.TestCase):
     """``verify_release`` ships the ``bir`` console script declared in pyproject."""

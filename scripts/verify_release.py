@@ -187,18 +187,22 @@ def metadata(version: str) -> str:
     readme = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
     description = required_string(pyproject, "description")
     requires_python = required_string(pyproject, "requires-python")
-    headers = "\n".join(
-        [
-            "Metadata-Version: 2.4",
-            "Name: bir-sdk",
-            f"Version: {version}",
-            f"Summary: {description}",
-            f"Requires-Python: {requires_python}",
-            "License-Expression: Apache-2.0",
-            "Description-Content-Type: text/markdown",
-        ]
-    )
-    return f"{headers}\n\n{readme}\n"
+    headers = [
+        "Metadata-Version: 2.4",
+        "Name: bir-sdk",
+        f"Version: {version}",
+        f"Summary: {description}",
+        f"Requires-Python: {requires_python}",
+        "License-Expression: Apache-2.0",
+        "Description-Content-Type: text/markdown",
+    ]
+    for extra, requirements in optional_dependencies().items():
+        headers.append(f"Provides-Extra: {extra}")
+        headers.extend(
+            f'Requires-Dist: {requirement}; extra == "{extra}"'
+            for requirement in requirements
+        )
+    return "\n".join(headers) + f"\n\n{readme}\n"
 
 
 def inspect_wheel(wheel: Path) -> None:
@@ -409,6 +413,75 @@ def console_scripts() -> dict[str, str]:
             if match:
                 scripts[match.group(1)] = match.group(2)
     return scripts
+
+
+def optional_dependencies() -> dict[str, list[str]]:
+    """Parse ``[project.optional-dependencies]`` from pyproject.toml.
+
+    The release builder intentionally avoids a TOML dependency so it can run on
+    every supported Python. The project uses a narrow, conventional shape here:
+    an inline quoted list or ``extra = [`` followed by one quoted requirement per
+    line and a closing bracket.
+    """
+
+    text = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    extras: dict[str, list[str]] = {}
+    current_extra: str | None = None
+    in_section = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_section = line == "[project.optional-dependencies]"
+            current_extra = None
+            continue
+        if not in_section:
+            continue
+
+        if current_extra is None:
+            inline_match = re.match(r'^([A-Za-z0-9._-]+)\s*=\s*\[(.*)\]\s*$', line)
+            if inline_match:
+                extra = inline_match.group(1)
+                raw_requirements = inline_match.group(2).strip()
+                extras[extra] = _quoted_list_items(raw_requirements) if raw_requirements else []
+                continue
+
+            match = re.match(r'^([A-Za-z0-9._-]+)\s*=\s*\[\s*$', line)
+            if match:
+                current_extra = match.group(1)
+                extras[current_extra] = []
+            continue
+
+        if line == "]":
+            current_extra = None
+            continue
+
+        match = re.match(r'^"([^"]+)",?\s*$', line)
+        if match:
+            extras[current_extra].append(match.group(1))
+            continue
+
+        raise RuntimeError(f"unsupported optional dependency line in pyproject.toml: {raw_line}")
+
+    if current_extra is not None:
+        raise RuntimeError(f"unterminated optional dependency group in pyproject.toml: {current_extra}")
+    return extras
+
+
+def _quoted_list_items(text: str) -> list[str]:
+    """Parse comma-separated quoted strings from one TOML array line."""
+
+    items: list[str] = []
+    remaining = text.strip()
+    while remaining:
+        match = re.match(r'^"([^"]+)"\s*(?:,\s*)?', remaining)
+        if match is None:
+            raise RuntimeError(f"unsupported inline optional dependency list: {text}")
+        items.append(match.group(1))
+        remaining = remaining[match.end() :].strip()
+    return items
 
 
 def entry_points_text(scripts: dict[str, str]) -> str:
