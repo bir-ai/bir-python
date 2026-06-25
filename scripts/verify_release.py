@@ -25,6 +25,7 @@ REPO_ROOT = PACKAGE_ROOT
 PACKAGE_SOURCE = PACKAGE_ROOT / "src" / "bir"
 REQUIRED_PACKAGE_FILES = {
     "bir/__init__.py",
+    "bir/__main__.py",
     "bir/_sdk.py",
     "bir/cli.py",
     "bir/evals.py",

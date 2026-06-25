@@ -13,6 +13,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -1080,6 +1082,53 @@ class TopLevelTests(CliBaseTest):
         code, _out, err = run_cli()
         self.assertEqual(code, 1)
         self.assertIn("usage: bir", err)
+
+
+class ModuleEntryPointTests(CliBaseTest):
+    """``python -m bir`` must mirror the ``bir`` console script exactly."""
+
+    def test_main_module_dispatches_to_cli_main(self) -> None:
+        # The module entry point re-exports the very function the console script
+        # is wired to, so both invocation paths share one implementation.
+        import bir.__main__ as module
+
+        self.assertIs(module.main, cli.main)
+
+    def _run_module(self, *argv: str) -> subprocess.CompletedProcess[str]:
+        """Invoke ``python -m bir`` with ``src`` importable, capturing output."""
+
+        env = dict(os.environ)
+        src = str(Path(bir.__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [src, env.get("PYTHONPATH", "")]))
+        return subprocess.run(
+            [sys.executable, "-m", "bir", *argv],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def test_version_matches_console_script(self) -> None:
+        result = self._run_module("--version")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), f"bir {bir.__version__}")
+
+    def test_no_subcommand_exit_code_matches_main(self) -> None:
+        # cli.main returns 1 and prints usage when no subcommand is given; the
+        # module path must surface the same exit code.
+        result = self._run_module()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("usage: bir", result.stderr)
+
+    def test_traces_behaves_like_console_script(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            result = self._run_module("traces", "--path", str(trace_path), "--json")
+            _code, expected, _err = run_cli("traces", "--path", str(trace_path), "--json")
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, expected)
 
 
 if __name__ == "__main__":

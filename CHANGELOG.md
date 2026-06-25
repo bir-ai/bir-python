@@ -8,6 +8,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Added
+
+- `python -m bir` module entry point that dispatches to the same
+  `bir.cli:main` as the `bir` console script, for invoking the CLI when the
+  console script isn't on `PATH` (fresh venvs, `pipx run`, CI). Both paths share
+  one implementation, so behavior and exit codes are identical. Stdlib only; no
+  new dependency, schema, or fixture change.
+
 ### Fixed
 
 - Release verification wheel metadata now preserves `pyproject.toml` optional

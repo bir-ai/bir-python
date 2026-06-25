@@ -46,7 +46,9 @@ Inspect them from the command line without a server: `bir traces` lists recorded
 traces, `bir show <trace-id>` prints one trace as an indented tree of its spans,
 generations, tool calls, and scores, and `bir stats` summarizes trace counts,
 token usage, cost per currency, and latency (count, mean, and p95) for a quick
-cost or health check (add `--json` to any of them for a structured form). See
+cost or health check (add `--json` to any of them for a structured form). The
+same commands run as `python -m bir <command>` when the `bir` console script
+isn't on `PATH` (fresh venvs, `pipx run`, CI). See
 [CLI & environment](docs/site/cli-env.md).
 
 When capture is on, Bir redacts common secret-like fields and text before
