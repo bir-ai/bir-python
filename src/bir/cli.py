@@ -171,6 +171,42 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     eval_gate.set_defaults(func=_cmd_eval_gate)
 
+    export_otel = subparsers.add_parser(
+        "export-otel",
+        help="Export local traces to an OTLP endpoint (requires the 'otel' extra).",
+    )
+    export_otel.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
+    export_otel.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also read size-rotated trace files (oldest first) alongside the active file.",
+    )
+    export_otel.add_argument(
+        "--endpoint",
+        required=True,
+        help="OTLP/HTTP traces endpoint, e.g. http://localhost:4318/v1/traces.",
+    )
+    export_otel.add_argument(
+        "--header",
+        dest="headers",
+        action="append",
+        metavar="KEY=VALUE",
+        type=_header_assignment,
+        help="Add an OTLP request header (e.g. backend auth); repeatable. KEY must be non-empty.",
+    )
+    export_otel.add_argument(
+        "--service-name",
+        default="bir",
+        help="service.name recorded on exported spans (default: bir).",
+    )
+    export_otel.add_argument(
+        "--timeout",
+        type=_non_negative_float,
+        metavar="SECONDS",
+        help="Per-export timeout in seconds forwarded to the OTLP exporter.",
+    )
+    export_otel.set_defaults(func=_cmd_export_otel)
+
     return parser
 
 
@@ -467,6 +503,30 @@ def _cmd_send_experiment(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_otel(args: argparse.Namespace) -> int:
+    traces = load_traces(args.path, include_rotated=args.include_rotated)
+    headers = dict(args.headers) if args.headers else None
+    try:
+        # Imported lazily so the CLI keeps importing without the optional 'otel'
+        # extra: the otel module itself imports cleanly (its opentelemetry imports
+        # are deferred), so a missing extra surfaces as an ImportError from the
+        # export call below rather than at CLI import time.
+        from .integrations.otel import export_traces_to_otlp
+
+        exported = export_traces_to_otlp(
+            traces,
+            endpoint=args.endpoint,
+            service_name=args.service_name,
+            headers=headers,
+            timeout=args.timeout,
+        )
+    except ImportError as exc:
+        print(f"bir: {exc}", file=sys.stderr)
+        return 1
+    print(f"exported {len(traces)} trace(s) ({exported} spans) to {args.endpoint}")
+    return 0
+
+
 def _cmd_eval_gate(args: argparse.Namespace) -> int:
     diff = compare_experiments(
         args.baseline,
@@ -674,6 +734,20 @@ def _non_negative_float(value: str) -> float:
     if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
     return number
+
+
+def _header_assignment(value: str) -> tuple[str, str]:
+    """Parse a ``--header KEY=VALUE`` assignment into a (key, value) pair.
+
+    Only the first ``=`` separates the key from the value, so a value may itself
+    contain ``=`` and may be empty; the key must be non-empty. Repeated keys are
+    folded later with the last value winning (standard header override).
+    """
+
+    key, separator, header_value = value.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE with a non-empty key, got {value!r}")
+    return key, header_value
 
 
 def _score_tolerance_assignment(value: str) -> tuple[str, float]:

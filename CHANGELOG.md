@@ -10,6 +10,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir export-otel` CLI subcommand that replays local traces to an OTLP endpoint
+  through the existing `bir.integrations.otel.export_traces_to_otlp` exporter. It
+  reads the same files as `bir traces` (`--path`, `--include-rotated`), requires
+  `--endpoint`, accepts a repeatable `--header KEY=VALUE` for backend auth plus
+  `--service-name` and `--timeout` passthrough, and prints how many traces and
+  spans were exported. The exporter is imported lazily, so the CLI keeps working
+  without the optional `otel` extra; running the command without it exits
+  non-zero with the `pip install 'bir-sdk[otel]'` install hint. Stdlib only; the
+  opentelemetry packages stay in the `otel` extra, with no schema or fixture
+  change.
 - Async `stream=True` support for the async Mistral and Cohere `trace_chat_async`
   wrappers and the async LiteLLM `trace_completion_async` wrapper. They now resolve
   to a lazy async iterator that yields the provider's stream events unchanged via

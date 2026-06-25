@@ -9,6 +9,7 @@ the CLI reads exactly the on-disk format the SDK writes.
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import os
@@ -1008,6 +1009,163 @@ class SendExperimentCommandTests(CliBaseTest):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send-experiment", str(experiment_file), "--backoff", "inf")
             self.assertEqual(raised.exception.code, 2)
+
+
+def _recording_exporter(captured: dict[str, Any], *, spans: int = 0):
+    """Return a fake ``export_traces_to_otlp`` that records its call and returns ``spans``."""
+
+    def fake(traces: Any, *, endpoint: Any, service_name: Any, headers: Any, timeout: Any) -> int:
+        captured["traces"] = list(traces)
+        captured["endpoint"] = endpoint
+        captured["service_name"] = service_name
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return spans
+
+    return fake
+
+
+class ExportOtelCommandTests(CliBaseTest):
+    """``bir export-otel`` fronts the existing OTLP exporter without importing it eagerly."""
+
+    def test_exports_loaded_traces_and_prints_summary(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            captured: dict[str, Any] = {}
+
+            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+                code, out, err = run_cli(
+                    "export-otel",
+                    "--path",
+                    str(trace_path),
+                    "--endpoint",
+                    "http://collector.test:4318/v1/traces",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # Both local traces are loaded and forwarded to the exporter.
+            self.assertEqual(len(captured["traces"]), 2)
+            self.assertTrue(all(isinstance(trace, LoadedTrace) for trace in captured["traces"]))
+            # Defaults: service.name "bir", no headers, no timeout override.
+            self.assertEqual(captured["endpoint"], "http://collector.test:4318/v1/traces")
+            self.assertEqual(captured["service_name"], "bir")
+            self.assertIsNone(captured["headers"])
+            self.assertIsNone(captured["timeout"])
+            # The summary reports both the trace count and the exporter's span count.
+            self.assertIn("2 trace", out)
+            self.assertIn("6 spans", out)
+            self.assertIn("http://collector.test:4318/v1/traces", out)
+
+    def test_forwards_headers_service_name_and_timeout(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            captured: dict[str, Any] = {}
+
+            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+                code, out, err = run_cli(
+                    "export-otel",
+                    "--path",
+                    str(trace_path),
+                    "--endpoint",
+                    "http://collector.test/v1/traces",
+                    "--header",
+                    "x-api-key=secret",
+                    "--header",
+                    "x-team=ml=ops",
+                    "--service-name",
+                    "rag-api",
+                    "--timeout",
+                    "5",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # Repeated --header folds into a dict; only the first '=' splits, so a
+            # value may itself contain '='.
+            self.assertEqual(captured["headers"], {"x-api-key": "secret", "x-team": "ml=ops"})
+            self.assertEqual(captured["service_name"], "rag-api")
+            self.assertEqual(captured["timeout"], 5.0)
+
+    def test_include_rotated_selects_rotated_traces(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)
+
+            # Default: only the active file's single trace is exported.
+            captured: dict[str, Any] = {}
+            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=1)):
+                code, _out, err = run_cli(
+                    "export-otel", "--path", str(trace_path), "--endpoint", "http://collector.test/v1/traces"
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(len(captured["traces"]), 1)
+
+            # --include-rotated also exports the rotated sibling.
+            captured_rotated: dict[str, Any] = {}
+            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured_rotated, spans=2)):
+                code, _out, err = run_cli(
+                    "export-otel",
+                    "--path",
+                    str(trace_path),
+                    "--include-rotated",
+                    "--endpoint",
+                    "http://collector.test/v1/traces",
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(len(captured_rotated["traces"]), 2)
+
+    def test_endpoint_is_required(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("export-otel", "--path", str(workdir / "traces.jsonl"))
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_rejects_malformed_header(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            # A header with no '=' and one with an empty key are both rejected
+            # during argument parsing, before any export is attempted.
+            for malformed in ("noequals", "=value"):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli(
+                        "export-otel",
+                        "--path",
+                        str(trace_path),
+                        "--endpoint",
+                        "http://collector.test/v1/traces",
+                        "--header",
+                        malformed,
+                    )
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_missing_extra_reports_actionable_error(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            real_import = builtins.__import__
+
+            def blocked_import(name: str, *args: Any, **kwargs: Any) -> Any:
+                if name == "opentelemetry" or name.startswith("opentelemetry."):
+                    raise ImportError(f"No module named {name!r}")
+                return real_import(name, *args, **kwargs)
+
+            # The otel extra is absent: the real exporter raises ImportError, which
+            # the command turns into a clean, actionable message and a non-zero exit.
+            with patch.object(builtins, "__import__", side_effect=blocked_import):
+                code, out, err = run_cli(
+                    "export-otel", "--path", str(trace_path), "--endpoint", "http://collector.test/v1/traces"
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("bir:", err)
+            self.assertIn("otel", err)
+            self.assertIn("pip install", err)
 
 
 class TailCommandTests(CliBaseTest):

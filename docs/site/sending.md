@@ -87,3 +87,7 @@ failures and accept non-negative values only. See
 [CLI & Environment Config](cli-env.md) for all commands and
 [local evals and experiments](evals-experiments.md#upload-an-experiment) for the
 Python API.
+
+To forward traces to an OpenTelemetry backend instead of a Bir server, use
+`bir export-otel` (or `export_traces_to_otlp()`); see
+[CLI & Environment Config](cli-env.md).

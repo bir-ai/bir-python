@@ -264,6 +264,20 @@ configured `span_exporter=` for a different transport. Calling the exporter
 without the extra installed raises a clear error pointing you to
 `pip install 'bir-sdk[otel]'`.
 
+The same export runs from the terminal without writing Python:
+
+```bash
+bir export-otel --endpoint http://localhost:4318/v1/traces --service-name rag-api
+bir export-otel --endpoint http://localhost:4318/v1/traces \
+  --header "x-api-key=secret" --include-rotated
+```
+
+`bir export-otel` loads local traces (honoring `--path` and `--include-rotated`
+like `bir traces`) and forwards them through the same exporter, printing how many
+traces and spans were sent. `--endpoint` is required; `--header KEY=VALUE` is
+repeatable for backend auth, and `--service-name` and `--timeout` are passed
+through. Without the `otel` extra it exits non-zero with the same install hint.
+
 ## Evaluations and experiments
 
 Bir ships deterministic, local-first evaluators and an experiment runner that

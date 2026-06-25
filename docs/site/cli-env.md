@@ -17,6 +17,7 @@ bir experiments               # list local experiments and scores
 bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
+bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' extra
 ```
 
 | Command | What it does |
@@ -29,6 +30,7 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 | `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
+| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
 default; experiment listing uses `.bir/experiments`; send commands target
@@ -52,7 +54,17 @@ counts and `-` latency. Latency is read from each trace's root duration, so part
 traces split across rotated files are counted only when `--include-rotated` brings
 in their root.
 
-`--include-rotated` on `bir traces`, `bir show`, `bir stats`, and `bir send` also reads
+`bir export-otel` replays local traces to an OpenTelemetry/OTLP endpoint using
+the optional `otel` extra (`pip install 'bir-sdk[otel]'`), reading the same files
+as `bir traces` (with `--path` and `--include-rotated`). `--endpoint` is required;
+`--header KEY=VALUE` is repeatable for backend auth (only the first `=` splits the
+key from the value), and `--service-name` and `--timeout` are forwarded to the
+exporter. It prints how many traces and spans were exported and exits non-zero
+with an install hint when the extra is missing. The export only reads the local
+JSONL; it never writes to or alters it.
+
+`--include-rotated` on `bir traces`, `bir show`, `bir stats`, `bir send`, and
+`bir export-otel` also reads
 size-rotated trace files (`traces.jsonl.1` ..) created by
 `configure(max_bytes=...)`, oldest-first alongside the active file. It is off by
 default, so these commands operate on the active file only unless the flag is
