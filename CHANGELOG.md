@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Async `stream=True` support for the async Mistral and Cohere `trace_chat_async`
+  wrappers and the async LiteLLM `trace_completion_async` wrapper. They now resolve
+  to a lazy async iterator that yields the provider's stream events unchanged via
+  `async for` and finalizes the model, accumulated output, and final token usage
+  when the stream is exhausted, `aclose()`d, or raises mid-stream — completing
+  async streaming coverage alongside OpenAI, Anthropic, and Gemini. A provider that
+  ignores streaming and returns a one-shot response still records via the
+  non-streaming path. Stdlib only; no new dependency, schema, or fixture change.
 - `python -m bir` module entry point that dispatches to the same
   `bir.cli:main` as the `bir` console script, for invoking the CLI when the
   console script isn't on `PATH` (fresh venvs, `pipx run`, CI). Both paths share

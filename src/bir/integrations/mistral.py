@@ -5,18 +5,20 @@ SDK stays dependency-free. Applications pass a Mistral ``client.chat.complete``
 callable; the wrapper invokes it inside a single Bir ``generation`` event and
 reads the model and token usage from the OpenAI-shaped response when present.
 Mistral's ``client.chat.stream`` emits OpenAI-shaped chunks, so ``stream=True``
-records the accumulated text and final usage after the stream is consumed.
+records the accumulated text and final usage after the stream is consumed. The
+async client streams the same chunks, so the async wrapper streams them too.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
     _chunk_delta_content,
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -140,10 +142,16 @@ async def trace_chat_async(
     """Await an async Mistral chat ``complete`` and record one generation.
 
     The asynchronous counterpart of :func:`trace_chat` for the async Mistral
-    client (``client.chat.complete_async``). ``complete`` returns a coroutine; it
-    is awaited inside a single Bir ``generation`` event, arguments are forwarded
-    unchanged, and the awaited response is returned. ``model`` and token ``usage``
-    are read from the OpenAI-shaped response when present.
+    client (``client.chat.complete_async``, or ``client.chat.stream_async`` when
+    streaming). ``complete`` returns a coroutine; it is awaited inside a single Bir
+    ``generation`` event, arguments are forwarded unchanged, and the awaited
+    response is returned. ``model`` and token ``usage`` are read from the
+    OpenAI-shaped response when present.
+
+    With ``stream=True`` the coroutine resolves to an async iterator that yields
+    the provider's chunks unchanged and assembles the output from
+    ``choices[0].delta.content``, finalizing the model, output, and usage when the
+    stream is exhausted, closed, or raises.
 
     Like the sync wrapper this must run inside an active trace (for example an
     async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
@@ -153,6 +161,17 @@ async def trace_chat_async(
     metadata: dict[str, Any] = {"integration": "mistral"}
     if bir_metadata:
         metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_chat_async(
+            complete,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
 
     async with generation(
         bir_name,
@@ -165,6 +184,52 @@ async def trace_chat_async(
         response = await complete(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+async def _stream_chat_async(
+    complete: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await complete(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            async for chunk in stream:
+                response_model = _string_or_none(_value(chunk, "model"))
+                if response_model is not None:
+                    gen.model = response_model
+
+                content = _chunk_delta_content(chunk)
+                if content is not None:
+                    output_parts.append(content)
+
+                usage = _value(chunk, "usage")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 def _record_response(gen: Any, response: Any) -> None:

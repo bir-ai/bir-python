@@ -182,16 +182,18 @@ capture enabled only a bounded yielded-item count is recorded under
 The optional [provider integrations](docs/site/integrations.md) ship async
 counterparts (`trace_chat_completion_async`, `trace_messages_async`,
 `trace_completion_async`, and so on) for async clients such as `AsyncOpenAI`,
-`AsyncAnthropic`, and `litellm.acompletion`. Each awaits the provider coroutine
-inside an active trace and records one generation; the streaming wrappers resolve
-to an async iterator you consume with `async for`, never buffering the stream. The
-synchronous wrappers likewise accept `stream=True` — yielding the provider's
-chunks unchanged and recording the accumulated text and final token usage once
-the stream is consumed — across OpenAI (Chat Completions and Responses),
-Anthropic, Gemini, Mistral, Cohere, LiteLLM, and Vertex AI. AWS Bedrock's Converse
-stream is a distinct method rather than a `stream=True` flag, so it has its own
-`trace_converse_stream` wrapper that yields the stream's events unchanged and
-records the same way.
+`AsyncAnthropic`, `litellm.acompletion`, and the async Mistral and Cohere
+clients. Each awaits the provider coroutine inside an active trace and records one
+generation; with `stream=True` they instead resolve to an async iterator you
+consume with `async for`, never buffering the stream, across every async wrapper
+with a streaming surface (OpenAI Chat Completions and Responses, Anthropic,
+Gemini, Mistral, Cohere, and LiteLLM). The synchronous wrappers likewise accept
+`stream=True` — yielding the provider's chunks unchanged and recording the
+accumulated text and final token usage once the stream is consumed — across
+OpenAI (Chat Completions and Responses), Anthropic, Gemini, Mistral, Cohere,
+LiteLLM, and Vertex AI. AWS Bedrock's Converse stream is a distinct method rather
+than a `stream=True` flag, so it has its own `trace_converse_stream` wrapper that
+yields the stream's events unchanged and records the same way.
 
 For agent frameworks, Bir ships dependency-free callback handlers that map a
 framework's own events into Bir traces without importing the framework:

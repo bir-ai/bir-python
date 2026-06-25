@@ -4,7 +4,7 @@ import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -97,6 +97,37 @@ def _message_end(usage: object) -> FakeStreamEvent:
 def _stream_end(usage: object) -> FakeStreamEvent:
     # The older ``stream-end`` event carrying usage at ``response.usage``.
     return FakeStreamEvent(response=FakeResponseSnapshot(usage=usage))
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built events, like a provider ``AsyncStream``.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the events. With ``error`` set it raises that exception
+    after the events are exhausted instead of ending, modeling a mid-stream
+    failure; ``aclosed`` records whether ``aclose()`` ran.
+    """
+
+    def __init__(self, events: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._events = list(events)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._events):
+            event = self._events[self._index]
+            self._index += 1
+            return event
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 class CohereIntegrationTests(unittest.TestCase):
@@ -411,6 +442,149 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_events_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            events = [
+                _content_delta("Bir "),
+                _content_delta("streams"),
+                _message_end(FakeUsage(tokens=FakeTokens(input_tokens=12, output_tokens=6))),
+            ]
+            received: dict[str, object] = {}
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                received.update(kwargs)
+                return FakeAsyncStream(events)
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream,
+                        model="command-a-03-2025",
+                        messages=[{"role": "user", "content": "Stream it"}],
+                        stream=True,
+                    )
+                    collected = [event async for event in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The events are yielded unchanged in order.
+            self.assertEqual(consumed, events)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "command-a-03-2025")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+
+    def test_reads_streamed_usage_from_stream_end_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+            events = [
+                _content_delta("Bir"),
+                _stream_end(FakeUsage(tokens=FakeTokens(input_tokens=5, output_tokens=2))),
+            ]
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(events)
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream, model="command-a-03-2025", messages=[], stream=True
+                    )
+                    async for _event in stream:
+                        pass
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir")
+            self.assertEqual(generation_event.usage, {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_chat(**kwargs: object) -> FakeChatResponse:
+                # A provider that ignores ``stream=True`` and returns one response.
+                return FakeChatResponse(
+                    usage=FakeUsage(tokens=FakeTokens(input_tokens=7, output_tokens=3)),
+                    payload={"message": {"content": "One shot."}},
+                )
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_chat, model="command-a-03-2025", messages=[], stream=True
+                    )
+                    collected = [event async for event in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The non-streamed response is recorded in one piece; the iterator yields nothing.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "command-a-03-2025")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(generation_event.output["message"]["content"], "One shot.")
+
+    def test_records_partial_output_when_stream_closed_early(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream([_content_delta("Bir "), _content_delta("streams")])
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream, model="command-a-03-2025", messages=[], stream=True
+                    )
+                    iterator = stream.__aiter__()
+                    await iterator.__anext__()
+                    # Closing after one event finalizes the accumulated output.
+                    await stream.aclose()
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir ")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [_content_delta("partial api_key=sk-secret123 ")],
+                    error=RuntimeError("stream failed api_key=sk-secret123"),
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream, model="command-a-03-2025", messages=[], stream=True
+                    )
+                    async for _event in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

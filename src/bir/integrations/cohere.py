@@ -5,17 +5,19 @@ stays dependency-free. Applications pass a Cohere v2 ``client.chat`` callable;
 the wrapper invokes it inside a single Bir ``generation`` event and reads token
 usage from the nested Cohere response shape when present. The v2
 ``client.chat_stream`` emits typed events, so ``stream=True`` records the
-accumulated text and final usage after the stream is consumed.
+accumulated text and final usage after the stream is consumed. The async client
+streams the same typed events, so the async wrapper streams them too.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -137,10 +139,17 @@ async def trace_chat_async(
     """Await an async Cohere v2 ``chat`` callable and record one generation.
 
     The asynchronous counterpart of :func:`trace_chat` for ``AsyncClientV2``
-    (``client.chat``). ``chat`` returns a coroutine; it is awaited inside a single
-    Bir ``generation`` event, arguments are forwarded unchanged, and the awaited
-    response is returned. The model comes from the request ``model`` keyword and
-    token usage is read from ``response.usage.tokens`` when present.
+    (``client.chat``, or ``client.chat_stream`` when streaming). ``chat`` returns a
+    coroutine; it is awaited inside a single Bir ``generation`` event, arguments are
+    forwarded unchanged, and the awaited response is returned. The model comes from
+    the request ``model`` keyword and token usage is read from
+    ``response.usage.tokens`` when present.
+
+    With ``stream=True`` the coroutine resolves to an async iterator that yields the
+    provider's events unchanged, assembles the output from ``content-delta`` events
+    (``delta.message.content.text``), and reads the final usage from the terminal
+    ``message-end``/``stream-end`` event when the stream is exhausted, closed, or
+    raises.
 
     Like the sync wrapper this must run inside an active trace (for example an
     async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
@@ -150,6 +159,17 @@ async def trace_chat_async(
     metadata: dict[str, Any] = {"integration": "cohere"}
     if bir_metadata:
         metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_chat_async(
+            chat,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
 
     async with generation(
         bir_name,
@@ -162,6 +182,48 @@ async def trace_chat_async(
         response = await chat(*args, **kwargs)
         _record_response(gen, response)
         return response
+
+
+async def _stream_chat_async(
+    chat: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("model")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await chat(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            async for event in stream:
+                text = _event_delta_text(event)
+                if text is not None:
+                    output_parts.append(text)
+
+                usage = _event_usage(event)
+                if usage is not None:
+                    last_usage = usage
+
+                yield event
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
 
 
 def _record_response(gen: Any, response: Any) -> None:

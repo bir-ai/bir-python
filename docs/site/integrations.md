@@ -29,10 +29,11 @@ async with trace("chat"):
     )
 ```
 
-For the streaming surfaces (OpenAI Chat Completions and Responses, Anthropic, and
-Gemini), passing `stream=True` resolves to an async iterator that yields the
-provider's events unchanged and finalizes the model, output, and usage when the
-stream is exhausted, closed (`aclose()`), or raises mid-stream:
+For the streaming surfaces (OpenAI Chat Completions and Responses, Anthropic,
+Gemini, Mistral, Cohere, and LiteLLM), passing `stream=True` resolves to an async
+iterator that yields the provider's events unchanged and finalizes the model,
+output, and usage when the stream is exhausted, closed (`aclose()`), or raises
+mid-stream:
 
 ```python
 async with trace("chat"):

@@ -4,7 +4,7 @@ import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -77,6 +77,37 @@ class FakeChatCompletionChunk:
         self.model = model
         self.choices = [FakeChoice(FakeDelta(content))]
         self.usage = usage
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built chunks, like a provider ``AsyncStream``.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the chunks. With ``error`` set it raises that exception
+    after the chunks are exhausted instead of ending, modeling a mid-stream
+    failure; ``aclosed`` records whether ``aclose()`` ran.
+    """
+
+    def __init__(self, chunks: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._chunks = list(chunks)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 class MistralIntegrationTests(unittest.TestCase):
@@ -382,6 +413,131 @@ class MistralAsyncIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed token=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeChatCompletionChunk(content="Bir "),
+                FakeChatCompletionChunk(content="streams"),
+                FakeChatCompletionChunk(
+                    content=None,
+                    usage=FakeUsage(prompt_tokens=11, completion_tokens=4, total_tokens=15),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                received.update(kwargs)
+                return FakeAsyncStream(chunks)
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream,
+                        model="mistral-small-latest",
+                        messages=[{"role": "user", "content": "Stream it"}],
+                        stream=True,
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The chunks are yielded unchanged in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            # The response model from the chunks refines the request model.
+            self.assertEqual(generation_event.model, "mistral-small-2506")
+            self.assertEqual(generation_event.input["stream"], True)
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_complete(**kwargs: object) -> FakeChatCompletion:
+                # A provider that ignores ``stream=True`` and returns one response.
+                return FakeChatCompletion(
+                    model="mistral-small-2506",
+                    usage=FakeUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+                    payload={"choices": [{"message": {"content": "One shot."}}]},
+                )
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_complete, model="mistral-small-latest", messages=[], stream=True
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The non-streamed response is recorded in one piece; the iterator yields nothing.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "mistral-small-2506")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(generation_event.output["choices"][0]["message"]["content"], "One shot.")
+
+    def test_records_partial_output_when_stream_closed_early(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeChatCompletionChunk(content="Bir "), FakeChatCompletionChunk(content="streams")]
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream, model="mistral-small-latest", messages=[], stream=True
+                    )
+                    iterator = stream.__aiter__()
+                    await iterator.__anext__()
+                    # Closing after one chunk finalizes the accumulated output.
+                    await stream.aclose()
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir ")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_stream(**kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeChatCompletionChunk(content="partial token=sk-secret123 ")],
+                    error=RuntimeError("stream failed token=sk-secret123"),
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_chat_async(
+                        fake_stream, model="mistral-small-latest", messages=[], stream=True
+                    )
+                    async for _chunk in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed token=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial token=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():
