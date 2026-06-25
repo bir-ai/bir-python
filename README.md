@@ -331,7 +331,9 @@ machine-readable diff with `effective_tolerances`, `missing_score`, and
 
 ## Documentation
 
-The documentation site covers the [quickstart](docs/site/quickstart.md),
+The documentation site is published at
+<https://bir-ai.github.io/bir-python/> and covers the
+[quickstart](docs/site/quickstart.md),
 [core API](docs/site/core-api.md),
 [capture and privacy](docs/site/capture-privacy.md),
 [server uploads](docs/site/sending.md),
@@ -347,7 +349,9 @@ mkdocs build --strict
 
 CI installs the same `docs` extra and runs the strict build once on every pull
 request and push to `main`, so invalid navigation, links reported by MkDocs,
-and build warnings block the change.
+and build warnings block the change. A separate workflow rebuilds the site
+behind the same `--strict` gate and deploys it to GitHub Pages on every push to
+`main`, so a docs change that fails the strict build is never published.
 
 For local SDK development, install `.[dev]` and see the
 [release checklist](docs/SDK_RELEASE_CHECKLIST.md).

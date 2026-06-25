@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docs-deploy.yml"
 
 
 class DocumentationCIContractTests(unittest.TestCase):
@@ -55,6 +56,44 @@ class DocumentationCIContractTests(unittest.TestCase):
         )
         self.assertIsNotNone(match, f"CI job {name!r} is missing")
         return match.group(0)  # type: ignore[union-attr]
+
+
+class DocumentationDeployWorkflowTests(unittest.TestCase):
+    """The Pages deploy workflow publishes docs only after the strict build passes."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_triggers_on_main_push_and_manual_dispatch(self) -> None:
+        self.assertRegex(self.workflow, r"(?ms)^  push:\n    branches:\n      - main$")
+        self.assertRegex(self.workflow, r"(?m)^  workflow_dispatch:$")
+
+    def test_grants_only_the_pages_deploy_permissions(self) -> None:
+        # Pages deploys need pages:write plus the id-token used by deploy-pages.
+        self.assertRegex(self.workflow, r"(?m)^  pages: write$")
+        self.assertRegex(self.workflow, r"(?m)^  id-token: write$")
+
+    def test_serializes_deploys_with_a_concurrency_group(self) -> None:
+        self.assertRegex(self.workflow, r"(?m)^concurrency:$")
+        self.assertRegex(self.workflow, r"(?m)^  group: pages$")
+
+    def test_runs_strict_build_from_docs_extra_before_deploying(self) -> None:
+        # The deploy job depends on a build job that runs the same strict build as
+        # the PR gate, so a docs change failing --strict can never publish.
+        self.assertIn('run: python -m pip install -e ".[docs]"', self.workflow)
+        self.assertIn("run: mkdocs build --strict", self.workflow)
+        self.assertRegex(self.workflow, r"(?m)^    needs: build$")
+
+    def test_uploads_site_and_deploys_via_official_pages_actions(self) -> None:
+        self.assertIn("uses: actions/upload-pages-artifact@", self.workflow)
+        self.assertRegex(self.workflow, r"(?m)^          path: site$")
+        self.assertIn("uses: actions/deploy-pages@", self.workflow)
+
+    def test_does_not_weaken_the_ci_strict_build_gate(self) -> None:
+        # The PR gate lives in ci.yml; the deploy workflow must not touch it.
+        ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(ci_workflow.count("run: mkdocs build --strict"), 1)
 
 
 if __name__ == "__main__":

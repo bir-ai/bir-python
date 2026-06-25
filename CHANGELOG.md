@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- GitHub Pages deploy workflow (`.github/workflows/docs-deploy.yml`) that
+  rebuilds the MkDocs site behind the same `mkdocs build --strict` gate and
+  publishes it to <https://bir-ai.github.io/bir-python/> on every push to `main`
+  (and on manual `workflow_dispatch`). The deploy job depends on the strict
+  build, so a docs change that fails `--strict` is never published. The existing
+  PR-time strict-build gate in `ci.yml` is unchanged, and the default `mkdocs`
+  theme and `docs` extra are kept (no code, dependency, schema, or fixture
+  change).
 - `bir export-otel` CLI subcommand that replays local traces to an OTLP endpoint
   through the existing `bir.integrations.otel.export_traces_to_otlp` exporter. It
   reads the same files as `bir traces` (`--path`, `--include-rotated`), requires

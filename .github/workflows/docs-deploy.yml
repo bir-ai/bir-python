@@ -1,0 +1,63 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Grant the GITHUB_TOKEN the permissions the Pages deployment needs and nothing
+# more: read the repo, publish the Pages artifact, and mint the OIDC token that
+# actions/deploy-pages exchanges with GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize Pages deployments: never run two at once, and let an in-progress
+# production deploy finish rather than cancelling it mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install documentation dependencies
+        run: python -m pip install -e ".[docs]"
+
+      # Run the same strict build the PR gate runs, so a docs change that fails
+      # --strict can never be published even though the gate is a separate job.
+      - name: Build documentation strictly
+        run: mkdocs build --strict
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
