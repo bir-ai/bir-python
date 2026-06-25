@@ -227,6 +227,35 @@ errors, timeouts, and HTTP 5xx) with bounded exponential backoff via `retries`
 and `backoff`, while HTTP 4xx and malformed inputs fail immediately. See
 [server uploads](docs/site/sending.md).
 
+## Testing your instrumentation
+
+To assert on the traces your own code produces, use `bir.testing.capture_traces()`.
+It redirects trace writes to a private temporary file for the duration of a `with`
+block and hands back a handle that reads the captured events and traces back in
+memory — so your tests never touch your real `.bir/` directory:
+
+```python
+from bir.testing import capture_traces
+
+def test_answer_is_instrumented():
+    with capture_traces() as captured:
+        answer_question("hello")
+
+    recorded = captured.traces()[0]
+    assert recorded.name == "answer_question"
+    assert [event.type for event in recorded.events] == ["trace", "generation"]
+```
+
+`captured.events()` returns the flat list of recorded events and
+`captured.traces()` groups them into traces, both read through the same public
+loaders as `load_events()` / `load_traces()`. Only the active `trace_path` is
+swapped; capture opt-in, sampling, and redaction stay exactly as configured, so a
+captured event is identical to a real write. The previous configuration (including
+a user-set `trace_path`) is restored when the block exits — even if the body
+raises — and the temporary file is removed. Like `configure()`, it mutates
+process-global config for the block's duration, so it is not meant to run
+concurrently across threads. See [Core API](docs/site/core-api.md).
+
 ## Forwarding traces to OpenTelemetry
 
 If you already run an OpenTelemetry backend, you can replay locally recorded Bir

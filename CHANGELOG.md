@@ -10,6 +10,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.testing.capture_traces()` context manager (and its `CapturedTraces` handle)
+  for asserting on your own instrumentation in tests. It redirects trace writes to
+  a private temporary file for the duration of a `with` block and reads the
+  captured events/traces back in memory through the public `load_events` /
+  `load_traces` loaders, then restores the previous configuration (including a
+  user-set `trace_path`) on exit — even if the body raises — and removes the temp
+  file. Only *where* events are written changes: capture opt-in, sampling, and
+  redaction are untouched, so a captured event matches a real write. Scoped to the
+  `bir.testing` submodule to keep the top-level API small; stdlib `tempfile` only,
+  with no new dependency, schema, or fixture change.
 - GitHub Pages deploy workflow (`.github/workflows/docs-deploy.yml`) that
   rebuilds the MkDocs site behind the same `mkdocs build --strict` gate and
   publishes it to <https://bir-ai.github.io/bir-python/> on every push to `main`

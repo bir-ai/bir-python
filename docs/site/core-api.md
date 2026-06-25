@@ -264,3 +264,31 @@ traces = load_traces()
 Both functions read only the active file by default. Pass
 `include_rotated=True` to read rotated files oldest-first. Because rotation can
 occur mid-trace, a logical trace may be split across files.
+
+## Testing your instrumentation
+
+`bir.testing.capture_traces()` is a context manager for asserting on the traces
+your own code produces. It redirects trace writes to a private temporary file for
+the duration of a `with` block and yields a handle that reads the captured events
+and traces back in memory, so tests never touch your real `.bir/` directory.
+
+```python
+from bir.testing import capture_traces
+
+with capture_traces() as captured:
+    answer_question("hello")
+
+recorded = captured.traces()[0]
+assert recorded.name == "answer_question"
+assert [event.type for event in recorded.events] == ["trace", "generation"]
+```
+
+`captured.events()` returns the flat list of recorded `TraceEvent`s and
+`captured.traces()` groups them into `LoadedTrace`s, both read through the same
+public loaders as `load_events()` / `load_traces()`. Only the active `trace_path`
+is swapped — capture opt-in, sampling, and redaction stay exactly as configured,
+so a captured event is identical to a real write. The previous configuration
+(including a user-set `trace_path`) is restored when the block exits, even if the
+body raises, and the temporary file is removed. Like `configure()`, it mutates
+process-global configuration for the block's duration and is not meant to run
+concurrently across threads.
