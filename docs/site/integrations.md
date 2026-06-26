@@ -63,8 +63,8 @@ The async wrappers, by provider:
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
-options. AWS Bedrock, Vertex AI, and the LangChain, LlamaIndex, and OpenAI Agents
-SDK and Pydantic AI callback handlers have no async wrapper.
+options. AWS Bedrock, Vertex AI, and the LangChain, LlamaIndex, OpenAI Agents
+SDK, Pydantic AI, and CrewAI callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -434,6 +434,42 @@ Bir span. A failed span (OpenTelemetry `ERROR` status or a recorded `exception`
 event) is recorded with error status. Active runs are tracked by OpenTelemetry span
 id, so concurrent and nested runs stay isolated. The handler imports neither
 `pydantic_ai` nor `opentelemetry`, and input/output capture follows the same
+[opt-in settings](capture-privacy.md) as every other integration, overridable per
+handler with `capture_inputs`/`capture_outputs`.
+
+## CrewAI
+
+```python
+from crewai.utilities.events import crewai_event_bus
+from crewai.utilities.events.base_events import BaseEvent
+from bir.integrations.crewai import BirCrewAIHandler
+
+handler = BirCrewAIHandler()
+
+@crewai_event_bus.on(BaseEvent)
+def _forward(source, event):
+    handler.on_event(source, event)
+
+crew.kickoff(inputs={"topic": "Bir"})
+```
+
+CrewAI's lowest-coupling observability seam is its event bus: every crew run emits
+typed events (`CrewKickoffStartedEvent`, `TaskStartedEvent`, `LLMCallStartedEvent`,
+`ToolUsageStartedEvent`, and their completed/failed counterparts) through
+`crewai.utilities.events.crewai_event_bus`. The bus calls a registered handler with
+the framework's `(source, event)` pair, so forwarding those to
+`BirCrewAIHandler.on_event` turns each crew run into a Bir trace.
+
+Events are read by duck typing — tolerant of the field changes across CrewAI
+versions — and classified by their `event.type` string: a crew-kickoff event opens a
+Bir trace root, task and agent-execution events become structural spans, LLM-call
+events become generations carrying the model and token usage, and tool-usage events
+become tool calls. A `*_failed` / `*_error` event closes its node with error status.
+Crew, task, and agent nodes are tracked by their framework id (a crew's
+`id`/`fingerprint`, a task's `id`, an agent's `id`); LLM-call and tool-usage events,
+which CrewAI emits without a correlation id, are paired by a per-thread
+last-in-first-out stack, so concurrent and nested runs stay isolated. The handler
+does not import the `crewai` package, and input/output capture follows the same
 [opt-in settings](capture-privacy.md) as every other integration, overridable per
 handler with `capture_inputs`/`capture_outputs`.
 

@@ -10,6 +10,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.crewai.BirCrewAIHandler`, a dependency-free bridge that records
+  [CrewAI](https://www.crewai.com/) crew runs as Bir traces. CrewAI's lowest-coupling
+  observability seam is its event bus (`crewai.utilities.events.crewai_event_bus`),
+  which emits typed start/completed/failed events for crews, tasks, agent executions,
+  LLM calls, and tool usage; forward each `(source, event)` the bus emits to
+  `handler.on_event` and each crew run becomes a Bir trace. Events are read by duck
+  typing — tolerant of field changes across CrewAI versions — and classified by their
+  `event.type`: a crew-kickoff event opens a Bir trace root, task and agent-execution
+  events become structural spans, LLM-call events become generations carrying the
+  model and token usage, and tool-usage events become tool-call events; a
+  `*_failed`/`*_error` event closes its node with error status. Crew, task, and agent
+  nodes are tracked by their framework id so concurrent and nested runs stay isolated,
+  while LLM-call and tool-usage events (which CrewAI emits without a correlation id)
+  are paired by a per-thread last-in-first-out stack. Input/output capture follows the
+  same opt-in settings as every other integration (overridable per handler with
+  `capture_inputs`/`capture_outputs`), and `crewai` is never imported.
+
 - `bir.integrations.dspy`: new dependency-free DSPy integration. `trace_lm` and
   `trace_lm_async` wrap a `dspy.LM` instance's request method
   (`lm.forward`/`lm.aforward`), which returns the LiteLLM-style response, and

@@ -2,6 +2,7 @@
 
 from . import cohere
 from .anthropic import trace_messages, trace_messages_async
+from .crewai import BirCrewAIHandler
 from .dspy import trace_lm, trace_lm_async
 from .instructor import trace_create, trace_create_async
 from .bedrock import trace_converse, trace_converse_stream
@@ -39,6 +40,7 @@ __all__ = [
     "BirLlamaIndexHandler",
     "BirAgentsTracingProcessor",
     "BirPydanticAIHandler",
+    "BirCrewAIHandler",
     "trace_completion",
     "trace_completion_async",
     "trace_chat",
