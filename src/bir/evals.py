@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import json
 import math
@@ -887,18 +888,45 @@ def run_experiment(
     path: str | Path | None = None,
     raise_on_error: bool = True,
     record_traces: bool = False,
+    max_workers: int = 1,
 ) -> ExperimentResult:
-    """Run a task over a dataset and persist per-example evaluator results."""
+    """Run a task over a dataset and persist per-example evaluator results.
+
+    When ``max_workers`` is greater than 1, examples run concurrently inside a
+    :class:`concurrent.futures.ThreadPoolExecutor` with up to ``max_workers``
+    threads. Results, JSONL rows, and summary aggregates are always written in
+    dataset order regardless of completion order. Every other behavior matches
+    the sequential path: ``raise_on_error`` persists through the first failing
+    example in dataset order and re-raises that exception; ``record_traces``
+    isolation is preserved because each worker thread inherits its own copy of
+    the context-var state, so trace trees never bleed across examples.
+    """
 
     if not name:
         raise ValueError("experiment name must not be empty")
+    max_workers = _validate_positive_int(max_workers, "max_workers")
 
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
     evaluator_list = list(evaluators)
     start_time = _now()
-    results: list[ExperimentExampleResult] = []
     output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
+
+    if max_workers > 1:
+        return _run_experiment_threaded(
+            name=name,
+            experiment_id=experiment_id,
+            examples=examples,
+            task=task,
+            evaluator_list=evaluator_list,
+            output_path=output_path,
+            start_time=start_time,
+            raise_on_error=raise_on_error,
+            record_traces=record_traces,
+            max_workers=max_workers,
+        )
+
+    results: list[ExperimentExampleResult] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as experiment_file:
@@ -1491,6 +1519,71 @@ def _write_experiment_result(
         **result.to_dict(),
     }
     experiment_file.write(_json_line(record))
+
+
+def _run_experiment_threaded(
+    *,
+    name: str,
+    experiment_id: str,
+    examples: list[DatasetExample],
+    task: Callable[..., Any],
+    evaluator_list: list[DeterministicEvaluator],
+    output_path: Path,
+    start_time: str,
+    raise_on_error: bool,
+    record_traces: bool,
+    max_workers: int,
+) -> ExperimentResult:
+    def run_one(index: int, example: DatasetExample) -> tuple[int, ExperimentExampleResult, Exception | None]:
+        if record_traces:
+            result, error = _run_traced_example(
+                experiment_id=experiment_id,
+                experiment_name=name,
+                example=example,
+                task=task,
+                evaluators=evaluator_list,
+            )
+            return index, result, error
+        try:
+            result = _run_example(example, task, evaluator_list)
+            return index, result, None
+        except Exception as exc:
+            return index, _error_example_result(example, exc), exc
+
+    results_by_index: dict[int, ExperimentExampleResult] = {}
+    errors_by_index: dict[int, Exception] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
+        concurrent.futures.wait(futures)
+    for future in futures:
+        index, result, error = future.result()
+        results_by_index[index] = result
+        if error is not None:
+            errors_by_index[index] = error
+
+    ordered_results = [results_by_index[i] for i in range(len(examples))]
+    end_time = _now()
+
+    if raise_on_error and errors_by_index:
+        first_error_index = min(errors_by_index)
+        _persist_experiment(
+            output_path=output_path,
+            experiment_id=experiment_id,
+            name=name,
+            start_time=start_time,
+            end_time=end_time,
+            results=ordered_results[: first_error_index + 1],
+        )
+        raise errors_by_index[first_error_index]
+
+    return _persist_experiment(
+        output_path=output_path,
+        experiment_id=experiment_id,
+        name=name,
+        start_time=start_time,
+        end_time=end_time,
+        results=ordered_results,
+    )
 
 
 def _persist_experiment(

@@ -46,6 +46,29 @@ Results are written to `.bir/experiments/*.jsonl`, one row per example. A
 sibling `.summary.json` stores the experiment status, counts, aggregate scores,
 and result path.
 
+## Run experiments concurrently with a thread pool
+
+For I/O-bound synchronous tasks — such as network LLM calls behind a sync
+client — pass `max_workers=N` to run up to `N` examples at once inside a
+`concurrent.futures.ThreadPoolExecutor`:
+
+```python
+result = run_experiment(
+    "quickstart",
+    dataset=dataset,
+    task=answer_question,
+    evaluators=[contains("observability")],
+    max_workers=8,
+)
+```
+
+Results, JSONL rows, and summary aggregates are always written in dataset
+order regardless of which examples finish first. All other semantics —
+`raise_on_error`, `record_traces` trace isolation, redaction, and the
+persisted schema — match the sequential path. The default is `max_workers=1`,
+which runs examples one at a time and is byte-for-byte identical to the
+previous behavior.
+
 ## Run an async experiment
 
 `run_experiment_async()` is the asynchronous counterpart to `run_experiment()`.

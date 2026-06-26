@@ -10,6 +10,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `run_experiment()` now accepts an opt-in `max_workers` keyword argument (positive
+  integer, default `1`). When `max_workers > 1`, examples run concurrently inside a
+  `concurrent.futures.ThreadPoolExecutor`, giving a large speedup for I/O-bound
+  synchronous tasks such as network LLM calls behind a sync client. Results, JSONL
+  rows, and summary aggregates are always written in dataset order regardless of
+  completion order. All existing semantics — `raise_on_error`, `record_traces` trace
+  isolation, redaction, and the on-disk schema — are unchanged. Requires no new
+  dependencies (stdlib only). The default `max_workers=1` is byte-for-byte identical
+  to the previous behavior.
+
 - `bir.testing.capture_traces()` context manager (and its `CapturedTraces` handle)
   for asserting on your own instrumentation in tests. It redirects trace writes to
   a private temporary file for the duration of a `with` block and reads the

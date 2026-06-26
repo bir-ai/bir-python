@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import tempfile
+import threading
 import urllib.error
 import unittest
 from collections.abc import Awaitable, Callable
@@ -2044,6 +2045,270 @@ class RunExperimentAsyncTests(unittest.TestCase):
             self.assertTrue(cancelled_children)  # in-flight example tasks were cancelled
             self.assertFalse(experiment_path.exists())
             self.assertFalse(experiment_path.with_suffix(".summary.json").exists())
+
+
+class RunExperimentMaxWorkersTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_max_workers_1_is_sequential_and_matches_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO"),
+                    DatasetExample(id="q2", input={"question": "bir"}, expected="BIR"),
+                ]
+            )
+
+            def answer(question: str) -> str:
+                return question.upper()
+
+            path_default = Path(directory) / "default.jsonl"
+            path_explicit = Path(directory) / "explicit.jsonl"
+            result_default = run_experiment(
+                "upper",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match()],
+                path=path_default,
+            )
+            result_explicit = run_experiment(
+                "upper",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match()],
+                path=path_explicit,
+                max_workers=1,
+            )
+
+            self.assertEqual(result_default.aggregate_scores, result_explicit.aggregate_scores)
+            self.assertEqual(
+                [row.example_id for row in result_default.results],
+                [row.example_id for row in result_explicit.results],
+            )
+
+    def test_preserves_dataset_order_under_out_of_order_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ordered.jsonl"
+            n_examples = 8
+            dataset = Dataset([DatasetExample(id=f"q{i}", input={"n": i}, expected=i) for i in range(n_examples)])
+            # Barrier ensures all workers start before any returns, proving real concurrency.
+            barrier = threading.Barrier(n_examples)
+
+            def task(n: int) -> int:
+                barrier.wait()
+                return n
+
+            result = run_experiment(
+                "ordered",
+                dataset=dataset,
+                task=task,
+                evaluators=[exact_match()],
+                path=path,
+                max_workers=n_examples,
+            )
+
+            expected_ids = [f"q{i}" for i in range(n_examples)]
+            self.assertEqual([row.example_id for row in result.results], expected_ids)
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["example_id"] for record in records], expected_ids)
+            self.assertEqual(result.aggregate_scores, {"exact_match": 1.0})
+
+    def test_concurrent_output_matches_sequential_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset(
+                [DatasetExample(id=f"q{i}", input={"question": str(i)}, expected=str(i)) for i in range(6)]
+            )
+
+            def answer(question: str) -> str:
+                return question
+
+            seq_path = Path(directory) / "seq.jsonl"
+            par_path = Path(directory) / "par.jsonl"
+            seq_result = run_experiment(
+                "equiv",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match(), contains("0", case_sensitive=True)],
+                path=seq_path,
+            )
+            par_result = run_experiment(
+                "equiv",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match(), contains("0", case_sensitive=True)],
+                path=par_path,
+                max_workers=4,
+            )
+
+            self.assertEqual(par_result.status, seq_result.status)
+            self.assertEqual(par_result.aggregate_scores, seq_result.aggregate_scores)
+            self.assertEqual(
+                [row.example_id for row in par_result.results],
+                [row.example_id for row in seq_result.results],
+            )
+            for par_row, seq_row in zip(par_result.results, seq_result.results):
+                self.assertEqual(par_row.output, seq_row.output)
+                self.assertEqual([s.name for s in par_row.scores], [s.name for s in seq_row.scores])
+                self.assertEqual([s.value for s in par_row.scores], [s.value for s in seq_row.scores])
+
+            par_records = [json.loads(line) for line in par_path.read_text(encoding="utf-8").splitlines()]
+            seq_records = [json.loads(line) for line in seq_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                [r["example_id"] for r in par_records],
+                [r["example_id"] for r in seq_records],
+            )
+
+    def test_raise_on_error_persists_through_first_failure_in_dataset_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "failure.jsonl"
+            n_examples = 6
+            dataset = Dataset(
+                [DatasetExample(id=f"q{i}", input={"n": i, "fail": i == 2}) for i in range(n_examples)]
+            )
+            barrier = threading.Barrier(n_examples)
+
+            def task(n: int, fail: bool) -> int:
+                barrier.wait()
+                if fail:
+                    raise RuntimeError(f"bad example n={n}")
+                return n
+
+            with self.assertRaisesRegex(RuntimeError, "bad example"):
+                run_experiment(
+                    "fail",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    max_workers=n_examples,
+                )
+
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.status, "error")
+            # Should persist through dataset index 2 (the failing example): q0, q1, q2
+            self.assertEqual(summary.example_count, 3)
+            self.assertEqual(summary.error_count, 1)
+
+            loaded = load_experiment(experiment_path)
+            self.assertEqual([row.example_id for row in loaded.results], ["q0", "q1", "q2"])
+            self.assertEqual(loaded.results[2].status, "error")
+
+    def test_raise_on_error_false_records_all_errors_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "continue.jsonl"
+            n_examples = 5
+            dataset = Dataset(
+                [DatasetExample(id=f"q{i}", input={"n": i, "fail": i % 2 == 0}) for i in range(n_examples)]
+            )
+            barrier = threading.Barrier(n_examples)
+
+            def task(n: int, fail: bool) -> int:
+                barrier.wait()
+                if fail:
+                    raise RuntimeError("deliberate failure")
+                return n
+
+            result = run_experiment(
+                "continue",
+                dataset=dataset,
+                task=task,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                raise_on_error=False,
+                max_workers=n_examples,
+            )
+
+            self.assertEqual(result.status, "error")
+            self.assertEqual([row.example_id for row in result.results], [f"q{i}" for i in range(n_examples)])
+            expected_statuses = ["error", "success", "error", "success", "error"]
+            self.assertEqual([row.status for row in result.results], expected_statuses)
+
+    def test_record_traces_isolates_concurrent_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "traced.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+            n_examples = 5
+            dataset = Dataset(
+                [DatasetExample(id=f"q{i}", input={"question": str(i)}, expected=str(i)) for i in range(n_examples)]
+            )
+            barrier = threading.Barrier(n_examples)
+
+            def answer(question: str) -> str:
+                barrier.wait()
+                with span("step"):
+                    with retrieval("lookup", query=question) as r:
+                        r.add_document(id=f"doc-{question}", text=question)
+                return question
+
+            result = run_experiment(
+                "iso",
+                dataset=dataset,
+                task=answer,
+                evaluators=[exact_match()],
+                path=experiment_path,
+                record_traces=True,
+                max_workers=n_examples,
+            )
+
+            self.assertEqual(result.status, "success")
+            traces = load_traces(trace_path)
+            self.assertEqual(len(traces), n_examples)
+            self.assertEqual(
+                sorted(trace.name for trace in traces),
+                [f"experiment.iso.q{i}" for i in range(n_examples)],
+            )
+            for trace in traces:
+                # All events in each trace belong to that trace only.
+                self.assertTrue(all(event.trace_id == trace.id for event in trace.events))
+                types = [event.type for event in trace.events]
+                self.assertEqual(types.count("trace"), 1)
+                self.assertEqual(types.count("score"), 1)
+                # The retrieval query must match the trace's own example number.
+                tool_event = next(event for event in trace.events if event.type == "tool_call")
+                example_number = trace.name.rsplit(".", 1)[1][1:]
+                self.assertEqual(tool_event.input, {"query": example_number})
+
+    def test_redaction_preserved_under_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "redact.jsonl"
+            dataset = Dataset(
+                [DatasetExample(id=f"q{i}", input={"api_key": f"sk-secret-{i}"}) for i in range(4)]
+            )
+
+            def answer(api_key: str) -> dict[str, str]:
+                return {"result": "ok", "api_key": api_key}
+
+            result = run_experiment(
+                "redact",
+                dataset=dataset,
+                task=answer,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                max_workers=4,
+            )
+
+            raw = experiment_path.read_text(encoding="utf-8")
+            for i in range(4):
+                self.assertNotIn(f"sk-secret-{i}", raw)
+            for row in result.results:
+                self.assertEqual(row.output, {"result": "ok", "api_key": "[redacted]"})
+
+    def test_rejects_invalid_max_workers(self) -> None:
+        dataset = Dataset([DatasetExample(id="q1", input={"n": 1})])
+
+        def task(n: int) -> int:
+            return n
+
+        with self.assertRaisesRegex(ValueError, "max_workers must be a positive integer"):
+            run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=0)
+        with self.assertRaisesRegex(ValueError, "max_workers must be a positive integer"):
+            run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=-1)
+        with self.assertRaisesRegex(TypeError, "max_workers must be an int"):
+            run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(TypeError, "max_workers must be an int"):
+            run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=2.5)  # type: ignore[arg-type]
 
 
 class FakeHttpResponse:

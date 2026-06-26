@@ -311,9 +311,24 @@ through. Without the `otel` extra it exits non-zero with the same install hint.
 
 Bir ships deterministic, local-first evaluators and an experiment runner that
 scores a task over a dataset and persists per-example results and a summary under
-`.bir/experiments/`. Use `run_experiment()` for synchronous tasks, or
-`run_experiment_async()` when your task is a coroutine such as an async provider
-client:
+`.bir/experiments/`. Use `run_experiment()` for synchronous tasks. Pass
+`max_workers=N` to run examples concurrently inside a thread pool — useful for
+I/O-bound sync tasks such as network LLM calls behind a synchronous client:
+
+```python
+from bir.evals import Dataset, DatasetExample, contains, run_experiment
+
+result = run_experiment(
+    "prompt-v1",
+    dataset=Dataset([DatasetExample(id="q1", input={"question": "Hi"})]),
+    task=answer,
+    evaluators=[contains("Hi")],
+    max_workers=8,
+)
+```
+
+Use `run_experiment_async()` when your task is a coroutine such as an async
+provider client:
 
 ```python
 import asyncio
