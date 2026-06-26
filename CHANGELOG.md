@@ -10,6 +10,13 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.instructor`: new dependency-free Instructor integration.
+  `trace_create` and `trace_create_async` wrap an Instructor-patched client's
+  `chat.completions.create` callable and record one generation with model and
+  token usage. Both the direct parsed-model return shape and the
+  `(parsed_model, raw_completion)` tuple from `create_with_completion` are
+  handled automatically; `instructor` is never imported.
+
 - `run_experiment()` now accepts an opt-in `max_workers` keyword argument (positive
   integer, default `1`). When `max_workers > 1`, examples run concurrently inside a
   `concurrent.futures.ThreadPoolExecutor`, giving a large speedup for I/O-bound

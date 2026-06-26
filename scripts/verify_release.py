@@ -35,6 +35,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/bedrock.py",
     "bir/integrations/cohere.py",
     "bir/integrations/google.py",
+    "bir/integrations/instructor.py",
     "bir/integrations/langchain.py",
     "bir/integrations/litellm.py",
     "bir/integrations/llamaindex.py",

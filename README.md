@@ -191,7 +191,10 @@ Gemini, Mistral, Cohere, and LiteLLM). The synchronous wrappers likewise accept
 `stream=True` — yielding the provider's chunks unchanged and recording the
 accumulated text and final token usage once the stream is consumed — across
 OpenAI (Chat Completions and Responses), Anthropic, Gemini, Mistral, Cohere,
-LiteLLM, and Vertex AI. AWS Bedrock's Converse stream is a distinct method rather
+LiteLLM, and Vertex AI. For structured-output workflows built on Instructor,
+`trace_create` wraps an Instructor-patched client's `create` call and records
+model and token usage from the raw completion regardless of whether Instructor
+returns the parsed model directly or a `(parsed_model, completion)` tuple. AWS Bedrock's Converse stream is a distinct method rather
 than a `stream=True` flag, so it has its own `trace_converse_stream` wrapper that
 yields the stream's events unchanged and records the same way.
 

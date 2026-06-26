@@ -2,6 +2,7 @@
 
 from . import cohere
 from .anthropic import trace_messages, trace_messages_async
+from .instructor import trace_create, trace_create_async
 from .bedrock import trace_converse, trace_converse_stream
 from .google import trace_generate_content, trace_generate_content_async
 from .langchain import BirCallbackHandler
@@ -21,6 +22,8 @@ from .vertexai import trace_generate_content as trace_vertex_generate_content
 __all__ = [
     "cohere",
     "export_traces_to_otlp",
+    "trace_create",
+    "trace_create_async",
     "trace_messages",
     "trace_messages_async",
     "trace_converse",

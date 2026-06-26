@@ -58,6 +58,7 @@ The async wrappers, by provider:
 | Mistral | `bir.integrations.mistral` | `trace_chat_async` |
 | Cohere | `bir.integrations.cohere` | `trace_chat_async` |
 | LiteLLM | `bir.integrations.litellm` | `trace_completion_async` |
+| Instructor | `bir.integrations.instructor` | `trace_create_async` |
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
@@ -267,6 +268,53 @@ The wrapper reads the OpenAI-shaped response and derives a provider metadata
 hint from the model prefix before `/`. With `stream=True` the wrapper returns a
 lazy iterable that yields the OpenAI-shaped chunks unchanged and records the
 accumulated text and final usage after the stream is consumed.
+
+## Instructor
+
+[Instructor](https://python.useinstructor.com/) patches OpenAI-compatible clients
+to return validated Pydantic models. `trace_create` wraps the patched
+`client.chat.completions.create` callable and records one generation with the
+model and token usage from the underlying completion.
+
+Instructor can return the parsed model directly (`create`) or a
+`(parsed_model, raw_completion)` tuple (`create_with_completion`). Both shapes
+are handled automatically.
+
+```python
+import instructor
+import openai
+from bir import trace
+from bir.integrations.instructor import trace_create
+
+client = instructor.from_openai(openai.OpenAI())
+
+with trace("structured"):
+    user = trace_create(
+        client.chat.completions.create,
+        model="gpt-4o-mini",
+        response_model=User,
+        messages=[{"role": "user", "content": "Extract: Jason is 25 years old"}],
+    )
+```
+
+For async clients use `trace_create_async`:
+
+```python
+import instructor
+import openai
+from bir import trace
+from bir.integrations.instructor import trace_create_async
+
+client = instructor.from_openai(openai.AsyncOpenAI())
+
+async with trace("structured"):
+    user = await trace_create_async(
+        client.chat.completions.create,
+        model="gpt-4o-mini",
+        response_model=User,
+        messages=[{"role": "user", "content": "Extract: Jason is 25 years old"}],
+    )
+```
 
 ## LangChain
 
