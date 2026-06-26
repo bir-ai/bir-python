@@ -17,6 +17,7 @@ from .openai import (
 )
 from .openai_agents import BirAgentsTracingProcessor
 from .otel import export_traces_to_otlp
+from .pydantic_ai import BirPydanticAIHandler
 from .vertexai import trace_generate_content as trace_vertex_generate_content
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "BirCallbackHandler",
     "BirLlamaIndexHandler",
     "BirAgentsTracingProcessor",
+    "BirPydanticAIHandler",
     "trace_completion",
     "trace_completion_async",
     "trace_chat",

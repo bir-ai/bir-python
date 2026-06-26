@@ -10,6 +10,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.pydantic_ai.BirPydanticAIHandler`, a dependency-free bridge
+  that records [Pydantic AI](https://ai.pydantic.dev/) agent runs as Bir traces.
+  Pydantic AI's lowest-coupling observability seam is its OpenTelemetry
+  instrumentation (`Agent(instrument=True)`), so the handler implements the OTel
+  `SpanProcessor` interface (`on_start`/`on_end`/`shutdown`/`force_flush`) and is
+  registered on the tracer provider Pydantic AI uses. Spans are read by duck
+  typing — tolerant of attribute-key changes across instrumentation versions — and
+  classified by `gen_ai.operation.name` (falling back to the span name): an
+  agent-run span opens a Bir trace root, a `chat` span becomes a generation
+  carrying the model and token usage, and an `execute_tool` span becomes a
+  tool-call event; every other span becomes a Bir span. Failures (OTel `ERROR`
+  status or a recorded `exception` event) are recorded with error status, active
+  runs are tracked by OpenTelemetry span id so concurrent and nested runs stay
+  isolated, and input/output capture follows the same opt-in settings as every
+  other integration (overridable per handler with `capture_inputs`/`capture_outputs`).
+  Neither `pydantic_ai` nor `opentelemetry` is imported.
+
 - `bir.integrations.instructor`: new dependency-free Instructor integration.
   `trace_create` and `trace_create_async` wrap an Instructor-patched client's
   `chat.completions.create` callable and record one generation with model and

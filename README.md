@@ -200,11 +200,15 @@ yields the stream's events unchanged and records the same way.
 
 For agent frameworks, Bir ships dependency-free callback handlers that map a
 framework's own events into Bir traces without importing the framework:
-`BirCallbackHandler` for LangChain, `BirLlamaIndexHandler` for LlamaIndex, and
-`BirAgentsTracingProcessor` for the OpenAI Agents SDK. The Agents processor
-implements the SDK's tracing-processor interface, turning an agent run into a Bir
-trace whose model spans become generations and tool spans become tool calls;
-register it with `agents.add_trace_processor(BirAgentsTracingProcessor())`.
+`BirCallbackHandler` for LangChain, `BirLlamaIndexHandler` for LlamaIndex,
+`BirAgentsTracingProcessor` for the OpenAI Agents SDK, and `BirPydanticAIHandler`
+for Pydantic AI. The Agents processor implements the SDK's tracing-processor
+interface, turning an agent run into a Bir trace whose model spans become
+generations and tool spans become tool calls; register it with
+`agents.add_trace_processor(BirAgentsTracingProcessor())`. The Pydantic AI handler
+hooks Pydantic AI's OpenTelemetry instrumentation as an OTel span processor (no
+`pydantic_ai` or `opentelemetry` import), mapping each instrumented agent run's
+spans the same way; register it on the tracer provider Pydantic AI uses.
 
 ## Local persistence and concurrency
 

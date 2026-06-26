@@ -63,7 +63,7 @@ The async wrappers, by provider:
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
 options. AWS Bedrock, Vertex AI, and the LangChain, LlamaIndex, and OpenAI Agents
-SDK callback handlers have no async wrapper.
+SDK and Pydantic AI callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -372,6 +372,42 @@ id, so concurrent and nested runs stay isolated. The processor does not import t
 `openai-agents` package, and input/output capture follows the same
 [opt-in settings](capture-privacy.md) as every other integration, overridable per
 processor with `capture_inputs`/`capture_outputs`.
+
+## Pydantic AI
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from pydantic_ai import Agent
+from bir.integrations.pydantic_ai import BirPydanticAIHandler
+
+provider = TracerProvider()
+provider.add_span_processor(BirPydanticAIHandler())
+
+agent = Agent("openai:gpt-4o", instrument=True)
+result = agent.run_sync("What is Bir?")
+```
+
+Pydantic AI's lowest-coupling observability seam is its OpenTelemetry
+instrumentation: constructing an agent with `Agent(instrument=True)` (or
+`Agent.instrument_all()`) makes every run emit OpenTelemetry spans following the
+GenAI semantic conventions. `BirPydanticAIHandler` implements the OpenTelemetry
+`SpanProcessor` interface (`on_start`/`on_end`/`shutdown`/`force_flush`), so adding
+it to the tracer provider Pydantic AI uses turns each instrumented agent run into a
+Bir trace.
+
+Spans are read by duck typing — tolerant of the attribute-key changes across
+Pydantic AI instrumentation versions — and classified by `gen_ai.operation.name`
+(falling back to the span name): an agent-run span (`invoke_agent` / `agent run`)
+opens a Bir trace root, a model span (`chat`) becomes a generation carrying the
+model (`gen_ai.request.model` / `gen_ai.response.model`) and token usage
+(`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`), and a tool span
+(`execute_tool` / `running tool`) becomes a tool call. Every other span becomes a
+Bir span. A failed span (OpenTelemetry `ERROR` status or a recorded `exception`
+event) is recorded with error status. Active runs are tracked by OpenTelemetry span
+id, so concurrent and nested runs stay isolated. The handler imports neither
+`pydantic_ai` nor `opentelemetry`, and input/output capture follows the same
+[opt-in settings](capture-privacy.md) as every other integration, overridable per
+handler with `capture_inputs`/`capture_outputs`.
 
 ## Wrapper-specific options
 
