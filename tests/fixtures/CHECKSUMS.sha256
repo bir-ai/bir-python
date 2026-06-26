@@ -19,6 +19,6 @@
 # Fallback verification without this script:
 #     (cd tests/fixtures && shasum -a 256 -c CHECKSUMS.sha256)
 a6392356108d2484248e1da1c485e7f39a1a0ce389a4b5de86dd2aea9fb152b8  event-schema-v1.json
-b862e01f9dc5ee0737f855f9daff3c9da7ce188a86d1aabb5bcad8ad1c5a28b1  redaction-cases.json
+a209bf50ab246ebc4b29ef8c266b37d91206fa0dcbafe235326d8b0a9046bc61  redaction-cases.json
 f0381dc1e849df0e015a75dbf3fb5d5bfbd1cddf0674c803f8a24c87556b2d90  valid-events.jsonl
 b6b3bf83dce597329bd53f53725db394c078a16a7e0fea66b3528f6f46a770e1  valid-experiment.json

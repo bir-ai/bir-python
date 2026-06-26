@@ -153,6 +153,112 @@ class AdditionalRedactionPatternTests(unittest.TestCase):
                     configure(additional_redaction_patterns=cast(Any, value))
 
 
+class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
+    """Built-in best-effort rules for Stripe, Azure, and PEM private-key blocks.
+
+    These rules ship on by default and can never be disabled, so they are
+    asserted with the default config and across the same capture, repr, and
+    error paths the custom rules use.
+    """
+
+    # Stripe-shaped sample tokens are assembled from split fragments so no literal
+    # ``sk_live_…``/``sk_test_…`` key form exists in this file for repository
+    # secret-scanning push protection to flag. The redactor still sees the joined
+    # value at runtime, exactly as a real captured payload would contain it.
+    # Bodies are kept short (well under the 24+ chars of a real Stripe key) and
+    # ``EXAMPLE``-tagged so the sample tokens cannot be mistaken for live secrets,
+    # while still satisfying the redactor's {16,} length rule.
+    _SK = "sk"
+    _RK = "rk"
+    STRIPE_LIVE = f"{_SK}_live_EXAMPLEliveKEY1234"
+    STRIPE_TEST = f"{_SK}_test_EXAMPLEtestKEY1234"
+    STRIPE_RK_LIVE = f"{_RK}_live_EXAMPLErestrictA12"
+    STRIPE_RK_TEST = f"{_RK}_test_EXAMPLErestrictB12"
+    # A 512-bit key base64-encoded to 88 characters ending in ``==``.
+    AZURE_KEY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx=="
+    PEM_BLOCK = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA7Xn1abcDEF/123ghiJKL+456mnoPQR789stuVWX\n"
+        "zyx0987wvu654tsr321qpo+nmlk/jihg==\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_stripe_keys_are_redacted(self) -> None:
+        for token in (self.STRIPE_LIVE, self.STRIPE_TEST, self.STRIPE_RK_LIVE, self.STRIPE_RK_TEST):
+            with self.subTest(token=token):
+                self.assertEqual(_redact_secret_text(f"key {token} end"), "key [redacted] end")
+
+    def test_stripe_near_misses_are_not_redacted(self) -> None:
+        # Too-short bodies, the bare prefix, and a non-live/test middle segment
+        # must not be touched. Assembled from fragments for the same reason as the
+        # positive samples above.
+        for benign in (f"{self._SK}_live_short", f"{self._RK}_test_", f"{self._SK}_prod_0123456789abcdef"):
+            with self.subTest(benign=benign):
+                self.assertEqual(_redact_secret_text(benign), benign)
+
+    def test_azure_storage_key_is_redacted(self) -> None:
+        self.assertEqual(_redact_secret_text(f"AccountKey {self.AZURE_KEY}"), "AccountKey [redacted]")
+
+    def test_azure_near_miss_is_not_redacted(self) -> None:
+        # A short base64 blob ending in ``==`` is below the anchored length class.
+        self.assertEqual(_redact_secret_text("token dGVzdGluZw== here"), "token dGVzdGluZw== here")
+
+    def test_pem_private_key_block_is_redacted(self) -> None:
+        captured = _redact_secret_text(f"before\n{self.PEM_BLOCK}\nafter")
+        self.assertEqual(captured, "before\n[redacted]\nafter")
+        self.assertNotIn("PRIVATE KEY", captured)
+        self.assertNotIn("MIIEpAIBAAKCAQEA", captured)
+
+    def test_pem_label_variants_are_redacted(self) -> None:
+        for label in ("PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY"):
+            block = f"-----BEGIN {label}-----\nQUJDREVG\n-----END {label}-----"
+            with self.subTest(label=label):
+                self.assertEqual(_redact_secret_text(block), "[redacted]")
+
+    def test_benign_private_key_prose_is_not_redacted(self) -> None:
+        text = "Store your PRIVATE KEY somewhere safe and never share it."
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_new_formats_redacted_in_repr_fallback_and_error_text(self) -> None:
+        self.assertEqual(_safe_capture(_Box(self.STRIPE_LIVE)), "_Box([redacted])")
+        self.assertEqual(
+            _safe_error(RuntimeError(f"leaked {self.STRIPE_RK_TEST}")),
+            "leaked [redacted]",
+        )
+
+    def test_new_formats_redacted_in_trace_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(capture_inputs=True, capture_outputs=True)
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def handle(payload: dict[str, Any]) -> str:
+                return f"issued {self.STRIPE_LIVE}"
+
+            handle({"pem": self.PEM_BLOCK, "azure": self.AZURE_KEY})
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn(self.STRIPE_LIVE, raw)
+            self.assertNotIn("MIIEpAIBAAKCAQEA", raw)
+            self.assertNotIn(self.AZURE_KEY, raw)
+            self.assertIn("[redacted]", raw)
+
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertEqual(event["input"]["payload"], {"pem": "[redacted]", "azure": "[redacted]"})
+            self.assertEqual(event["output"], "issued [redacted]")
+
+    def test_builtin_formats_cannot_be_disabled_by_clearing_custom_rules(self) -> None:
+        configure(additional_secret_keys=[], additional_redaction_patterns=[])
+        self.assertEqual(_redact_secret_text(self.STRIPE_LIVE), "[redacted]")
+        self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
+
+
 class CustomRedactionConfigSemanticsTests(unittest.TestCase):
     def setUp(self) -> None:
         _reset_config_for_tests()

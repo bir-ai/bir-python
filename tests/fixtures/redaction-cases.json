@@ -68,5 +68,43 @@
     "name": "high-signal-format-near-misses",
     "input": "JWT eyJheader.payload and eyJ.example.com; AWS AKIA1234567890ABCDE; Google AIza-short; Slack xoxb; GitHub ghp_short; number 12345678901234567890",
     "expected": "JWT eyJheader.payload and eyJ.example.com; AWS AKIA1234567890ABCDE; Google AIza-short; Slack xoxb; GitHub ghp_short; number 12345678901234567890"
+  },
+  {
+    "name": "stripe-live-key",
+    "input": "Stripe key rk_live_EXAMPLEliveKEY1234",
+    "expected": "Stripe key [redacted]"
+  },
+  {
+    "name": "stripe-test-key",
+    "input": "Stripe value rk_test_EXAMPLEtestKEY1234",
+    "expected": "Stripe value [redacted]"
+  },
+  {
+    "name": "azure-storage-key",
+    "input": "AccountKey abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx==",
+    "expected": "AccountKey [redacted]"
+  },
+  {
+    "name": "pem-private-key-block",
+    "input": "key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7Xn1abcDEF/123ghiJKL+456mnoPQR789stuVWX\nzyx0987wvu654tsr321qpo+nmlk/jihg==\n-----END RSA PRIVATE KEY-----\ndone",
+    "expected": "key:\n[redacted]\ndone"
+  },
+  {
+    "name": "credential-format-near-misses",
+    "input": "Stripe sk_live_short; rk_test_; base64 dGVzdGluZw== short; a PRIVATE KEY in plain prose is fine",
+    "expected": "Stripe sk_live_short; rk_test_; base64 dGVzdGluZw== short; a PRIVATE KEY in plain prose is fine"
+  },
+  {
+    "name": "nested-credential-formats",
+    "input": {
+      "values": [
+        "rk_live_EXAMPLEnestLIVE012",
+        "rk_test_EXAMPLEnestTEST012",
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx=="
+      ]
+    },
+    "expected": {
+      "values": ["[redacted]", "[redacted]", "[redacted]"]
+    }
   }
 ]

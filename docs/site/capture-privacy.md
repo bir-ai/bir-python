@@ -30,6 +30,9 @@ are also scanned for common secret-like text patterns, including:
 - Google API keys (`AIza...`).
 - Slack `xox*` tokens.
 - GitHub `ghp_`, `gho_`, `ghs_`, `ghu_`, and `ghr_` tokens.
+- Stripe secret and restricted keys (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`).
+- Azure storage-style account keys (88-character base64 ending in `==`).
+- PEM private-key blocks (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`).
 
 !!! warning
 

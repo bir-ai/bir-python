@@ -116,6 +116,19 @@ Before publishing, verify the release with the SDK release checklist in
   extras (`dev`, `docs`, and `otel`) as extra-scoped `Requires-Dist` entries
   while keeping the base install free of unconditional runtime dependencies.
 
+### Security
+
+- Expanded best-effort capture redaction to recognize Stripe secret/restricted
+  keys (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`), Azure storage-style account
+  keys (88-character base64 ending in `==`), and PEM private-key blocks
+  (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`). These
+  are additive built-in rules: no existing rule is weakened and the new patterns
+  are anchored to avoid over-redacting benign text. **CROSS-REPO CONTRACT:
+  bir-app's independently maintained redactor and its copy of
+  `redaction-cases.json` must be updated to match before or with this change. Do
+  not release this SDK change while the bir-app redactor or fixture is out of
+  sync.**
+
 ## 0.2.0 - 2026-06-24
 
 ### Security

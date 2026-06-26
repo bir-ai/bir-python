@@ -13,6 +13,11 @@ you intend to cut a release.
 - Confirm input and output capture remains opt-in by default.
 - Confirm common secret-like keys and text patterns are redacted before local
   events are written.
+- Confirm the redaction contract is in sync with `bir-app`: any change to the
+  built-in redaction rules or to `tests/fixtures/redaction-cases.json` must be
+  mirrored by `bir-app`'s independently maintained redactor and its copy of the
+  fixture, and `python scripts/fixtures.py check` must pass. Do not release a
+  redaction change while the `bir-app` redactor or fixture is out of sync.
 - Confirm schema version `1.0` stays aligned with the wire-contract fixtures in
   `tests/fixtures/` (`event-schema-v1.json`, `valid-events.jsonl`). These
   fixtures are the shared contract with the server and dashboard, which now live
@@ -59,6 +64,7 @@ repository root:
 PYTHONPATH=src ./.venv/bin/python -m unittest discover -s tests
 PYTHONPATH=src ./.venv/bin/python -m pytest tests/test_examples.py
 ./.venv/bin/pyright
+python scripts/fixtures.py check
 ```
 
 The shared wire-contract fixtures live under `tests/fixtures/`. The SDK keeps

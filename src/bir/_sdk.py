@@ -2394,6 +2394,18 @@ def _redact_secret_text(value: str) -> str:
     redacted = re.sub(r"(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", _REDACTED, redacted)
     redacted = re.sub(r"\bxox[baprs]-[0-9A-Za-z-]+\b", _REDACTED, redacted)
     redacted = re.sub(r"\b(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}\b", _REDACTED, redacted)
+    # Stripe secret/restricted keys (``sk_live_``/``sk_test_``/``rk_live_``/``rk_test_``).
+    redacted = re.sub(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b", _REDACTED, redacted)
+    # Azure storage-style account keys: a 512-bit key base64-encoded to 88 chars
+    # ending in ``==``. Anchored to that exact length class to avoid over-redaction.
+    redacted = re.sub(r"(?<![0-9A-Za-z+/])[0-9A-Za-z+/]{86}==(?![0-9A-Za-z+/=])", _REDACTED, redacted)
+    # PEM private-key blocks (``-----BEGIN ... PRIVATE KEY-----`` .. ``-----END ...
+    # PRIVATE KEY-----``), spanning lines via a non-greedy DOTALL-scoped match.
+    redacted = re.sub(
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        _REDACTED,
+        redacted,
+    )
     # User-supplied patterns run last, in configuration order, and only ever add
     # redaction on top of the built-in rules above; each replaces its whole match
     # with the marker. They cannot weaken or bypass any built-in rule.
