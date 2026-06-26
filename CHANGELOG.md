@@ -10,6 +10,13 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.dspy`: new dependency-free DSPy integration. `trace_lm` and
+  `trace_lm_async` wrap a `dspy.LM` instance's request method
+  (`lm.forward`/`lm.aforward`), which returns the LiteLLM-style response, and
+  record one generation with model and token usage. The request model is read
+  from the bound `LM` instance (`lm.model`) or an explicit `model` keyword and
+  refined from the response's `model` when present; `dspy` is never imported.
+
 - `bir.integrations.pydantic_ai.BirPydanticAIHandler`, a dependency-free bridge
   that records [Pydantic AI](https://ai.pydantic.dev/) agent runs as Bir traces.
   Pydantic AI's lowest-coupling observability seam is its OpenTelemetry

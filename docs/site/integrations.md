@@ -59,6 +59,7 @@ The async wrappers, by provider:
 | Cohere | `bir.integrations.cohere` | `trace_chat_async` |
 | LiteLLM | `bir.integrations.litellm` | `trace_completion_async` |
 | Instructor | `bir.integrations.instructor` | `trace_create_async` |
+| DSPy | `bir.integrations.dspy` | `trace_lm_async` |
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
@@ -315,6 +316,33 @@ async with trace("structured"):
         messages=[{"role": "user", "content": "Extract: Jason is 25 years old"}],
     )
 ```
+
+## DSPy
+
+[DSPy](https://dspy.ai/) routes every language-model call through a `dspy.LM`
+instance whose underlying request method (`LM.forward`, historically
+`LM.request`) returns the raw LiteLLM-style response carrying the model and an
+OpenAI-shaped token `usage` block. `trace_lm` wraps that bound method and records
+one generation with the model and token usage from the response.
+
+```python
+import dspy
+from bir import trace
+from bir.integrations.dspy import trace_lm
+
+lm = dspy.LM("openai/gpt-4o-mini")
+
+with trace("dspy"):
+    response = trace_lm(
+        lm.forward,
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+```
+
+The request model is read from the bound `LM` instance (`lm.model`) or an explicit
+`model` keyword, then refined from the response's `model` when the provider echoes
+one back. For DSPy's async request method use `trace_lm_async` with `lm.aforward`.
+`dspy` is never imported.
 
 ## LangChain
 

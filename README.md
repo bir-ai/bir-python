@@ -194,7 +194,10 @@ OpenAI (Chat Completions and Responses), Anthropic, Gemini, Mistral, Cohere,
 LiteLLM, and Vertex AI. For structured-output workflows built on Instructor,
 `trace_create` wraps an Instructor-patched client's `create` call and records
 model and token usage from the raw completion regardless of whether Instructor
-returns the parsed model directly or a `(parsed_model, completion)` tuple. AWS Bedrock's Converse stream is a distinct method rather
+returns the parsed model directly or a `(parsed_model, completion)` tuple. For
+[DSPy](https://dspy.ai/) programs, `trace_lm` (and the async `trace_lm_async`)
+wraps a `dspy.LM` instance's request method (`lm.forward`/`lm.aforward`) and
+records model and token usage from the LiteLLM-style response. AWS Bedrock's Converse stream is a distinct method rather
 than a `stream=True` flag, so it has its own `trace_converse_stream` wrapper that
 yields the stream's events unchanged and records the same way.
 
