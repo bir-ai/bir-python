@@ -202,6 +202,7 @@ def metadata(version: str) -> str:
         "License-Expression: Apache-2.0",
         "Description-Content-Type: text/markdown",
     ]
+    headers.extend(f"Classifier: {classifier}" for classifier in classifiers())
     for extra, requirements in optional_dependencies().items():
         headers.append(f"Provides-Extra: {extra}")
         headers.extend(
@@ -419,6 +420,41 @@ def console_scripts() -> dict[str, str]:
             if match:
                 scripts[match.group(1)] = match.group(2)
     return scripts
+
+
+def classifiers() -> list[str]:
+    """Parse the ``classifiers`` array from the ``[project]`` table.
+
+    Implemented without ``tomllib`` so it runs on Python 3.10, the minimum the
+    SDK supports. The project keeps one quoted classifier per line inside a
+    multi-line array, matching the rest of this module's line-scanning parsers.
+    """
+
+    text = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    values: list[str] = []
+    in_project = False
+    collecting = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_project = line == "[project]"
+            collecting = False
+            continue
+        if not in_project:
+            continue
+        if not collecting:
+            if re.match(r"^classifiers\s*=\s*\[\s*$", line):
+                collecting = True
+            continue
+        if line.startswith("]"):
+            collecting = False
+            continue
+        match = re.match(r'^"([^"]+)",?\s*$', line)
+        if match:
+            values.append(match.group(1))
+    return values
 
 
 def optional_dependencies() -> dict[str, list[str]]:

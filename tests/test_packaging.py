@@ -206,6 +206,25 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
             lines,
         )
 
+    def test_wheel_metadata_advertises_typed_classifier(self) -> None:
+        version = self.verify_release.package_version()
+        wheel = self.verify_release.build_wheel(self.tmp_path, version)
+
+        with zipfile.ZipFile(wheel) as archive:
+            names = set(archive.namelist())
+            metadata = archive.read(f"bir_sdk-{version}.dist-info/METADATA").decode("utf-8")
+
+        # The distribution ships inline types (the PEP 561 marker below), so its
+        # metadata must carry the matching trove classifier for PyPI/tooling.
+        self.assertIn("Classifier: Typing :: Typed", metadata.splitlines())
+        self.assertIn("bir/py.typed", names)
+
+    def test_pyproject_classifiers_include_typed_and_stay_sorted(self) -> None:
+        declared = self.verify_release.classifiers()
+
+        self.assertIn("Typing :: Typed", declared)
+        self.assertEqual(declared, sorted(declared))
+
     def test_wheel_metadata_has_no_unconditional_runtime_dependencies(self) -> None:
         version = self.verify_release.package_version()
         wheel = self.verify_release.build_wheel(self.tmp_path, version)

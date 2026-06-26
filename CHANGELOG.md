@@ -10,6 +10,11 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `Typing :: Typed` trove classifier in `pyproject.toml`, so PyPI and tooling
+  advertise that the distribution ships inline type annotations. The SDK already
+  ships the PEP 561 `py.typed` marker; this is the standard metadata signal that
+  pairs with it. Metadata only — no code, API, dependency, schema, or fixture
+  change.
 - `bir.integrations.crewai.BirCrewAIHandler`, a dependency-free bridge that records
   [CrewAI](https://www.crewai.com/) crew runs as Bir traces. CrewAI's lowest-coupling
   observability seam is its event bus (`crewai.utilities.events.crewai_event_bus`),
