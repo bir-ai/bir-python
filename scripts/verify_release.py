@@ -47,6 +47,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/otel.py",
     "bir/integrations/pydantic_ai.py",
     "bir/integrations/vertexai.py",
+    "bir/logging.py",
     "bir/py.typed",
     "bir/testing.py",
 }

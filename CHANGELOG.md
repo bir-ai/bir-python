@@ -10,6 +10,20 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.logging` module with a stdlib `logging.Filter`, `BirTraceIdFilter`, that
+  stamps the active Bir ids onto every `LogRecord` as `bir_trace_id` /
+  `bir_span_id` (the `TRACE_ID_FIELD` / `SPAN_ID_FIELD` constants), so standard
+  formatters can render them with `%(bir_trace_id)s` / `%(bir_span_id)s` and no
+  per-call `extra={...}` plumbing. Inside a trace the values equal
+  `get_current_trace_id()` / `get_current_span_id()`; outside any trace they are
+  `None` and the filter never raises or drops a record. A tiny
+  `install_trace_id_filter(target=None)` helper attaches the filter to a logger or
+  handler (default: the root logger) and returns it for later removal. The ids are
+  read from the same task-local context as the accessors, so each asyncio task and
+  thread sees its own. Read-only, consistent with the accessors — no setter and no
+  cross-process propagation. New symbols are scoped to `bir.logging` only (the
+  top-level package API is unchanged); stdlib `logging` only, no new dependency or
+  schema change.
 - `bir experiment-show <experiment-id>` CLI command that prints one experiment's
   summary (evaluator aggregate means) and a per-example table of id, status, and
   scores, mirroring `bir show` for traces. `--dir` reads the same experiments
