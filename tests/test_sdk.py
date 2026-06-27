@@ -232,6 +232,88 @@ class SdkTests(unittest.TestCase):
             self.assertIsInstance(event["start_time"], str)
             self.assertIsInstance(event["end_time"], str)
 
+    def test_observe_metadata_records_on_trace_root(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(metadata={"route": "/checkout", "tenant": "acme"})
+            def answer() -> str:
+                return "ok"
+
+            self.assertEqual(answer(), "ok")
+
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(event["type"], "trace")
+            self.assertEqual(event["metadata"], {"route": "/checkout", "tenant": "acme"})
+
+    def test_observe_metadata_is_redacted(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(metadata={"route": "/checkout", "api_key": "sk-secret"})
+            def answer() -> str:
+                return "ok"
+
+            answer()
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            event = read_events(trace_path)[0]
+            self.assertEqual(event["metadata"], {"route": "/checkout", "api_key": "[redacted]"})
+            self.assertNotIn("sk-secret", trace_path.read_text(encoding="utf-8"))
+
+    def test_observe_metadata_records_on_error_trace_root(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(metadata={"route": "/checkout"})
+            def boom() -> str:
+                raise ValueError("nope")
+
+            with self.assertRaises(ValueError):
+                boom()
+
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(event["status"], "error")
+            self.assertEqual(event["metadata"], {"route": "/checkout"})
+
+    def test_observe_metadata_does_not_leak_onto_nested_span(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(metadata={"route": "/inner"})
+            def inner() -> str:
+                return "inner"
+
+            @observe(metadata={"route": "/outer"})
+            def outer() -> str:
+                return inner()
+
+            self.assertEqual(outer(), "inner")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            trace_event = next(event for event in events if event["type"] == "trace")
+            span_event = next(event for event in events if event["type"] == "span")
+            self.assertEqual(trace_event["metadata"], {"route": "/outer"})
+            # The nested observation records a span and never carries its own
+            # trace-level metadata.
+            self.assertEqual(span_event["metadata"], {})
+
+    def test_observe_metadata_composes_with_generator_outcome(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe(metadata={"route": "/stream"})
+            def stream() -> Iterator[int]:
+                yield 1
+                yield 2
+
+            self.assertEqual(list(stream()), [1, 2])
+
+            event = read_events(workdir / ".bir" / "traces.jsonl")[0]
+            self.assertEqual(
+                event["metadata"],
+                {"route": "/stream", "generator": {"outcome": "completed"}},
+            )
+
+    def test_observe_rejects_non_mapping_metadata(self) -> None:
+        with self.assertRaisesRegex(TypeError, "observe metadata must be a mapping"):
+            observe(metadata=["not", "a", "mapping"])  # type: ignore[arg-type]
+
     def test_sdk_event_contract_matches_schema_artifact(self) -> None:
         schema = load_contract_schema()
         properties = schema["properties"]

@@ -20,6 +20,20 @@ def answer(question: str) -> str:
 The name defaults to the function name. Capture overrides apply only to that
 function call and inherit into nested work.
 
+Pass `metadata=` to record a static mapping on the trace root the call produces —
+the decorator-side counterpart to `trace(metadata=...)`:
+
+```python
+@observe(metadata={"route": "/checkout", "tenant": "acme"})
+def checkout() -> str:
+    return "done"
+```
+
+The metadata is redacted with the same rules as captured input/output and is
+attached only when the call opens a new trace root; a nested `@observe()` call
+records a span and never carries it. For observed generators it composes with the
+recorded `metadata.generator.*` outcome. The argument must be a mapping.
+
 ## `trace()`
 
 `trace()` creates an explicit trace root and accepts optional metadata:

@@ -111,6 +111,26 @@ it is written with the same rules as captured input and output, so secret-like
 fields never reach the JSONL. It works with both `with` and `async with`, and the
 argument must be a mapping.
 
+To tag a traced entry point with static metadata without rewriting it as a manual
+`with trace(...)` block, pass `metadata=` to `@observe()`. It is the
+decorator-side counterpart to `trace(metadata=...)` and is recorded, redacted, on
+the trace root the call produces:
+
+```python
+from bir import observe
+
+
+@observe(metadata={"route": "/checkout", "tenant": "acme"})
+def checkout() -> str:
+    return "done"
+```
+
+The metadata is attached only when the decorated call opens a new trace root; a
+nested `@observe()` call records a span and never carries this trace-level
+metadata. For observed generators it composes with the recorded
+`metadata.generator.*` outcome. The argument must be a mapping, and secret-like
+keys and values are redacted before they reach the JSONL.
+
 ## Estimating cost from a local price table
 
 Cost is user-provided by default — Bir bundles no prices because provider prices

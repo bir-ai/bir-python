@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `metadata=` keyword on `@observe()`, recording a static mapping on the trace
+  ROOT event the decorated call produces. It is the decorator-side counterpart to
+  `trace(metadata=...)` for tagging an entry point (route, tenant, feature flag)
+  without rewriting it as a manual `with trace(...)` block. The mapping is redacted
+  with the same rules as captured input/output, is attached only when the call
+  opens a new trace root (a nested `@observe()` records a span and never carries
+  it), and composes with the generator `metadata.generator.*` outcome for observed
+  generators. Additive keyword on an existing symbol — no new export, no schema
+  change; `@observe()` calls without `metadata` are byte-for-byte unchanged.
 - `Typing :: Typed` trove classifier in `pyproject.toml`, so PyPI and tooling
   advertise that the distribution ships inline type annotations. The SDK already
   ships the PEP 561 `py.typed` marker; this is the standard metadata signal that

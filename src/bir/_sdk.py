@@ -687,6 +687,7 @@ def observe(
     *,
     capture_inputs: bool | None = None,
     capture_outputs: bool | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> Callable[[F], F]:
     """Decorate a sync or async function and record one trace event for each call.
 
@@ -701,10 +702,22 @@ def observe(
     ``metadata.generator.outcome`` is ``"closed"``). Yielded values are never
     buffered; with output capture enabled only a bounded yielded-item count is
     recorded under ``metadata.generator.items``.
+
+    ``metadata`` is an optional static mapping recorded on the produced trace ROOT
+    event, redacted with the same rules as captured input/output. It is the
+    decorator-side counterpart to ``trace(metadata=...)`` for tagging an entry
+    point (route, tenant, feature flag) without rewriting it as a manual
+    ``with trace(...)`` block. It is attached only when the decorated call opens a
+    new trace root; a nested ``@observe()`` call records a span and never carries
+    this trace-level metadata. For observed generators it composes with the
+    recorded ``metadata.generator.*`` outcome (the generator keys win on conflict).
     """
 
     if name is not None:
         _validate_event_name(name, "observe name")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        raise TypeError("bir observe metadata must be a mapping")
+    observe_metadata = dict(metadata) if metadata is not None else None
 
     def decorator(func: F) -> F:
         trace_name = name or func.__name__
@@ -723,7 +736,7 @@ def observe(
                 # the wrapper is itself an async generator, keeping creation lazy.
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
-                state = _begin_observe(capture_inputs, capture_outputs)
+                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
                 input_payload = (
                     _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 )
@@ -782,7 +795,7 @@ def observe(
                 # wrapper is itself a generator, keeping creation lazy.
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
-                state = _begin_observe(capture_inputs, capture_outputs)
+                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
                 input_payload = (
                     _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 )
@@ -838,7 +851,7 @@ def observe(
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                state = _begin_observe(capture_inputs, capture_outputs)
+                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
                 input_payload = None
                 try:
                     if state.capture_inputs:
@@ -854,7 +867,7 @@ def observe(
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            state = _begin_observe(capture_inputs, capture_outputs)
+            state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
             input_payload = None
             try:
                 if state.capture_inputs:
@@ -883,6 +896,9 @@ class _ObserveState:
     capture_inputs: bool
     capture_outputs: bool
     dropped: bool
+    # Static, redaction-pending metadata supplied to ``@observe(metadata=...)``.
+    # Attached only when this observation is a trace root; ``None`` records nothing.
+    metadata: dict[str, Any] | None
     trace_token: Token[str | None]
     parent_token: Token[str | None]
     capture_inputs_token: Token[bool | None]
@@ -890,7 +906,11 @@ class _ObserveState:
     dropped_token: Token[bool]
 
 
-def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) -> _ObserveState:
+def _begin_observe(
+    capture_inputs: bool | None,
+    capture_outputs: bool | None,
+    metadata: dict[str, Any] | None = None,
+) -> _ObserveState:
     """Open an observation: choose trace-vs-span ids and bind the call contextvars.
 
     Both the sync and async wrappers call this so the trace decision and
@@ -898,6 +918,10 @@ def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) ->
     asyncio task runs with a copied context, so concurrent observed coroutines
     stay isolated. A new trace root also rolls the sampling decision once here so
     that every nested span inherits it instead of re-rolling.
+
+    ``metadata`` is the static mapping from ``@observe(metadata=...)``. It is
+    stored on the returned state unredacted and only redacted and written when the
+    observation turns out to be a trace root; nested spans ignore it.
     """
 
     active_trace_id = _current_trace_id.get()
@@ -926,12 +950,36 @@ def _begin_observe(capture_inputs: bool | None, capture_outputs: bool | None) ->
         capture_inputs=capture_inputs_for_call,
         capture_outputs=capture_outputs_for_call,
         dropped=dropped,
+        metadata=metadata,
         trace_token=_current_trace_id.set(trace_id),
         parent_token=_current_parent_id.set(event_id),
         capture_inputs_token=_current_capture_inputs.set(capture_inputs_for_call),
         capture_outputs_token=_current_capture_outputs.set(capture_outputs_for_call),
         dropped_token=_current_trace_dropped.set(dropped),
     )
+
+
+def _observe_event_metadata(
+    state: _ObserveState,
+    extra: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Compose the metadata written for an observation's own event.
+
+    The static ``@observe(metadata=...)`` mapping is redacted with the same rules
+    as captured input/output and attached only when this observation is a trace
+    root, mirroring how only roots carry trace-level metadata (service/source).
+    ``extra`` is the wrapper-supplied event metadata — the generator wrappers'
+    ``metadata.generator.*`` outcome — and is applied last so those system keys
+    win on conflict. Returns ``None`` when nothing applies so plain ``@observe()``
+    calls stay byte-for-byte identical.
+    """
+
+    combined: dict[str, Any] = {}
+    if state.event_type == "trace" and state.metadata is not None:
+        combined.update(_safe_capture(dict(state.metadata)))
+    if extra:
+        combined.update(extra)
+    return combined or None
 
 
 def _finish_observe_success(
@@ -975,7 +1023,7 @@ def _finish_observe_success(
             end_time=end_time,
             status="success",
             error=None,
-            metadata=metadata,
+            metadata=_observe_event_metadata(state, metadata),
             input=input_payload,
             output=output_payload,
         )
@@ -1021,7 +1069,7 @@ def _finish_observe_error(
         end_time=end_time,
         status="error",
         error=_safe_error(exc),
-        metadata=metadata,
+        metadata=_observe_event_metadata(state, metadata),
         input=input_payload,
     )
     try:
