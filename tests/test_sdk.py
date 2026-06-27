@@ -25,6 +25,7 @@ import bir
 from bir import configure, generation, get_current_span_id, get_current_trace_id, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
 from bir._sdk import (
     _Config,
+    _MAX_SAMPLE_RULES,
     _config_from_env,
     _parse_env_bool,
     _parse_env_sample_rate,
@@ -41,6 +42,7 @@ _BIR_ENV_VARS = (
     "BIR_SAMPLE_RATE",
     "BIR_SERVICE_NAME",
     "BIR_ENVIRONMENT",
+    "BIR_SOURCE",
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -3862,6 +3864,105 @@ for batch in range(int(batches)):
             traces = load_traces()
             self.assertEqual(len(traces), 2)
 
+    def test_sample_rules_override_global_rate_by_exact_trace_name(self) -> None:
+        with temporary_workdir():
+            configure(sample_rate=1.0, sample_rules={"chatty": 0.0, "critical": 1.0})
+
+            @observe(name="chatty")
+            def chatty() -> str:
+                return "chatty"
+
+            @observe(name="critical")
+            def critical() -> str:
+                return "critical"
+
+            @observe(name="chatty.child")
+            def similar_name() -> str:
+                return "similar"
+
+            with patch(
+                "bir._sdk.random.random",
+                side_effect=AssertionError("edge sample rates should not roll"),
+            ):
+                self.assertEqual(chatty(), "chatty")
+                self.assertEqual(critical(), "critical")
+                self.assertEqual(similar_name(), "similar")
+
+            self.assertEqual(
+                [trace.name for trace in load_traces()],
+                ["critical", "chatty.child"],
+            )
+
+    def test_sample_rules_unmatched_trace_uses_global_sample_rate(self) -> None:
+        with temporary_workdir():
+            configure(sample_rate=0.5, sample_rules={"critical": 1.0})
+
+            with patch("bir._sdk.random.random", side_effect=[0.9, 0.1]):
+                with trace("other"):
+                    pass
+                with trace("other"):
+                    pass
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(traces[0].name, "other")
+
+    def test_sample_rules_decision_is_inherited_by_nested_events(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(sample_rate=0.0, sample_rules={"outer": 1.0, "inner": 0.0})
+
+            @observe(name="inner")
+            def inner() -> str:
+                with span("inner_span"):
+                    score("quality", 0.9)
+                return "inner"
+
+            @observe(name="outer")
+            def outer() -> str:
+                return inner()
+
+            with patch(
+                "bir._sdk.random.random",
+                side_effect=AssertionError("edge sample rates should not roll"),
+            ):
+                self.assertEqual(outer(), "inner")
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            self.assertEqual(
+                sorted((str(event["type"]), str(event["name"])) for event in events),
+                [
+                    ("score", "quality"),
+                    ("span", "inner"),
+                    ("span", "inner_span"),
+                    ("trace", "outer"),
+                ],
+            )
+
+    def test_configure_sample_rules_replace_omit_and_clear_semantics(self) -> None:
+        with temporary_workdir():
+
+            @observe(name="chatty")
+            def chatty() -> str:
+                return "chatty"
+
+            @observe(name="noisy")
+            def noisy() -> str:
+                return "noisy"
+
+            configure(sample_rate=1.0, sample_rules={"chatty": 0.0})
+            # Omitted sample_rules leaves the rule table unchanged.
+            configure(capture_outputs=True)
+            chatty()
+
+            configure(sample_rules={"noisy": 0.0})
+            chatty()
+            noisy()
+
+            configure(sample_rules={})
+            noisy()
+
+            self.assertEqual([trace.name for trace in load_traces()], ["chatty", "noisy"])
+
     def test_configure_rejects_invalid_sample_rate(self) -> None:
         with self.assertRaisesRegex(ValueError, "sample_rate"):
             configure(sample_rate=-0.1)
@@ -3873,6 +3974,24 @@ for batch in range(int(batches)):
             configure(sample_rate=cast(Any, "high"))
         with self.assertRaisesRegex(TypeError, "sample_rate"):
             configure(sample_rate=cast(Any, True))
+
+    def test_configure_rejects_invalid_sample_rules(self) -> None:
+        with self.assertRaisesRegex(TypeError, "sample_rules"):
+            configure(sample_rules=cast(Any, [("chatty", 1.0)]))
+        with self.assertRaisesRegex(TypeError, "sample_rules keys"):
+            configure(sample_rules=cast(Any, {123: 1.0}))
+        with self.assertRaisesRegex(ValueError, "sample_rules keys"):
+            configure(sample_rules={"": 1.0})
+        with self.assertRaisesRegex(ValueError, "sample_rules.*between"):
+            configure(sample_rules={"chatty": 1.5})
+        with self.assertRaisesRegex(ValueError, "sample_rules.*finite"):
+            configure(sample_rules={"chatty": float("nan")})
+        with self.assertRaisesRegex(TypeError, "sample_rules.*int or float"):
+            configure(sample_rules={"chatty": cast(Any, True)})
+        with self.assertRaisesRegex(ValueError, "sample_rules.*not exceed"):
+            configure(
+                sample_rules={f"trace-{index}": 1.0 for index in range(_MAX_SAMPLE_RULES + 1)}
+            )
 
     def test_config_from_env_with_nothing_set_matches_hardcoded_defaults(self) -> None:
         with env_vars():

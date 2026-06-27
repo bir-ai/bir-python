@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `configure(sample_rules=...)`, an opt-in mapping of exact trace root names to
+  sampling rates. A matching rule overrides the global `sample_rate` for that
+  root; unmatched roots keep using the global rate. The decision is still made
+  once per trace root and inherited by every descendant event. Passing
+  `sample_rules` replaces the prior table, `sample_rules={}` clears it, and
+  omitting the argument leaves existing rules unchanged. Additive keyword on
+  `configure()` only - no new top-level symbol, dependency, schema, or fixture
+  change.
 - `bir.integrations.BirHaystackTracer`, a dependency-free Haystack 2.x integration
   that maps a pipeline run into a Bir trace without importing `haystack`. It
   implements Haystack's tracing seam (the `Tracer`/`Span` protocol: `trace` /

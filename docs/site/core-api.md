@@ -238,6 +238,7 @@ configure(
     service_name="rag-api",
     environment="production",
     sample_rate=0.1,
+    sample_rules={"checkout": 1.0, "chatty": 0.0},
     max_bytes=5_000_000,
     backup_count=3,
 )
@@ -245,7 +246,10 @@ configure(
 
 Arguments that are omitted retain the current setting. Environment defaults are
 read once when `bir` is imported; explicit `configure()` arguments take
-precedence. See [CLI & Environment Config](cli-env.md).
+precedence. `sample_rules` is an optional exact trace-root-name override table;
+unmatched roots use the global `sample_rate`. See
+[Sampling & Service Metadata](sampling-service-metadata.md) and
+[CLI & Environment Config](cli-env.md).
 
 ### Cost from a local price table
 

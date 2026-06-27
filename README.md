@@ -57,6 +57,37 @@ but you can widen them for your own credential names and formats with
 `configure(additional_secret_keys=[...], additional_redaction_patterns=[...])`.
 See [capture and privacy](docs/site/capture-privacy.md).
 
+## Sampling traces
+
+Use `configure(sample_rate=...)` to keep only a fraction of trace roots while
+leaving application control flow unchanged. The decision is made once per root
+and inherited by every span, generation, tool call, retrieval, and score below
+it.
+
+```python
+from bir import configure
+
+configure(sample_rate=0.1)  # record about 10% of trace roots
+```
+
+For high-value or especially noisy entry points, add exact-name overrides with
+`sample_rules`. A rule name matches the trace root name from `@observe(name=...)`,
+the decorated function name for plain `@observe()`, or `trace("...")`.
+Unmatched roots keep using the global `sample_rate`.
+
+```python
+configure(
+    sample_rate=0.01,
+    sample_rules={
+        "checkout": 1.0,  # keep every checkout trace
+        "chatty": 0.0,    # drop every chatty trace
+    },
+)
+```
+
+Passing `sample_rules={}` clears the overrides; omitting `sample_rules` in a
+later `configure()` call leaves the current rules unchanged.
+
 ## Correlating your logs with traces
 
 The easy path is the `bir.logging` filter. Attach `BirTraceIdFilter` once (the

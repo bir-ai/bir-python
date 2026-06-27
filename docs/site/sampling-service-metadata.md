@@ -58,6 +58,28 @@ from bir import configure
 configure(sample_rate=0.1)  # record about 10% of traces
 ```
 
+Use `sample_rules` when specific trace roots need a different local rate. Rule
+names are exact trace root names: the `@observe(name=...)` value, the decorated
+function name for plain `@observe()`, or the `trace("...")` name. A matching
+name uses its configured rate; roots with no rule fall back to the global
+`sample_rate`.
+
+```python
+from bir import configure
+
+configure(
+    sample_rate=0.01,
+    sample_rules={
+        "checkout": 1.0,  # keep every checkout trace
+        "chatty": 0.0,    # drop every chatty trace
+    },
+)
+```
+
+`sample_rules` is validated at `configure()` time. Passing `sample_rules={}`
+clears the table; omitting `sample_rules` leaves the current rules unchanged.
+There is no environment variable for per-name rules.
+
 The decision is made once per trace root and inherited by every event under it.
 A sampled-out trace and all its spans, generations, tool calls, retrievals, and
 scores write nothing.

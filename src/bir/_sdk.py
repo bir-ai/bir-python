@@ -74,6 +74,11 @@ _MAX_ADDITIONAL_SECRET_KEYS = 100
 _MAX_ADDITIONAL_REDACTION_PATTERNS = 100
 _MAX_ADDITIONAL_SECRET_KEY_LENGTH = 200
 _MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH = 1000
+# Upper bound on the opt-in ``sample_rules`` table accepted by ``configure``.
+# Rules are checked only at trace-root creation, but a cap still avoids carrying
+# an unbounded process-global configuration. Exact name matching keeps lookups
+# predictable and leaves the global ``sample_rate`` as the default.
+_MAX_SAMPLE_RULES = 1000
 # Upper bound on the opt-in ``model_prices`` table accepted by ``configure``. It
 # rejects an unboundedly large price table while leaving ample room for a
 # user-curated list. Bir bundles no prices; this only caps what a caller supplies.
@@ -117,6 +122,12 @@ class _Config:
     # way to tag where a trace came from. ``None`` records nothing.
     source: str | None = None
     sample_rate: float = 1.0
+    # Optional exact trace-root-name sampling overrides. Empty by default so the
+    # global ``sample_rate`` remains the only sampling input unless a caller opts
+    # in. Stored as a validated, name-sorted tuple so the frozen config stays
+    # hashable; a rule affects only trace roots with the same name, and children
+    # inherit the root's already-rolled decision.
+    sample_rules: tuple[tuple[str, float], ...] = ()
     # ``max_bytes is None`` keeps the historical behavior of a single trace file
     # that grows without bound. When set, the active file is rotated before a
     # write that would push it past the cap, keeping at most ``backup_count``
@@ -318,6 +329,7 @@ def configure(
     environment: str | None = None,
     source: str | None = None,
     sample_rate: float | None = None,
+    sample_rules: Mapping[str, float] | None = None,
     max_bytes: int | None = None,
     backup_count: int | None = None,
     additional_secret_keys: Iterable[str] | None = None,
@@ -342,6 +354,13 @@ def configure(
     recorded. It is decided once per trace root; when a trace is sampled out the
     function still runs and still raises, but the trace and every event under it
     write nothing. The default ``1.0`` records every trace.
+
+    ``sample_rules`` is an opt-in mapping of exact trace root name to a sampling
+    rate for that root. A matching rule overrides the global ``sample_rate``; an
+    unmatched root uses the global rate. Rules are validated once here and stored
+    immutably, and the decision is still made once per trace root and inherited by
+    every descendant event. Passing ``sample_rules`` replaces the prior rule table
+    (an empty mapping clears it); omitting it leaves the current rules unchanged.
 
     ``max_bytes`` enables opt-in size-based rotation of the local trace file. It
     defaults to ``None`` (unlimited), which keeps the historical single-file
@@ -421,6 +440,8 @@ def configure(
         updates["source"] = _validate_event_name(source, "source")
     if sample_rate is not None:
         updates["sample_rate"] = _validate_sample_rate(sample_rate)
+    if sample_rules is not None:
+        updates["sample_rules"] = _validate_sample_rules(sample_rules)
     if max_bytes is not None:
         updates["max_bytes"] = _validate_non_negative_int(max_bytes, "max_bytes")
     if backup_count is not None:
@@ -736,7 +757,7 @@ def observe(
                 # the wrapper is itself an async generator, keeping creation lazy.
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
-                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
+                state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
                 input_payload = (
                     _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 )
@@ -795,7 +816,7 @@ def observe(
                 # wrapper is itself a generator, keeping creation lazy.
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
-                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
+                state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
                 input_payload = (
                     _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 )
@@ -851,7 +872,7 @@ def observe(
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
+                state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
                 input_payload = None
                 try:
                     if state.capture_inputs:
@@ -867,7 +888,7 @@ def observe(
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            state = _begin_observe(capture_inputs, capture_outputs, observe_metadata)
+            state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
             input_payload = None
             try:
                 if state.capture_inputs:
@@ -907,6 +928,7 @@ class _ObserveState:
 
 
 def _begin_observe(
+    trace_name: str,
     capture_inputs: bool | None,
     capture_outputs: bool | None,
     metadata: dict[str, Any] | None = None,
@@ -919,9 +941,11 @@ def _begin_observe(
     stay isolated. A new trace root also rolls the sampling decision once here so
     that every nested span inherits it instead of re-rolling.
 
-    ``metadata`` is the static mapping from ``@observe(metadata=...)``. It is
-    stored on the returned state unredacted and only redacted and written when the
-    observation turns out to be a trace root; nested spans ignore it.
+    ``trace_name`` is used only when this observation opens a trace root, where
+    exact-name ``sample_rules`` may override the global rate. ``metadata`` is the
+    static mapping from ``@observe(metadata=...)``. It is stored on the returned
+    state unredacted and only redacted and written when the observation turns out
+    to be a trace root; nested spans ignore it.
     """
 
     active_trace_id = _current_trace_id.get()
@@ -937,7 +961,7 @@ def _begin_observe(
         trace_id = event_id
         parent_id = None
         event_type = "trace"
-        dropped = _should_drop_trace()
+        dropped = _should_drop_trace(trace_name)
     start_time = _now()
     capture_inputs_for_call = _should_capture(capture_inputs, "inputs")
     capture_outputs_for_call = _should_capture(capture_outputs, "outputs")
@@ -1362,7 +1386,7 @@ class _TraceContext:
     def __enter__(self) -> _TraceContext:
         self.id = _new_id()
         self.start_time = _now()
-        self._dropped = _should_drop_trace()
+        self._dropped = _should_drop_trace(self.name)
         self._trace_token = _current_trace_id.set(self.id)
         self._parent_token = _current_parent_id.set(self.id)
         self._capture_inputs_token = _current_capture_inputs.set(_config.capture_inputs)
@@ -2349,15 +2373,17 @@ def _should_capture(override: bool | None, target: str) -> bool:
     return _config.capture_outputs
 
 
-def _should_drop_trace() -> bool:
+def _should_drop_trace(trace_name: str) -> bool:
     """Decide whether the trace starting now should be sampled out.
 
-    ``sample_rate`` is the probability of keeping a trace, so the deterministic
-    edges (``1.0`` keeps everything, ``0.0`` drops everything) never touch the
-    random generator. Only partial rates draw from ``random.random()``.
+    ``sample_rate`` is the probability of keeping a trace. An exact-name
+    ``sample_rules`` entry overrides the global rate for the matching trace root;
+    otherwise the global rate applies. The deterministic edges (``1.0`` keeps
+    everything, ``0.0`` drops everything) never touch the random generator. Only
+    partial rates draw from ``random.random()``.
     """
 
-    sample_rate = _config.sample_rate
+    sample_rate = _sample_rate_for_trace(trace_name)
     if sample_rate >= 1.0:
         return False
     if sample_rate <= 0.0:
@@ -2599,6 +2625,40 @@ def _validate_sample_rate(value: Any) -> float:
     if numeric_value < 0.0 or numeric_value > 1.0:
         raise ValueError("bir sample_rate must be between 0.0 and 1.0")
     return float(numeric_value)
+
+
+def _validate_sample_rules(value: Any) -> tuple[tuple[str, float], ...]:
+    """Validate exact trace-root-name sampling overrides.
+
+    Accepts a mapping of trace root name to sample rate. The returned tuple is
+    sorted by name so the frozen config remains deterministic and hashable. An
+    empty mapping is valid and clears the prior rule table.
+    """
+
+    if not isinstance(value, Mapping):
+        raise TypeError("bir sample_rules must be a mapping of trace name to sample rate")
+    if len(value) > _MAX_SAMPLE_RULES:
+        raise ValueError(f"bir sample_rules must not exceed {_MAX_SAMPLE_RULES} entries")
+    normalized: list[tuple[str, float]] = []
+    for trace_name, sample_rate in value.items():
+        name = _validate_event_name(trace_name, "sample_rules keys")
+        try:
+            rate = _validate_sample_rate(sample_rate)
+        except TypeError as exc:
+            raise TypeError(f"bir sample_rules[{name!r}] rate must be an int or float") from exc
+        except ValueError as exc:
+            message = str(exc).replace("sample_rate", f"sample_rules[{name!r}] rate")
+            raise ValueError(message) from exc
+        normalized.append((name, rate))
+    normalized.sort(key=lambda item: item[0])
+    return tuple(normalized)
+
+
+def _sample_rate_for_trace(trace_name: str) -> float:
+    for name, sample_rate in _config.sample_rules:
+        if name == trace_name:
+            return sample_rate
+    return _config.sample_rate
 
 
 def _validate_non_negative_int(value: Any, field: str) -> int:
