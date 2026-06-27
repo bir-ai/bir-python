@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.vertexai import trace_generate_content
+from bir.integrations.vertexai import trace_generate_content, trace_generate_content_async
 
 
 @contextmanager
@@ -361,6 +362,180 @@ class VertexAIIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 trace_generate_content(fake_generate, contents=[], bir_model="gemini-1.5-flash")
+
+            # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class VertexAIAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_generate_and_records_model_version_and_usage(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            received_args: list[object] = []
+            created: list[FakeGenerationResponse] = []
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                received_args.extend(args)
+                response = FakeGenerationResponse(
+                    model_version="gemini-1.5-flash-002",
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=12,
+                        candidates_token_count=6,
+                        total_token_count=18,
+                    ),
+                    payload={
+                        "candidates": [
+                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
+                        ],
+                    },
+                )
+                created.append(response)
+                return response
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    # Vertex binds the model to the GenerativeModel, so contents pass positionally.
+                    return await trace_generate_content_async(
+                        fake_generate,
+                        "What is Bir?",
+                        bir_model="gemini-1.5-flash",
+                    )
+
+            response = asyncio.run(driver())
+            # The wrapper forwards the request and returns the unchanged response.
+            self.assertIs(response, created[0])
+
+            self.assertEqual(received_args, ["What is Bir?"])
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "vertexai.generate_content")
+            self.assertEqual(generation_event.status, "success")
+            # ``bir_model`` seeds the model; the response ``model_version`` refines it.
+            self.assertEqual(generation_event.model, "gemini-1.5-flash-002")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "vertexai")
+            self.assertEqual(generation_event.input["args"], ["What is Bir?"])
+            self.assertEqual(
+                generation_event.output["candidates"][0]["content"]["parts"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_uses_bir_model_and_omits_usage_when_response_is_sparse(self) -> None:
+        with temporary_workdir():
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                return FakeGenerationResponse(usage_metadata=None, payload={"candidates": []})
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
+                    )
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            # No ``model_version`` on the response, so the caller's ``bir_model`` stands.
+            self.assertEqual(generation_event.model, "gemini-1.5-flash")
+            self.assertIsNone(generation_event.usage)
+
+    def test_forwards_vertex_config_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                received.update(kwargs)
+                return FakeGenerationResponse()
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(
+                        fake_generate,
+                        contents=[],
+                        generation_config={"temperature": 0.0},
+                        bir_name="chat.turn",
+                        bir_model="gemini-1.5-flash",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            # Vertex's own ``generation_config`` kwarg is forwarded; the bir_ options are consumed.
+            self.assertEqual(received["generation_config"], {"temperature": 0.0})
+            self.assertNotIn("bir_model", received)
+            self.assertNotIn("bir_name", received)
+            self.assertNotIn("bir_metadata", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.model, "gemini-1.5-flash")
+            self.assertEqual(generation_event.metadata["integration"], "vertexai")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+            self.assertEqual(generation_event.input["generation_config"], {"temperature": 0.0})
+
+    def test_does_not_capture_input_or_output_by_default(self) -> None:
+        with temporary_workdir():
+            # Capture is opt-in: without configure() the request and response are
+            # recorded as model + usage only, never the payloads.
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                return FakeGenerationResponse(
+                    usage_metadata=FakeUsageMetadata(prompt_token_count=7, candidates_token_count=3),
+                    payload={"candidates": [{"content": {"parts": [{"text": "secret"}]}}]},
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
+                    )
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertIsNone(generation_event.input)
+            self.assertIsNone(generation_event.output)
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
+                    )
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                calls.append(kwargs)
+                return FakeGenerationResponse()
+
+            async def driver() -> None:
+                await trace_generate_content_async(
+                    fake_generate, contents=[], bir_model="gemini-1.5-flash"
+                )
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
 
             # The generation guard fires before the request is ever issued.
             self.assertEqual(calls, [])

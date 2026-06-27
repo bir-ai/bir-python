@@ -60,10 +60,16 @@ The async wrappers, by provider:
 | LiteLLM | `bir.integrations.litellm` | `trace_completion_async` |
 | Instructor | `bir.integrations.instructor` | `trace_create_async` |
 | DSPy | `bir.integrations.dspy` | `trace_lm_async` |
+| AWS Bedrock Converse | `bir.integrations.bedrock` | `trace_converse_async` |
+| Google Vertex AI | `bir.integrations.vertexai` | `trace_generate_content_async` |
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
-options. AWS Bedrock, Vertex AI, and the LangChain, LlamaIndex, OpenAI Agents
+options. The AWS Bedrock and Vertex AI async wrappers cover the non-streaming call
+only; their streaming surfaces (`trace_converse_stream` and
+`trace_generate_content(..., stream=True)`) stay synchronous, and the Vertex async
+wrapper is re-exported as `bir.integrations.trace_vertex_generate_content_async` to
+avoid colliding with the Gemini wrapper. The LangChain, LlamaIndex, OpenAI Agents
 SDK, Pydantic AI, and CrewAI callback handlers have no async wrapper.
 
 ## OpenAI
@@ -210,6 +216,11 @@ accumulated text (each chunk's `text`, falling back to the first candidate's tex
 parts) and the final `usage_metadata` after the stream is consumed, refining the
 model from a chunk `model_version` when present.
 
+For async clients, `trace_generate_content_async` awaits
+`model.generate_content_async` inside one generation (re-exported as
+`bir.integrations.trace_vertex_generate_content_async`); it covers the
+non-streaming call only.
+
 ## AWS Bedrock
 
 ```python
@@ -250,6 +261,10 @@ unchanged, so iterate it directly instead of reaching into `response["stream"]`.
 Bir accumulates text from each `contentBlockDelta.delta.text` and records the
 `messageStop` stop reason and the terminal `metadata` event's token usage after
 the stream is consumed.
+
+For async clients, `trace_converse_async` awaits an async `converse` (for example
+an `aioboto3` `bedrock-runtime` client) inside one generation; it covers the
+non-streaming Converse call only.
 
 ## LiteLLM
 

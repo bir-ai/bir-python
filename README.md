@@ -221,7 +221,10 @@ clients. Each awaits the provider coroutine inside an active trace and records o
 generation; with `stream=True` they instead resolve to an async iterator you
 consume with `async for`, never buffering the stream, across every async wrapper
 with a streaming surface (OpenAI Chat Completions and Responses, Anthropic,
-Gemini, Mistral, Cohere, and LiteLLM). The synchronous wrappers likewise accept
+Gemini, Mistral, Cohere, and LiteLLM). AWS Bedrock (`trace_converse_async`) and
+Vertex AI (`trace_generate_content_async`) ship async counterparts for their
+non-streaming calls; their streaming surfaces stay synchronous. The synchronous
+wrappers likewise accept
 `stream=True` — yielding the provider's chunks unchanged and recording the
 accumulated text and final token usage once the stream is consumed — across
 OpenAI (Chat Completions and Responses), Anthropic, Gemini, Mistral, Cohere,

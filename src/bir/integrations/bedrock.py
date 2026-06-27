@@ -12,7 +12,7 @@ stream is consumed.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
@@ -64,6 +64,51 @@ def trace_converse(
         capture_output=bir_capture_output,
     ) as gen:
         response = converse(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def trace_converse_async(
+    converse: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "bedrock.converse",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Bedrock Runtime ``converse`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_converse` for async Bedrock
+    Runtime clients (for example an ``aioboto3`` ``bedrock-runtime`` client).
+    ``converse`` returns a coroutine; it is awaited inside a single Bir
+    ``generation`` event, arguments are forwarded unchanged, and the awaited
+    response is returned. As in the sync wrapper the generation model comes from
+    the request ``modelId`` keyword argument (Converse responses carry no model)
+    and token usage is read from the response ``usage`` block
+    (``inputTokens``/``outputTokens``/``totalTokens``) when present.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with Converse keyword arguments such as
+    ``inferenceConfig``. Async streaming (``converse_stream``) is not wrapped yet;
+    use the sync :func:`trace_converse_stream` for streaming.
+    """
+
+    metadata: dict[str, Any] = {"integration": "bedrock"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("modelId")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await converse(*args, **kwargs)
         _record_response(gen, response)
         return response
 

@@ -12,7 +12,7 @@ consumed.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
@@ -92,6 +92,59 @@ def trace_generate_content(
         capture_output=bir_capture_output,
     ) as gen:
         response = generate(*args, **kwargs)
+        _record_response(gen, response)
+        return response
+
+
+async def trace_generate_content_async(
+    generate: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "vertexai.generate_content",
+    bir_model: str | None = None,
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Vertex ``generate_content`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_generate_content` for
+    ``GenerativeModel.generate_content_async``. ``generate`` returns a coroutine;
+    it is awaited inside a single Bir ``generation`` event, arguments are forwarded
+    unchanged, and the awaited response is returned. As in the sync wrapper the
+    request is recorded as the generation input and token usage is read from
+    ``response.usage_metadata``
+    (``prompt_token_count``/``candidates_token_count``/``total_token_count``) when
+    present.
+
+    Vertex binds the model to the ``GenerativeModel`` instance rather than passing
+    it to ``generate_content``, so pass ``bir_model`` to record which model was
+    used; when the response carries a resolved ``model_version`` it refines that
+    value.
+
+    Like the sync wrapper this must run inside an active trace (for example an
+    async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
+    prefixed options never collide with ``generate_content`` keyword arguments such
+    as ``generation_config``. It is exported from ``bir.integrations`` as
+    ``trace_vertex_generate_content_async`` so it does not collide with the Google
+    Gemini wrapper of the same name. Async streaming (``stream=True``) is not
+    wrapped yet; use the sync :func:`trace_generate_content` for streaming.
+    """
+
+    metadata: dict[str, Any] = {"integration": "vertexai"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    async with generation(
+        bir_name,
+        model=_string_or_none(bir_model),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await generate(*args, **kwargs)
         _record_response(gen, response)
         return response
 

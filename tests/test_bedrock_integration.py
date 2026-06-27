@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.bedrock import trace_converse, trace_converse_stream
+from bir.integrations.bedrock import trace_converse, trace_converse_async, trace_converse_stream
 
 
 @contextmanager
@@ -324,6 +325,165 @@ class BedrockIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 trace_converse(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
+
+            # The generation guard fires before the request is ever issued.
+            self.assertEqual(calls, [])
+            self.assertEqual(load_events(), [])
+
+
+class BedrockAsyncIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_awaits_converse_and_records_model_and_usage(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            received: dict[str, object] = {}
+            created: list[dict[str, object]] = []
+
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                response = _converse_dict(usage={"inputTokens": 12, "outputTokens": 6, "totalTokens": 18})
+                created.append(response)
+                return response
+
+            async def driver() -> object:
+                async with trace("chat"):
+                    return await trace_converse_async(
+                        fake_converse,
+                        modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+                        messages=[{"role": "user", "content": [{"text": "What is Bir?"}]}],
+                    )
+
+            response = asyncio.run(driver())
+            # The wrapper forwards the request and returns the unchanged response.
+            self.assertIs(response, created[0])
+
+            self.assertEqual(received["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(
+                received["messages"],
+                [{"role": "user", "content": [{"text": "What is Bir?"}]}],
+            )
+
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "bedrock.converse")
+            self.assertEqual(generation_event.status, "success")
+            # Converse responses omit a model, so it comes from the request keyword.
+            self.assertEqual(generation_event.model, "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.input["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(
+                generation_event.output["output"]["message"]["content"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
+        with temporary_workdir():
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                return _converse_dict(usage=None)
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_converse_async(
+                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.model, "amazon.titan-text-premier-v1:0")
+            self.assertIsNone(generation_event.usage)
+
+    def test_forwards_bedrock_arguments_and_consumes_bir_options(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True)
+            received: dict[str, object] = {}
+
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                return _converse_dict(usage=None)
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_converse_async(
+                        fake_converse,
+                        modelId="amazon.titan-text-premier-v1:0",
+                        messages=[],
+                        inferenceConfig={"temperature": 0.0},
+                        bir_name="chat.turn",
+                        bir_metadata={"feature": "qa"},
+                    )
+
+            asyncio.run(driver())
+
+            # Bedrock's own ``inferenceConfig`` kwarg is forwarded; the bir_ options are consumed.
+            self.assertEqual(received["inferenceConfig"], {"temperature": 0.0})
+            self.assertNotIn("bir_name", received)
+            self.assertNotIn("bir_metadata", received)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "chat.turn")
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.metadata["feature"], "qa")
+            self.assertEqual(generation_event.input["inferenceConfig"], {"temperature": 0.0})
+
+    def test_does_not_capture_input_or_output_by_default(self) -> None:
+        with temporary_workdir():
+            # Capture is opt-in: without configure() the request and response are
+            # recorded as model + usage only, never the payloads.
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                return _converse_dict(usage={"inputTokens": 7, "outputTokens": 3, "totalTokens": 10})
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_converse_async(
+                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertIsNone(generation_event.input)
+            self.assertIsNone(generation_event.output)
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    def test_records_error_and_redacts_secret_when_converse_raises(self) -> None:
+        with temporary_workdir():
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                raise RuntimeError("request failed api_key=sk-secret123")
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    await trace_converse_async(
+                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_requires_active_trace(self) -> None:
+        with temporary_workdir():
+            calls: list[dict[str, object]] = []
+
+            async def fake_converse(**kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                return _converse_dict(usage=None)
+
+            async def driver() -> None:
+                await trace_converse_async(
+                    fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                )
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
 
             # The generation guard fires before the request is ever issued.
             self.assertEqual(calls, [])

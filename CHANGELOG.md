@@ -10,6 +10,20 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.trace_converse_async` (AWS Bedrock) and
+  `bir.integrations.trace_vertex_generate_content_async` (Google Vertex AI), the
+  asynchronous counterparts of `trace_converse` and the Vertex
+  `trace_generate_content`. Each awaits an async provider coroutine (for example an
+  `aioboto3` `bedrock-runtime` `converse`, or a
+  `GenerativeModel.generate_content_async`) inside one Bir `generation`, forwards
+  arguments unchanged, strips the `bir_`-prefixed options, and returns the awaited
+  provider result — recording the same model and
+  `inputTokens`/`outputTokens`/`totalTokens` (Bedrock) or `usage_metadata` (Vertex)
+  as the sync wrappers, with neither `boto3` nor `vertexai` imported. This completes
+  async coverage across every dependency-free provider. Non-streaming only for now:
+  the Converse stream (`trace_converse_stream`) and the Vertex `stream=True` surface
+  stay synchronous. New public exports — no dependency or schema change, and the sync
+  wrappers are byte-for-byte unchanged.
 - `set_model(model)` setter on the `generation()` context manager, parallel to
   `set_output`/`set_usage`/`set_cost`/`set_metadata`. The model is read when the
   generation exits, so this records or refines a model only known after the
