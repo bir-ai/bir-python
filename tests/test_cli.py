@@ -672,6 +672,86 @@ class ExperimentsCommandTests(CliBaseTest):
             self.assertIn("No experiments found", out)
 
 
+class ExperimentShowCommandTests(CliBaseTest):
+    def test_shows_summary_and_per_example_results(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+
+            code, out, err = run_cli("experiment-show", experiment_id, "--dir", str(workdir))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # The header carries the name, id, and run status counts.
+            self.assertIn(f"faq ({experiment_id})", out)
+            self.assertIn("status=success  examples=2  errors=0", out)
+            # The evaluator aggregates appear as their own table.
+            self.assertIn("EVALUATOR", out)
+            self.assertIn("exact_match", out)
+            self.assertIn("0.50", out)
+            # Each example surfaces its id, status, and per-evaluator scores.
+            self.assertIn("EXAMPLE", out)
+            q1 = next(line for line in out.splitlines() if line.startswith("q1"))
+            self.assertIn("success", q1)
+            self.assertIn("exact_match=1.00", q1)
+            q2 = next(line for line in out.splitlines() if line.startswith("q2"))
+            self.assertIn("exact_match=0.00", q2)
+
+    def test_json_output_is_deterministic(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+
+            code, out, err = run_cli("experiment-show", experiment_id, "--dir", str(workdir), "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(payload["id"], experiment_id)
+            self.assertEqual(payload["name"], "faq")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["example_count"], 2)
+            self.assertEqual(payload["error_count"], 0)
+            self.assertEqual(payload["aggregate_scores"]["exact_match"], 0.5)
+            example_ids = [result["example_id"] for result in payload["results"]]
+            self.assertEqual(example_ids, ["q1", "q2"])
+            first = payload["results"][0]
+            self.assertEqual(first["status"], "success")
+            self.assertEqual(first["scores"]["exact_match"], 1.0)
+            self.assertIsNone(first["error"])
+
+            # Re-rendering the same experiment yields byte-identical JSON.
+            _code, out_again, _err = run_cli(
+                "experiment-show", experiment_id, "--dir", str(workdir), "--json"
+            )
+            self.assertEqual(out, out_again)
+
+    def test_unknown_id_exits_nonzero_with_clean_stdout(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+
+            code, out, err = run_cli("experiment-show", "does-not-exist", "--dir", str(workdir))
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("bir:", err)
+            self.assertIn("not found", err)
+
+    def test_dir_resolves_same_location_as_experiments(self) -> None:
+        with temporary_workdir() as workdir:
+            nested = workdir / "runs"
+            experiment_id = run_faq_experiment(nested)
+
+            # Without --dir the default directory holds nothing, so the id is absent.
+            code, out, _ = run_cli("experiment-show", experiment_id)
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+
+            # --dir resolves the same directory `bir experiments` reads from.
+            code, out, err = run_cli("experiment-show", experiment_id, "--dir", str(nested))
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertIn(f"faq ({experiment_id})", out)
+
+
 class EvalGateCommandTests(CliBaseTest):
     @staticmethod
     def _run_experiment(path: Path, score: float) -> None:

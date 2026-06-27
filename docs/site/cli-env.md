@@ -14,6 +14,8 @@ bir stats                     # summarize counts, tokens, cost, and latency
 bir stats --json              # the same figures as machine-readable JSON
 bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
+bir experiment-show <id>      # one experiment's summary and per-example scores
+bir experiment-show <id> --json  # nested experiment JSON for scripts
 bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
@@ -27,6 +29,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 | `bir stats [--path P] [--include-rotated] [--json]` | Summarize trace counts, token usage, cost per currency, and latency. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
+| `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
 | `bir send [--path P] [--server URL] [--include-rotated]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
@@ -71,6 +74,14 @@ default, so these commands operate on the active file only unless the flag is
 passed. `bir send --include-rotated` deduplicates events by ID when a rotated
 file overlaps the active one.
 
+`bir experiment-show EXPERIMENT_ID` reads the same `--dir` directory as
+`bir experiments` (default `.bir/experiments`), finds the experiment with that id,
+and prints its summary header (name, status, example and error counts, run times),
+a table of evaluator aggregate means, and a per-example table of id, status, and
+scores. `--json` emits a deterministic nested object with the summary fields and a
+`results` list of per-example `example_id`, `status`, `scores`, and `error`. An
+unknown experiment id prints nothing to stdout and exits non-zero.
+
 `bir send-experiment` retries transient upload failures (network errors,
 timeouts, and HTTP 5xx) with exponential backoff. `--retries` (default `2`) and
 `--backoff` seconds (default `0.5`) accept non-negative values only, and the
@@ -80,7 +91,7 @@ an invalid server response fail immediately. See
 
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
-`stats`, and `experiments` is suitable for scripts.
+`stats`, `experiments`, and `experiment-show` is suitable for scripts.
 
 ## Environment configuration
 

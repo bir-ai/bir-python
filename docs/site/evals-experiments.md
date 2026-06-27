@@ -233,6 +233,22 @@ loaded = load_experiment(result.path)
 summaries = list_experiments()
 ```
 
+From the command line, `bir experiments` lists every experiment under
+`.bir/experiments/`, and `bir experiment-show <experiment-id>` prints one
+experiment's summary (evaluator aggregate means) and a per-example table of id,
+status, and scores:
+
+```bash
+bir experiments                          # list experiments and aggregate scores
+bir experiment-show <experiment-id>      # one experiment's summary and results
+bir experiment-show <experiment-id> --json   # nested object for scripts
+```
+
+Both commands accept `--dir` to read an experiments directory other than the
+default `.bir/experiments`. `bir experiment-show --json` emits a deterministic
+object with the summary fields and a `results` list of per-example `example_id`,
+`status`, `scores`, and `error`; an unknown id prints nothing and exits non-zero.
+
 ## Compare experiments
 
 Compare aggregate evaluator means against a persisted baseline:

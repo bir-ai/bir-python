@@ -18,7 +18,15 @@ from typing import Any, Callable, TextIO
 
 from . import __version__, _sdk
 from ._sdk import LoadedTrace, TraceEvent, _event_sort_key, load_events, load_traces, send_events
-from .evals import ExperimentSummary, compare_experiments, list_experiments, send_experiment
+from .evals import (
+    ExperimentExampleResult,
+    ExperimentResult,
+    ExperimentSummary,
+    compare_experiments,
+    list_experiments,
+    load_experiment,
+    send_experiment,
+)
 from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
 
 _DEFAULT_SERVER = "http://127.0.0.1:8000"
@@ -99,6 +107,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     experiments.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
     experiments.set_defaults(func=_cmd_experiments)
+
+    experiment_show = subparsers.add_parser(
+        "experiment-show",
+        help="Show one experiment's summary and per-example results.",
+    )
+    experiment_show.add_argument("experiment_id", help="ID of the experiment to show.")
+    experiment_show.add_argument(
+        "--dir",
+        dest="directory",
+        help=f"Experiments directory to read (default: {_DEFAULT_EXPERIMENT_DIR}).",
+    )
+    experiment_show.add_argument(
+        "--json", action="store_true", help="Emit a nested JSON object instead of a table."
+    )
+    experiment_show.set_defaults(func=_cmd_experiment_show)
 
     send = subparsers.add_parser("send", help="Send local events to a Bir server.")
     send.add_argument("--path", help="Trace JSONL file to send (default: .bir/traces.jsonl).")
@@ -489,6 +512,109 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
     ]
     _print_table(("ID", "NAME", "STATUS", "EXAMPLES", "ERRORS", "SCORES"), rows, sys.stdout)
     return 0
+
+
+def _cmd_experiment_show(args: argparse.Namespace) -> int:
+    directory = args.directory or _DEFAULT_EXPERIMENT_DIR
+    summary = next(
+        (
+            candidate
+            for candidate in list_experiments(directory)
+            if candidate.experiment_id == args.experiment_id
+        ),
+        None,
+    )
+    if summary is None:
+        print(
+            f"bir: experiment {args.experiment_id!r} not found in {directory}",
+            file=sys.stderr,
+        )
+        return 1
+
+    experiment = load_experiment(_resolve_experiment_result_path(summary, directory))
+
+    if args.json:
+        _dump_json(_experiment_detail_to_dict(summary, experiment), sys.stdout)
+        return 0
+
+    _print_experiment_detail(summary, experiment, sys.stdout)
+    return 0
+
+
+def _resolve_experiment_result_path(summary: ExperimentSummary, directory: str) -> Path:
+    """Resolve the result JSONL path for ``summary`` within ``directory``.
+
+    The summary records the result path captured when the experiment ran, which
+    may be absolute or relative to the run's working directory. Prefer that path
+    when it still resolves, but fall back to the summary's own directory so an
+    experiment directory that was moved or is read from elsewhere still loads.
+    """
+
+    result_path = Path(summary.result_path)
+    if result_path.exists():
+        return result_path
+    return Path(directory) / result_path.name
+
+
+def _experiment_detail_to_dict(summary: ExperimentSummary, experiment: ExperimentResult) -> dict[str, Any]:
+    """Build the deterministic ``--json`` object backing ``experiment-show``."""
+
+    return {
+        "id": summary.experiment_id,
+        "name": summary.name,
+        "status": summary.status,
+        "start_time": summary.start_time,
+        "end_time": summary.end_time,
+        "example_count": summary.example_count,
+        "error_count": summary.error_count,
+        "aggregate_scores": summary.aggregate_scores,
+        "results": [_experiment_example_to_dict(result) for result in experiment.results],
+    }
+
+
+def _experiment_example_to_dict(result: ExperimentExampleResult) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "example_id": result.example_id,
+        "status": result.status,
+        "scores": {score.name: score.value for score in result.scores},
+        "error": result.error,
+    }
+    if result.trace_id is not None:
+        payload["trace_id"] = result.trace_id
+    return payload
+
+
+def _print_experiment_detail(summary: ExperimentSummary, experiment: ExperimentResult, out: TextIO) -> None:
+    """Render the experiment header, evaluator aggregates, and per-example results."""
+
+    print(f"{summary.name} ({summary.experiment_id})", file=out)
+    print(
+        f"status={summary.status}  examples={summary.example_count}  errors={summary.error_count}",
+        file=out,
+    )
+    print(f"start={summary.start_time}  end={summary.end_time}", file=out)
+
+    print(file=out)
+    if summary.aggregate_scores:
+        score_rows = [
+            (name, f"{summary.aggregate_scores[name]:.2f}")
+            for name in sorted(summary.aggregate_scores)
+        ]
+        _print_table(("EVALUATOR", "MEAN"), score_rows, out)
+    else:
+        print("No evaluator scores.", file=out)
+
+    print(file=out)
+    result_rows = [
+        (
+            result.example_id,
+            result.status,
+            _format_scores({score.name: score.value for score in result.scores}),
+            result.error or "-",
+        )
+        for result in experiment.results
+    ]
+    _print_table(("EXAMPLE", "STATUS", "SCORES", "ERROR"), result_rows, out)
 
 
 def _cmd_send(args: argparse.Namespace) -> int:

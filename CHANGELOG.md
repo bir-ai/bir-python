@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir experiment-show <experiment-id>` CLI command that prints one experiment's
+  summary (evaluator aggregate means) and a per-example table of id, status, and
+  scores, mirroring `bir show` for traces. `--dir` reads the same experiments
+  directory as `bir experiments` (default `.bir/experiments`), and `--json` emits
+  a deterministic nested object with the summary fields and a `results` list of
+  per-example `example_id`, `status`, `scores`, and `error`. An unknown id prints
+  nothing to stdout and exits non-zero. It reuses the public `load_experiment` /
+  `list_experiments` loaders — CLI-only, with no new top-level symbol, dependency,
+  or schema change.
 - `bir.integrations.trace_converse_async` (AWS Bedrock) and
   `bir.integrations.trace_vertex_generate_content_async` (Google Vertex AI), the
   asynchronous counterparts of `trace_converse` and the Vertex

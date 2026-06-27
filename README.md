@@ -408,6 +408,13 @@ async tasks, plain sync callables, and sync callables that return an awaitable,
 and otherwise matches `run_experiment()`. See
 [local evals and experiments](docs/site/evals-experiments.md).
 
+Inspect persisted experiments from the command line without a server:
+`bir experiments` lists every experiment under `.bir/experiments/`, and
+`bir experiment-show <experiment-id>` prints one experiment's summary
+(evaluator aggregates) and its per-example scores and statuses (add `--json` to
+either for a structured form, or `--dir` to point at another experiments
+directory).
+
 Compare a candidate against a baseline and gate CI on regressions with
 `compare_experiments()` or `bir eval-gate`. A global `tolerance` bounds how far a
 shared evaluator may drop, `score_tolerances` (and repeatable
