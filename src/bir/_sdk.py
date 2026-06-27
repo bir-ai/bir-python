@@ -1616,6 +1616,22 @@ class _Generation:
     def set_metadata(self, metadata: Mapping[str, Any]) -> None:
         _merge_metadata(self.metadata, metadata)
 
+    def set_model(self, model: str | None) -> None:
+        """Set or refine the model recorded on this generation.
+
+        The model is read at ``__exit__``, so this can record a model only known
+        once the provider responds (a streaming refinement, a router-chosen
+        model) without passing it to ``generation(model=...)`` up front. Like the
+        other ``set_*`` setters, the latest call wins. A non-empty string is
+        validated like an event name; ``None`` is accepted and leaves no model,
+        clearing any value supplied to ``generation(model=...)`` or by an earlier
+        ``set_model(...)``.
+        """
+
+        if model is not None:
+            _validate_event_name(model, "model")
+        self.model = model
+
     def set_output(self, output: Any) -> None:
         self.output = output
 

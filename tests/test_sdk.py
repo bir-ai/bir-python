@@ -1479,6 +1479,86 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(generation_event["currency"], "USD")
             self.assertEqual(generation_event["status"], "success")
 
+    def test_generation_set_model_records_model(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_model("gpt-4o")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["model"], "gpt-4o")
+
+    def test_generation_set_model_latest_call_wins(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm", model="router-default") as gen:
+                    gen.set_model("gpt-4o-mini")
+                    gen.set_model("gpt-4o")
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["model"], "gpt-4o")
+
+    def test_generation_set_model_records_model_async(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            async def answer() -> None:
+                async with generation("local.llm") as gen:
+                    await asyncio.sleep(0)
+                    gen.set_model("gpt-4o")
+
+            asyncio.run(answer())
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["model"], "gpt-4o")
+
+    def test_generation_set_model_none_clears_constructor_model(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm", model="demo") as gen:
+                    gen.set_model(None)
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertIsNone(generation_event.get("model"))
+
+    def test_generation_set_model_rejects_non_string(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_model(123)  # type: ignore[arg-type]
+
+            with self.assertRaisesRegex(TypeError, "model must be a string"):
+                answer()
+
+    def test_generation_set_model_rejects_empty_string(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("local.llm") as gen:
+                    gen.set_model("")
+
+            with self.assertRaisesRegex(ValueError, "model must not be empty"):
+                answer()
+
     def test_generation_capture_can_be_enabled_per_call(self) -> None:
         with temporary_workdir() as workdir:
 

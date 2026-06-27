@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `set_model(model)` setter on the `generation()` context manager, parallel to
+  `set_output`/`set_usage`/`set_cost`/`set_metadata`. The model is read when the
+  generation exits, so this records or refines a model only known after the
+  provider responds (a streaming refinement, a router-chosen model) without
+  passing it to `generation(model=...)` up front. The latest call wins; a
+  non-empty string is validated like an event name, and `None` is accepted and
+  records no model (clearing any constructor value). Additive method on an
+  existing context manager — no new export and no schema change; the dependency-free
+  provider integrations now use it in place of writing `gen.model` directly.
 - `metadata=` keyword on `@observe()`, recording a static mapping on the trace
   ROOT event the decorated call produces. It is the decorator-side counterpart to
   `trace(metadata=...)` for tagging an entry point (route, tenant, feature flag)

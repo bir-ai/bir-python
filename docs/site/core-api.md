@@ -75,6 +75,20 @@ Usage and cost setters require at least one field. Values must be non-negative
 and finite. Cost values are user-provided; Bir defaults currency to `USD` and
 does not calculate provider pricing.
 
+The model is read when the context manager exits, so `set_model()` lets you set
+or refine it once the provider responds — useful when the model is only known
+after the call (a streaming refinement, a router-chosen model) rather than up
+front via `generation(model=...)`. Like the other setters, the latest call wins;
+a non-empty string is validated like an event name, and `None` is accepted and
+records no model (clearing any value passed to `generation(model=...)`).
+
+```python
+with generation("router.chat") as gen:
+    response = call_router(...)
+    gen.set_model(response.model)  # e.g. the concrete model the router picked
+    gen.set_output(response.text)
+```
+
 If you would rather not call `set_cost()` on every generation, you can supply a
 local price table with `configure(model_prices=...)` (see below) and Bir derives
 the cost from token usage for any generation that has usage, a matching model,

@@ -247,12 +247,11 @@ async def _stream_completion_async(
 def _record_response(gen: Any, response: Any) -> None:
     gen.set_output(_response_output(response))
 
-    # _Generation has no set_model, and the model attribute is read at __exit__,
-    # so refine it from the response here while keeping the request model as a
-    # fallback when the response omits one.
+    # The model is read at __exit__, so refine it from the response here while
+    # keeping the request model as a fallback when the response omits one.
     response_model = _string_or_none(_value(response, "model"))
     if response_model is not None:
-        gen.model = response_model
+        gen.set_model(response_model)
 
     _record_usage(gen, _value(response, "usage"))
 

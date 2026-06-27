@@ -111,6 +111,20 @@ it is written with the same rules as captured input and output, so secret-like
 fields never reach the JSONL. It works with both `with` and `async with`, and the
 argument must be a mapping.
 
+`generation()` additionally exposes `set_model(...)` for the common case where
+the model is only known after the provider responds (a streaming refinement, a
+router-chosen model). The model is read when the generation exits, so a later
+`set_model()` wins over an earlier one or over `generation(model=...)`. A
+non-empty string is validated like an event name, and `None` records no model
+(clearing any constructor value):
+
+```python
+with generation("router.chat") as gen:
+    response = call_router(question)
+    gen.set_model(response.model)
+    gen.set_output(response.text)
+```
+
 To tag a traced entry point with static metadata without rewriting it as a manual
 `with trace(...)` block, pass `metadata=` to `@observe()`. It is the
 decorator-side counterpart to `trace(metadata=...)` and is recorded, redacted, on
