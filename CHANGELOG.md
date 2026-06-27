@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.BirHaystackTracer`, a dependency-free Haystack 2.x integration
+  that maps a pipeline run into a Bir trace without importing `haystack`. It
+  implements Haystack's tracing seam (the `Tracer`/`Span` protocol: `trace` /
+  `current_span`); register it with `haystack.tracing.enable_tracing(BirHaystackTracer())`
+  and each `haystack.pipeline.run` becomes a Bir trace root. Component runs are
+  mapped by the component's class name: generators (class name ending in
+  `Generator`) become generations carrying the model and token usage when present,
+  tool components (`ToolInvoker` and other `*Tool*` components) become tool calls,
+  and every other component becomes a span. A component that raises is recorded with
+  error status, and active spans are tracked on a context-local stack so concurrent
+  and nested pipeline runs stay isolated. Input/output capture follows the same
+  opt-in settings as the other integrations, overridable per tracer with
+  `capture_inputs`/`capture_outputs`; the model and token usage are always recorded.
+  Enable Haystack content tracing (`haystack.tracing.enable_content_tracing()` or
+  `HAYSTACK_CONTENT_TRACING_ENABLED=true`) so component inputs/outputs reach the
+  tracer. No new dependency or schema change.
 - `bir.logging` module with a stdlib `logging.Filter`, `BirTraceIdFilter`, that
   stamps the active Bir ids onto every `LogRecord` as `bir_trace_id` /
   `bir_span_id` (the `TRACE_ID_FIELD` / `SPAN_ID_FIELD` constants), so standard

@@ -37,6 +37,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/crewai.py",
     "bir/integrations/dspy.py",
     "bir/integrations/google.py",
+    "bir/integrations/haystack.py",
     "bir/integrations/instructor.py",
     "bir/integrations/langchain.py",
     "bir/integrations/litellm.py",

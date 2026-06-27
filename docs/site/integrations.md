@@ -70,7 +70,7 @@ only; their streaming surfaces (`trace_converse_stream` and
 `trace_generate_content(..., stream=True)`) stay synchronous, and the Vertex async
 wrapper is re-exported as `bir.integrations.trace_vertex_generate_content_async` to
 avoid colliding with the Gemini wrapper. The LangChain, LlamaIndex, OpenAI Agents
-SDK, Pydantic AI, and CrewAI callback handlers have no async wrapper.
+SDK, Pydantic AI, CrewAI, and Haystack callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -487,6 +487,44 @@ last-in-first-out stack, so concurrent and nested runs stay isolated. The handle
 does not import the `crewai` package, and input/output capture follows the same
 [opt-in settings](capture-privacy.md) as every other integration, overridable per
 handler with `capture_inputs`/`capture_outputs`.
+
+## Haystack
+
+```python
+from haystack import tracing
+from haystack.tracing import enable_tracing
+from bir.integrations.haystack import BirHaystackTracer
+
+tracing.enable_content_tracing()  # so component inputs/outputs reach the tracer
+enable_tracing(BirHaystackTracer())
+
+pipeline.run({"retriever": {"query": "What is Bir?"}})
+```
+
+Haystack 2.x exposes a tracing seam: register a custom tracer with
+`haystack.tracing.enable_tracing(tracer)` and the framework drives it as a context
+manager, calling `tracer.trace(operation_name, tags=..., parent_span=...)` around
+each pipeline run and each component run, and `tracer.current_span()` so a component
+can attach tags to the span it is running inside. `BirHaystackTracer` implements
+that `Tracer`/`Span` protocol, turning each `pipeline.run` into a Bir trace root.
+
+Component runs are mapped by the component's class name (the
+`haystack.component.type` tag): generator components (class name ending in
+`Generator`) become generations carrying the model and token usage when present,
+tool components (`ToolInvoker` and other `*Tool*` components) become tool calls, and
+every other component (retrievers, prompt builders, routers, ...) becomes a span. A
+component that raises is recorded with error status. Active spans are tracked on a
+context-local stack, so concurrent and nested pipeline runs stay isolated.
+
+Haystack carries a component's input and output — and, for generators, the model
+and token usage living in the output `meta` — on *content* tags, which Haystack
+only records when content tracing is enabled. Call
+`haystack.tracing.enable_content_tracing()` (or set
+`HAYSTACK_CONTENT_TRACING_ENABLED=true`) so those tags reach the tracer; Bir then
+applies its own redaction and the same [opt-in capture settings](capture-privacy.md)
+as every other integration to the payloads while always recording the model and
+token usage. The tracer does not import the `haystack` package, and capture is
+overridable per tracer with `capture_inputs`/`capture_outputs`.
 
 ## Wrapper-specific options
 

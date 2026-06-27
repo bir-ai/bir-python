@@ -7,6 +7,7 @@ from .dspy import trace_lm, trace_lm_async
 from .instructor import trace_create, trace_create_async
 from .bedrock import trace_converse, trace_converse_async, trace_converse_stream
 from .google import trace_generate_content, trace_generate_content_async
+from .haystack import BirHaystackTracer
 from .langchain import BirCallbackHandler
 from .llamaindex import BirLlamaIndexHandler
 from .litellm import trace_completion, trace_completion_async
@@ -39,6 +40,7 @@ __all__ = [
     "trace_generate_content_async",
     "trace_vertex_generate_content",
     "trace_vertex_generate_content_async",
+    "BirHaystackTracer",
     "BirCallbackHandler",
     "BirLlamaIndexHandler",
     "BirAgentsTracingProcessor",
