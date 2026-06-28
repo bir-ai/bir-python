@@ -308,6 +308,33 @@ Delta-based regressions of shared evaluators use the reason
 `"delta_below_tolerance"`. Evaluators that appear only in the candidate add
 coverage and are never treated as regressions.
 
+### Per-example detail
+
+Aggregate means tell you *which* evaluator regressed, not *which examples* drove
+it — and an unchanged mean can still hide one example dropping while another
+improves. Pass `per_example=True` to also compute, for each shared evaluator, the
+candidate-minus-baseline delta of every example scored in both runs:
+
+```python
+diff = compare_experiments(
+    "baseline.jsonl",
+    "candidate.jsonl",
+    per_example=True,
+)
+
+for evaluator, deltas in diff.example_deltas.items():
+    for example_id, delta in deltas.items():
+        if delta < 0:
+            print(f"{evaluator} dropped {delta:+.2f} on {example_id}")
+```
+
+`diff.example_deltas` is keyed by evaluator then example_id, both in sorted order.
+Examples present in only one run (or not scored by the evaluator, such as an
+errored example) are skipped. This is opt-in reporting detail only: it never
+changes the aggregate comparison, `has_regressions`, or the gate exit code. When
+`per_example=False` (the default) `example_deltas` is empty and is omitted from
+`to_dict()`, so the aggregate-only output is unchanged.
+
 ### CLI gate
 
 The CLI exposes the same gate and exits `1` exactly when the configured policy
@@ -325,7 +352,9 @@ Repeating `--score-tolerance` for the same evaluator with the same value is
 allowed; conflicting values, malformed `NAME=VALUE` assignments, and unknown
 evaluator names are rejected with a clear error. The emitted JSON includes
 `effective_tolerances`, `missing_score`, and `regression_reasons` so the gate
-decision is fully machine-readable.
+decision is fully machine-readable. Add `--per-example` to also emit
+`example_deltas` (the same per-example detail as `per_example=True` above);
+without the flag the output is unchanged.
 
 ## Link results to traces
 

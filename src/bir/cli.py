@@ -220,6 +220,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "them without failing (default), 'regress' treats them as regressions."
         ),
     )
+    eval_gate.add_argument(
+        "--per-example",
+        dest="per_example",
+        action="store_true",
+        help=(
+            "Add per-example detail under 'example_deltas': for each shared "
+            "evaluator, the candidate-minus-baseline delta of every example_id "
+            "scored in both runs. Reporting only; does not change the gate result."
+        ),
+    )
     eval_gate.set_defaults(func=_cmd_eval_gate)
 
     export_otel = subparsers.add_parser(
@@ -698,6 +708,7 @@ def _cmd_eval_gate(args: argparse.Namespace) -> int:
         tolerance=args.tolerance,
         score_tolerances=_collect_score_tolerances(args.score_tolerances),
         missing_score=args.missing_score,
+        per_example=args.per_example,
     )
     _dump_json(diff.to_dict(), sys.stdout)
     return 1 if diff.has_regressions else 0

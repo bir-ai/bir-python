@@ -228,6 +228,74 @@ class EvalTests(unittest.TestCase):
             # The whole payload round-trips through JSON unchanged.
             self.assertEqual(json.loads(json.dumps(payload)), payload)
 
+    def test_compare_experiments_per_example_records_shared_example_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Identical aggregate means (0.5 each), but the per-example movement is
+            # opposite: example "a" dropped while "b" improved. The aggregate diff
+            # hides this; per_example surfaces it.
+            baseline = self._run_per_example_experiment(
+                Path(directory) / "baseline.jsonl",
+                {"a": {"quality": 1.0}, "b": {"quality": 0.0}},
+            )
+            candidate = self._run_per_example_experiment(
+                Path(directory) / "candidate.jsonl",
+                {"a": {"quality": 0.0}, "b": {"quality": 1.0}},
+            )
+
+            default_diff = compare_experiments(baseline, candidate)
+            self.assertEqual(default_diff.example_deltas, {})
+            self.assertNotIn("example_deltas", default_diff.to_dict())
+
+            diff = compare_experiments(baseline, candidate, per_example=True)
+
+            # Aggregate comparison is unchanged by the opt-in detail.
+            self.assertEqual(diff.deltas["quality"], 0.0)
+            self.assertEqual(diff.unchanged, {"quality"})
+            self.assertFalse(diff.has_regressions)
+            self.assertEqual(set(diff.example_deltas), {"quality"})
+            self.assertAlmostEqual(diff.example_deltas["quality"]["a"], -1.0)
+            self.assertAlmostEqual(diff.example_deltas["quality"]["b"], 1.0)
+
+            payload = diff.to_dict()
+            self.assertIn("example_deltas", payload)
+            # Evaluator and example keys serialize in sorted order.
+            self.assertEqual(list(payload["example_deltas"]["quality"]), ["a", "b"])
+            self.assertEqual(json.loads(json.dumps(payload)), payload)
+
+    def test_compare_experiments_per_example_skips_unshared_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run_per_example_experiment(
+                Path(directory) / "baseline.jsonl",
+                {"shared": {"quality": 1.0}, "only_baseline": {"quality": 1.0}},
+            )
+            candidate = self._run_per_example_experiment(
+                Path(directory) / "candidate.jsonl",
+                {"shared": {"quality": 0.5}, "only_candidate": {"quality": 0.7}},
+            )
+
+            diff = compare_experiments(baseline, candidate, per_example=True)
+
+            # Only the example present in both runs gets a delta; ids unique to one
+            # run are skipped rather than raising.
+            self.assertEqual(set(diff.example_deltas["quality"]), {"shared"})
+            self.assertAlmostEqual(diff.example_deltas["quality"]["shared"], -0.5)
+
+    def test_compare_experiments_per_example_omits_evaluators_without_shared_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # The evaluator is shared in aggregate, but the two runs scored entirely
+            # disjoint example ids, so there is no per-example delta to report.
+            baseline = self._run_per_example_experiment(
+                Path(directory) / "baseline.jsonl", {"a": {"quality": 1.0}}
+            )
+            candidate = self._run_per_example_experiment(
+                Path(directory) / "candidate.jsonl", {"b": {"quality": 1.0}}
+            )
+
+            diff = compare_experiments(baseline, candidate, per_example=True)
+
+            self.assertEqual(diff.example_deltas, {})
+            self.assertNotIn("example_deltas", diff.to_dict())
+
     @staticmethod
     def _run_score_experiment(path: Path, scores: dict[str, float]) -> ExperimentResult:
         return run_experiment(
@@ -237,6 +305,24 @@ class EvalTests(unittest.TestCase):
             evaluators=[
                 custom_evaluator(name, lambda output, _expected, key=name: output[key])
                 for name in scores
+            ],
+            path=path,
+        )
+
+    @staticmethod
+    def _run_per_example_experiment(
+        path: Path, rows: dict[str, dict[str, float]]
+    ) -> ExperimentResult:
+        evaluator_names = sorted({name for scores in rows.values() for name in scores})
+        return run_experiment(
+            path.stem,
+            dataset=Dataset(
+                [DatasetExample(id=example_id, input={"scores": scores}) for example_id, scores in rows.items()]
+            ),
+            task=lambda scores: scores,
+            evaluators=[
+                custom_evaluator(name, lambda output, _expected, key=name: output[key])
+                for name in evaluator_names
             ],
             path=path,
         )

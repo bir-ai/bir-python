@@ -10,6 +10,19 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Opt-in per-example detail for experiment comparison:
+  `compare_experiments(..., per_example=True)` and `bir eval-gate --per-example`.
+  When enabled, the returned `ExperimentDiff` populates an additive
+  `example_deltas` field — keyed by shared evaluator then example_id, in sorted
+  order — with the candidate-minus-baseline score delta of every example scored
+  in both runs, so a failing gate points at the examples that moved instead of
+  only the aggregate mean. Examples present in only one run (or not scored by the
+  evaluator) are skipped. It is reporting detail only: the aggregate comparison,
+  `has_regressions`, and the gate exit code are unchanged, and `example_deltas` is
+  empty by default and omitted from `to_dict()` (and the CLI JSON) unless the
+  flag is set, so existing output is byte-for-byte unchanged. The persisted
+  experiment JSONL/summary schema and `schema_version` are untouched. Stdlib only;
+  no new dependency.
 - `bir.integrations.trace_converse_stream_async` (AWS Bedrock) and async
   `stream=True` support for the Vertex `trace_generate_content_async` wrapper,
   completing async streaming coverage across every dependency-free provider. Both

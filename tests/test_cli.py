@@ -917,6 +917,44 @@ class EvalGateCommandTests(CliBaseTest):
             self.assertEqual(out, "")
             self.assertIn("shared evaluators present in both experiments", err)
 
+    @staticmethod
+    def _run_per_example(path: Path, rows: dict[str, dict[str, float]]) -> None:
+        evaluator_names = sorted({name for scores in rows.values() for name in scores})
+        run_experiment(
+            path.stem,
+            dataset=Dataset(
+                [DatasetExample(id=example_id, input={"scores": scores}) for example_id, scores in rows.items()]
+            ),
+            task=lambda scores: scores,
+            evaluators=[
+                custom_evaluator(name, lambda output, _expected, key=name: output[key])
+                for name in evaluator_names
+            ],
+            path=path,
+        )
+
+    def test_per_example_flag_includes_example_deltas(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            # Equal aggregate means; example "a" dropped and "b" improved.
+            self._run_per_example(baseline, {"a": {"quality": 1.0}, "b": {"quality": 0.0}})
+            self._run_per_example(candidate, {"a": {"quality": 0.0}, "b": {"quality": 1.0}})
+
+            # Without the flag the output is the unchanged aggregate-only diff.
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate))
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertNotIn("example_deltas", json.loads(out))
+
+            # The flag adds per-example detail without changing the gate decision.
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--per-example")
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertFalse(payload["has_regressions"])
+            self.assertEqual(payload["example_deltas"], {"quality": {"a": -1.0, "b": 1.0}})
+
 
 class SendCommandTests(CliBaseTest):
     def test_send_reports_accepted_attempted_skipped(self) -> None:

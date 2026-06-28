@@ -504,7 +504,11 @@ bir eval-gate baseline.jsonl candidate.jsonl \
 
 The command exits `1` exactly when the policy reports a regression and prints a
 machine-readable diff with `effective_tolerances`, `missing_score`, and
-`regression_reasons`.
+`regression_reasons`. Add `--per-example` (or `compare_experiments(...,
+per_example=True)`) to also include `example_deltas`: for each shared evaluator,
+the candidate-minus-baseline delta of every example scored in both runs, so a
+failing gate points at the examples that moved. It is reporting detail only — the
+gate decision and the rest of the output are unchanged.
 
 ## Documentation
 

@@ -344,8 +344,11 @@ class ExperimentDiff:
     the tolerance actually applied to each shared evaluator after per-evaluator
     overrides. ``missing_score`` is the configured policy for evaluators present
     only in the baseline, and ``regression_reasons`` maps every evaluator that
-    fails the gate to a machine-readable reason. All mappings are ordered by key
-    so the diff serializes deterministically.
+    fails the gate to a machine-readable reason. ``example_deltas`` is the opt-in
+    per-example detail: for each shared evaluator it maps an example_id present in
+    both runs to the candidate-minus-baseline delta for that example, and is empty
+    unless :func:`compare_experiments` was called with ``per_example=True``. All
+    mappings are ordered by key so the diff serializes deterministically.
     """
 
     deltas: dict[str, float]
@@ -358,6 +361,7 @@ class ExperimentDiff:
     effective_tolerances: dict[str, float] = field(default_factory=dict)
     missing_score: str = _MISSING_SCORE_IGNORE
     regression_reasons: dict[str, str] = field(default_factory=dict)
+    example_deltas: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def has_regressions(self) -> bool:
@@ -374,9 +378,14 @@ class ExperimentDiff:
         return self.missing_score == _MISSING_SCORE_REGRESS and bool(self.baseline_only)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a deterministic JSON-serializable representation of the diff."""
+        """Return a deterministic JSON-serializable representation of the diff.
 
-        return {
+        ``example_deltas`` is included only when populated (it is empty unless
+        per-example detail was requested), so the default aggregate-only output is
+        byte-for-byte unchanged from before the field existed.
+        """
+
+        payload: dict[str, Any] = {
             "deltas": self.deltas,
             "regressed": sorted(self.regressed),
             "improved": sorted(self.improved),
@@ -389,6 +398,9 @@ class ExperimentDiff:
             "regression_reasons": self.regression_reasons,
             "has_regressions": self.has_regressions,
         }
+        if self.example_deltas:
+            payload["example_deltas"] = self.example_deltas
+        return payload
 
 
 @dataclass(frozen=True)
@@ -1172,6 +1184,7 @@ def compare_experiments(
     tolerance: float = 0.0,
     score_tolerances: Mapping[str, float] | None = None,
     missing_score: str = _MISSING_SCORE_IGNORE,
+    per_example: bool = False,
 ) -> ExperimentDiff:
     """Compare shared aggregate evaluator scores from two experiment runs.
 
@@ -1189,6 +1202,14 @@ def compare_experiments(
     evaluator as a regression, because a removed evaluator silently drops
     coverage even though no aggregate delta can be computed. Evaluators found
     only in the candidate are always reported but never counted as regressions.
+
+    ``per_example`` is opt-in reporting detail and never changes the aggregate
+    comparison or the gate decision. When True, the returned diff's
+    ``example_deltas`` records, for each shared evaluator, the
+    candidate-minus-baseline score delta of every example_id that both runs
+    scored with that evaluator; examples present in only one run (or not scored by
+    the evaluator, such as an errored example) are skipped. When False (the
+    default) ``example_deltas`` is empty and the diff is identical to before.
     """
 
     validated_tolerance = _validate_non_negative_number(tolerance, "tolerance")
@@ -1229,6 +1250,7 @@ def compare_experiments(
     regressed = frozenset(regressed_names)
     improved = frozenset(improved_names)
     unchanged = frozenset(shared - regressed - improved)
+    example_deltas = _per_example_deltas(baseline_result, candidate_result, shared) if per_example else {}
     return ExperimentDiff(
         deltas=deltas,
         regressed=regressed,
@@ -1240,7 +1262,52 @@ def compare_experiments(
         effective_tolerances=effective_tolerances,
         missing_score=validated_missing_score,
         regression_reasons=dict(sorted(regression_reasons.items())),
+        example_deltas=example_deltas,
     )
+
+
+def _per_example_deltas(
+    baseline_result: ExperimentResult,
+    candidate_result: ExperimentResult,
+    shared: Any,
+) -> dict[str, dict[str, float]]:
+    """Compute candidate-minus-baseline deltas per shared evaluator and example.
+
+    Only evaluators in ``shared`` (present in both runs' aggregate scores) and
+    example_ids that both runs scored with that evaluator are included; an
+    evaluator with no overlapping examples is omitted entirely. Keys are sorted by
+    evaluator then example_id so the result serializes deterministically.
+    """
+
+    baseline_scores = _example_scores_by_evaluator(baseline_result)
+    candidate_scores = _example_scores_by_evaluator(candidate_result)
+    deltas: dict[str, dict[str, float]] = {}
+    for name in sorted(shared):
+        baseline_examples = baseline_scores.get(name, {})
+        candidate_examples = candidate_scores.get(name, {})
+        shared_examples = baseline_examples.keys() & candidate_examples.keys()
+        if not shared_examples:
+            continue
+        deltas[name] = {
+            example_id: candidate_examples[example_id] - baseline_examples[example_id]
+            for example_id in sorted(shared_examples)
+        }
+    return deltas
+
+
+def _example_scores_by_evaluator(result: ExperimentResult) -> dict[str, dict[str, float]]:
+    """Index one run's scores as ``{evaluator name: {example_id: value}}``.
+
+    If an example_id appears more than once for an evaluator the last row wins,
+    matching the order results were persisted; uniquely identified datasets never
+    hit that case.
+    """
+
+    scores_by_evaluator: dict[str, dict[str, float]] = {}
+    for example_result in result.results:
+        for score in example_result.scores:
+            scores_by_evaluator.setdefault(score.name, {})[example_result.example_id] = score.value
+    return scores_by_evaluator
 
 
 def load_experiment_summary(path: str | Path) -> ExperimentSummary:
