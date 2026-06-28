@@ -219,6 +219,20 @@ Before publishing, verify the release with the SDK release checklist in
   one implementation, so behavior and exit codes are identical. Stdlib only; no
   new dependency, schema, or fixture change.
 
+### Changed
+
+- CI now runs the SDK unit tests and example smoke tests on Windows and macOS in
+  addition to Linux. The `sdk` job is a matrix of `ubuntu-latest`,
+  `windows-latest`, and `macos-latest` crossed with Python 3.10–3.13
+  (`fail-fast: false`), so the cross-platform file-locking and persistence code
+  paths — including the Windows `msvcrt` byte-range lock branch the README
+  advertises and the temp-file/rotation handling — are exercised in CI instead of
+  only in users' environments. The `PYTHONPATH=src` unit-test and example steps
+  pin `shell: bash` so one command runs identically on every runner, and `pyright`
+  plus the release-package verification still run exactly once on the canonical
+  ubuntu / 3.12 leg. CI configuration only — no runtime dependency, public API,
+  event schema, JSON formatting, or fixture change.
+
 ### Fixed
 
 - Release verification wheel metadata now preserves `pyproject.toml` optional
