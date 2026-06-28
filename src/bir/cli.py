@@ -13,6 +13,7 @@ import json
 import math
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
@@ -70,6 +71,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-rotated",
         action="store_true",
         help="Also read size-rotated trace files (oldest first) alongside the active file.",
+    )
+    traces.add_argument(
+        "--name",
+        metavar="SUBSTRING",
+        help="Only list traces whose name contains this case-sensitive substring.",
+    )
+    traces.add_argument(
+        "--status",
+        choices=("success", "error"),
+        help="Only list traces with this status.",
+    )
+    traces.add_argument(
+        "--since",
+        type=_iso_datetime,
+        metavar="ISO",
+        help=(
+            "Only list traces whose start time is at or after this ISO datetime "
+            "(naive values are treated as UTC)."
+        ),
+    )
+    traces.add_argument(
+        "--until",
+        type=_iso_datetime,
+        metavar="ISO",
+        help=(
+            "Only list traces whose start time is at or before this ISO datetime "
+            "(naive values are treated as UTC)."
+        ),
     )
     traces.set_defaults(func=_cmd_traces)
 
@@ -299,6 +328,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _cmd_traces(args: argparse.Namespace) -> int:
     traces = list(reversed(load_traces(args.path, include_rotated=args.include_rotated)))
+    traces = _filter_traces(
+        traces,
+        name=args.name,
+        status=args.status,
+        since=args.since,
+        until=args.until,
+    )
     if args.limit is not None:
         traces = traces[: args.limit]
 
@@ -322,6 +358,54 @@ def _cmd_traces(args: argparse.Namespace) -> int:
     ]
     _print_table(("START", "STATUS", "DURATION", "EVENTS", "NAME"), rows, sys.stdout)
     return 0
+
+
+def _filter_traces(
+    traces: list[LoadedTrace],
+    *,
+    name: str | None,
+    status: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[LoadedTrace]:
+    """Keep traces matching every supplied filter, preserving order.
+
+    ``name`` matches a case-sensitive substring of ``LoadedTrace.name``; ``status``
+    matches it exactly; ``since``/``until`` are inclusive bounds compared against the
+    trace ``start_time``. Absent filters match everything and the supplied filters
+    combine with AND. ``start_time`` and the bounds are normalized to UTC so naive and
+    offset-aware inputs compare consistently.
+    """
+
+    since = _as_aware_utc(since) if since is not None else None
+    until = _as_aware_utc(until) if until is not None else None
+
+    filtered: list[LoadedTrace] = []
+    for trace in traces:
+        if name is not None and name not in trace.name:
+            continue
+        if status is not None and trace.status != status:
+            continue
+        if since is not None or until is not None:
+            start = _as_aware_utc(datetime.fromisoformat(trace.start_time))
+            if since is not None and start < since:
+                continue
+            if until is not None and start > until:
+                continue
+        filtered.append(trace)
+    return filtered
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Return ``value`` as a timezone-aware UTC datetime, assuming UTC when naive.
+
+    Trace start times are recorded in UTC; treating a naive ``--since``/``--until``
+    bound as UTC lets it compare against an offset-aware start time without raising.
+    """
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
@@ -967,6 +1051,19 @@ def _non_negative_float(value: str) -> float:
     if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
     return number
+
+
+def _iso_datetime(value: str) -> datetime:
+    """Parse an ISO 8601 datetime for the ``--since``/``--until`` trace filters.
+
+    Accepts whatever ``datetime.fromisoformat`` does (a bare date, a full timestamp,
+    with or without an offset); malformed input fails as a clear argparse error.
+    """
+
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an ISO 8601 datetime, got {value!r}") from None
 
 
 def _header_assignment(value: str) -> tuple[str, str]:

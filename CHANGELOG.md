@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir traces` now filters the listing with `--name` (case-sensitive substring of
+  the trace name), `--status {success,error}` (exact status), and `--since`/`--until`
+  (inclusive ISO 8601 bounds on the trace start time; values without an offset are
+  treated as UTC and a malformed timestamp exits non-zero). Filters combine with
+  AND, apply to both the table and `--json`, and run before `--limit` so the limit
+  counts only matching traces. With no filters the output is byte-for-byte unchanged.
+  CLI-only and stdlib-only: `load_traces` and the trace schema are untouched.
+
 - `bir experiment-report <experiment-id>` and the public
   `bir.evals.render_experiment_report(result, *, format="html")` render one
   persisted experiment to a self-contained report — the run summary, the

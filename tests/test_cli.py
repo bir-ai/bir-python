@@ -86,6 +86,37 @@ def write_two_traces(trace_path: Path) -> None:
     answer("second")
 
 
+def write_filterable_traces(trace_path: Path) -> None:
+    """Record three traces with distinct names and a mix of statuses for filters.
+
+    In recording order: a successful ``checkout``, a successful ``search``, and a
+    failing ``checkout_retry`` (recorded with an ``error`` status). ``checkout`` and
+    ``checkout_retry`` share the ``checkout`` substring while ``search`` does not, so
+    the same fixture exercises ``--name``, ``--status``, and their combination.
+    """
+
+    bir.configure(trace_path=trace_path)
+
+    @bir.observe(name="checkout")
+    def checkout(value: str) -> str:
+        return value
+
+    @bir.observe(name="search")
+    def search(value: str) -> str:
+        return value
+
+    @bir.observe(name="checkout_retry")
+    def checkout_retry(value: str) -> str:
+        raise ValueError("boom")
+
+    checkout("a")
+    search("b")
+    try:
+        checkout_retry("c")
+    except ValueError:
+        pass
+
+
 def write_active_and_rotated_trace(trace_path: Path) -> None:
     """Record one trace into a ``.1`` rotated sibling and one into the active file.
 
@@ -340,6 +371,141 @@ class TracesCommandTests(CliBaseTest):
             code, out, err = run_cli("traces", "--path", str(trace_path), "--include-rotated", "--json")
             self.assertEqual(code, 0)
             self.assertEqual(len(json.loads(out)), 2)
+
+    def test_name_filters_by_case_sensitive_substring(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            # Substring matches both "checkout" and "checkout_retry" but not "search".
+            code, out, err = run_cli("traces", "--path", str(trace_path), "--name", "checkout", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            names = sorted(entry["name"] for entry in json.loads(out))
+            self.assertEqual(names, ["checkout", "checkout_retry"])
+
+            # The table view honors the same filter.
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--name", "search")
+            self.assertEqual(code, 0)
+            data_rows = out.splitlines()[1:]
+            self.assertEqual(len(data_rows), 1)
+            self.assertTrue(data_rows[0].endswith("search"))
+
+            # Matching is case-sensitive, so a differently-cased query matches nothing.
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--name", "CHECKOUT", "--json")
+            self.assertEqual(json.loads(out), [])
+
+    def test_status_filters_exact_status(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--status", "error", "--json")
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual([entry["name"] for entry in payload], ["checkout_retry"])
+            self.assertEqual(payload[0]["status"], "error")
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--status", "success", "--json")
+            self.assertEqual({entry["name"] for entry in json.loads(out)}, {"checkout", "search"})
+
+    def test_rejects_unknown_status(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("traces", "--path", str(workdir / "traces.jsonl"), "--status", "pending")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_since_and_until_filter_by_start_time(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+            loaded = bir.load_traces(trace_path)  # oldest first
+
+            # A lower bound past every start time empties the listing; an upper bound
+            # past every start time keeps the whole listing.
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--since", "2999-01-01", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out), [])
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--until", "2999-01-01", "--json")
+            self.assertEqual(len(json.loads(out)), len(loaded))
+
+            # An inclusive lower bound at a recorded start time keeps that trace and newer.
+            bound = loaded[1].start_time
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--since", bound, "--json")
+            ids = [entry["id"] for entry in json.loads(out)]
+            expected = [
+                trace.id
+                for trace in sorted(loaded, key=lambda trace: trace.start_time, reverse=True)
+                if trace.start_time >= bound
+            ]
+            self.assertEqual(ids, expected)
+
+            # --since and --until together form an inclusive window.
+            low, high = loaded[0].start_time, loaded[1].start_time
+            code, out, _ = run_cli(
+                "traces", "--path", str(trace_path), "--since", low, "--until", high, "--json"
+            )
+            ids = [entry["id"] for entry in json.loads(out)]
+            expected = [
+                trace.id
+                for trace in sorted(loaded, key=lambda trace: trace.start_time, reverse=True)
+                if low <= trace.start_time <= high
+            ]
+            self.assertEqual(ids, expected)
+
+    def test_filters_combine_with_and(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            # "checkout" matches two traces but only one of them is successful.
+            code, out, _ = run_cli(
+                "traces", "--path", str(trace_path), "--name", "checkout", "--status", "success", "--json"
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual([entry["name"] for entry in json.loads(out)], ["checkout"])
+
+    def test_limit_is_applied_after_filtering(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            # "search" is the middle (not newest) trace; a limit-first implementation
+            # would keep only the newest "checkout_retry" and then filter it away,
+            # yielding nothing. Filtering before limiting must still surface "search".
+            code, out, _ = run_cli(
+                "traces", "--path", str(trace_path), "--name", "search", "--limit", "1", "--json"
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual([entry["name"] for entry in json.loads(out)], ["search"])
+
+    def test_empty_filter_result_in_table_and_json(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--name", "absent")
+            self.assertEqual(code, 0)
+            self.assertIn("No traces found", out)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--name", "absent", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out), [])
+
+    def test_no_filters_lists_every_trace(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(out)), 3)
+
+    def test_rejects_malformed_since(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("traces", "--path", str(workdir / "traces.jsonl"), "--since", "not-a-date")
+            self.assertEqual(raised.exception.code, 2)
 
 
 class ShowCommandTests(CliBaseTest):

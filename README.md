@@ -43,10 +43,12 @@ Events are written to `.bir/traces.jsonl` by default. Input and output capture
 is disabled unless you explicitly enable it.
 
 Inspect them from the command line without a server: `bir traces` lists recorded
-traces, `bir show <trace-id>` prints one trace as an indented tree of its spans,
-generations, tool calls, and scores, and `bir stats` summarizes trace counts,
-token usage, cost per currency, and latency (count, mean, and p95) for a quick
-cost or health check (add `--json` to any of them for a structured form). The
+traces (filter with `--name`, `--status {success,error}`, and
+`--since`/`--until` ISO timestamps), `bir show <trace-id>` prints one trace as an
+indented tree of its spans, generations, tool calls, and scores, and `bir stats`
+summarizes trace counts, token usage, cost per currency, and latency (count, mean,
+and p95) for a quick cost or health check (add `--json` to any of them for a
+structured form). The
 same commands run as `python -m bir <command>` when the `bir` console script
 isn't on `PATH` (fresh venvs, `pipx run`, CI). See
 [CLI & environment](docs/site/cli-env.md).

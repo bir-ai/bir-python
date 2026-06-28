@@ -8,6 +8,7 @@ local data and sending it to a server.
 ```bash
 bir traces                    # list local traces, newest first
 bir traces --limit 20 --json  # machine-readable output
+bir traces --name checkout --status error --since 2026-01-01  # filter the listing
 bir show <trace-id>           # print one trace as an indented event tree
 bir show <trace-id> --json    # nested {event, children} JSON tree
 bir stats                     # summarize counts, tokens, cost, and latency
@@ -26,7 +27,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 
 | Command | What it does |
 | --- | --- |
-| `bir traces [--path P] [--limit N] [--json] [--include-rotated]` | List trace time, status, duration, event count, and name. |
+| `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
 | `bir stats [--path P] [--include-rotated] [--json]` | Summarize trace counts, token usage, cost per currency, and latency. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
@@ -41,6 +42,14 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
 default; experiment listing uses `.bir/experiments`; send commands target
 `http://127.0.0.1:8000`.
+
+`bir traces` can narrow the listing before printing: `--name` keeps traces whose
+name contains a case-sensitive substring, `--status {success,error}` keeps traces
+with that exact status, and `--since`/`--until` keep traces whose start time falls
+within those inclusive ISO 8601 bounds (a value without an offset is treated as
+UTC; a malformed timestamp exits non-zero). Filters combine with AND, apply to both
+the table and `--json`, and are applied before `--limit` so `--limit` counts only
+matching traces. With no filters the output is unchanged.
 
 `bir show TRACE_ID` reads the same files as `bir traces`, finds the trace with
 that id, and renders its events as a tree ordered by parent/child: each line
