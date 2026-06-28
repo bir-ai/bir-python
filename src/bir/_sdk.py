@@ -2593,6 +2593,14 @@ def _redact_secret_text(value: str) -> str:
         _REDACTED,
         redacted,
     )
+    # Credit-card / PAN numbers: 13-19 digit sequences, optionally split into
+    # groups by single spaces or hyphens, that pass the Luhn checksum. A pure
+    # regex cannot verify Luhn, so the regex only finds candidate digit groups and
+    # the Luhn gate in ``_redact_pan_match`` decides replacement -- a candidate
+    # that fails Luhn (an ordinary long id, a phone number) is left untouched. The
+    # digit-run boundaries (``\b`` plus the {12,18}+1 length) also leave runs of
+    # 20+ digits intact, so this never over-redacts an arbitrary long integer.
+    redacted = re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _redact_pan_match, redacted)
     # User-supplied patterns run last, in configuration order, and only ever add
     # redaction on top of the built-in rules above; each replaces its whole match
     # with the marker. They cannot weaken or bypass any built-in rule.
@@ -2607,6 +2615,41 @@ def _redact_labeled_secret_match(match: re.Match[str]) -> str:
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_REDACTED}"
+
+
+def _redact_pan_match(match: re.Match[str]) -> str:
+    """Redact a candidate card number only when its digits pass the Luhn check.
+
+    The candidate regex matches a 13-19 digit run (optionally single-space- or
+    hyphen-separated); this gate strips the separators and replaces the whole run
+    with the marker only when the bare digits satisfy the Luhn checksum, so an
+    arbitrary long digit string that happens to match the shape is left intact.
+    """
+
+    candidate = match.group(0)
+    digits = candidate.replace(" ", "").replace("-", "")
+    if 13 <= len(digits) <= 19 and _luhn_checksum_valid(digits):
+        return _REDACTED
+    return candidate
+
+
+def _luhn_checksum_valid(digits: str) -> bool:
+    """Return whether a bare digit string passes the Luhn (mod-10) checksum.
+
+    ``digits`` must contain only ASCII digits (the caller strips separators).
+    Doubling starts from the second-rightmost digit, matching the standard
+    payment-card Luhn definition.
+    """
+
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        value = ord(char) - 48
+        if index % 2 == 1:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
 
 
 def _validate_additional_secret_keys(value: Any) -> frozenset[str]:

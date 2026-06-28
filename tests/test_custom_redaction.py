@@ -259,6 +259,96 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
         self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
 
 
+class BuiltinPanRedactionTests(unittest.TestCase):
+    """Built-in best-effort redaction of Luhn-valid credit-card / PAN numbers.
+
+    This rule ships on by default and can never be disabled. Only 13-19 digit
+    runs (optionally single-space- or hyphen-separated) that pass the Luhn
+    checksum are redacted, so ordinary long integers, ids, and phone numbers are
+    left intact. The values below are well-known card-network *test* numbers, not
+    live PANs.
+    """
+
+    VISA_16 = "4111111111111111"
+    VISA_16_SPACES = "4111 1111 1111 1111"
+    MASTERCARD_16_HYPHENS = "5555-5555-5555-4444"
+    AMEX_15_GROUPED = "3782 822463 10005"
+    VISA_13 = "4222222222222"
+    UNIONPAY_19 = "6011000000000000001"
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_valid_pans_are_redacted(self) -> None:
+        for pan in (
+            self.VISA_16,
+            self.VISA_16_SPACES,
+            self.MASTERCARD_16_HYPHENS,
+            self.AMEX_15_GROUPED,
+            self.VISA_13,
+            self.UNIONPAY_19,
+        ):
+            with self.subTest(pan=pan):
+                self.assertEqual(_redact_secret_text(f"card {pan} end"), "card [redacted] end")
+
+    def test_luhn_failing_runs_are_not_redacted(self) -> None:
+        # A 16-digit run and a 19-digit id that both fail the Luhn check, plus a
+        # 20-digit integer that is outside the 13-19 digit window entirely.
+        for benign in (
+            "order 1234567890123456 shipped",
+            "request id 1234567890123456789 logged",
+            "counter 12345678901234567890 reset",
+        ):
+            with self.subTest(benign=benign):
+                self.assertEqual(_redact_secret_text(benign), benign)
+
+    def test_phone_number_is_not_redacted(self) -> None:
+        text = "call +1 415 555 2671 today"
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_letter_adjacent_digits_are_not_redacted(self) -> None:
+        # ``\b`` anchoring keeps a PAN-shaped run wedged inside an alphanumeric
+        # token (an opaque id, a hash) from being treated as a card number.
+        text = f"token{self.VISA_16}here"
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_pan_redacted_in_repr_fallback_and_error_text(self) -> None:
+        self.assertEqual(_safe_capture(_Box(self.VISA_16)), "_Box([redacted])")
+        self.assertEqual(_safe_error(RuntimeError(f"declined {self.VISA_16}")), "declined [redacted]")
+
+    def test_pan_redacted_in_nested_capture(self) -> None:
+        captured = _safe_capture({"cards": [self.VISA_16, self.MASTERCARD_16_HYPHENS, "1234567890123456"]})
+        self.assertEqual(captured, {"cards": ["[redacted]", "[redacted]", "1234567890123456"]})
+
+    def test_pan_redacted_in_trace_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(capture_inputs=True, capture_outputs=True)
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def charge(payload: dict[str, Any]) -> str:
+                return f"charged {self.VISA_16_SPACES}"
+
+            charge({"pan": self.MASTERCARD_16_HYPHENS, "amount": "1234567890123456"})
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("4111", raw)
+            self.assertNotIn("5555", raw)
+            self.assertIn("[redacted]", raw)
+
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            # The Luhn-failing "amount" value is preserved verbatim.
+            self.assertEqual(event["input"]["payload"], {"pan": "[redacted]", "amount": "1234567890123456"})
+            self.assertEqual(event["output"], "charged [redacted]")
+
+    def test_pan_rule_cannot_be_disabled_by_clearing_custom_rules(self) -> None:
+        configure(additional_secret_keys=[], additional_redaction_patterns=[])
+        self.assertEqual(_redact_secret_text(f"pay {self.VISA_16}"), "pay [redacted]")
+
+
 class CustomRedactionConfigSemanticsTests(unittest.TestCase):
     def setUp(self) -> None:
         _reset_config_for_tests()

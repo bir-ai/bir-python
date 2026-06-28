@@ -325,6 +325,17 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- Expanded best-effort capture redaction to recognize credit-card / PAN numbers:
+  13-19 digit runs (optionally split into groups by single spaces or hyphens)
+  that pass the Luhn checksum are replaced with `[redacted]` across every capture
+  path (captured strings, repr fallbacks, error text, prompt/score metadata, and
+  integration payloads). This is an additive built-in rule: no existing rule is
+  weakened, the candidate run is Luhn-gated so ordinary long integers, ids, and
+  phone numbers are left intact, and runs of 20+ digits are excluded entirely.
+  **CROSS-REPO CONTRACT: bir-app's independently maintained redactor and its copy
+  of `redaction-cases.json` must be updated to match before or with this change.
+  Do not release this SDK change while the bir-app redactor or fixture is out of
+  sync.**
 - Expanded best-effort capture redaction to recognize Stripe secret/restricted
   keys (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`), Azure storage-style account
   keys (88-character base64 ending in `==`), and PEM private-key blocks

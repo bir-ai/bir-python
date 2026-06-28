@@ -12,7 +12,9 @@ you intend to cut a release.
   `send_events`.
 - Confirm input and output capture remains opt-in by default.
 - Confirm common secret-like keys and text patterns are redacted before local
-  events are written.
+  events are written. The built-in text rules cover labeled/Bearer secrets,
+  `sk-` tokens, JWTs, AWS/Google/Slack/GitHub/Stripe/Azure credential formats,
+  PEM private-key blocks, and Luhn-checked credit-card / PAN numbers.
 - Confirm the redaction contract is in sync with `bir-app`: any change to the
   built-in redaction rules or to `tests/fixtures/redaction-cases.json` must be
   mirrored by `bir-app`'s independently maintained redactor and its copy of the

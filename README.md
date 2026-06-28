@@ -54,8 +54,9 @@ isn't on `PATH` (fresh venvs, `pipx run`, CI). See
 [CLI & environment](docs/site/cli-env.md).
 
 When capture is on, Bir redacts common secret-like fields and text before
-anything is written. Those built-in rules always apply and cannot be turned off,
-but you can widen them for your own credential names and formats with
+anything is written — including provider credential formats and Luhn-checked
+credit-card / PAN numbers. Those built-in rules always apply and cannot be turned
+off, but you can widen them for your own credential names and formats with
 `configure(additional_secret_keys=[...], additional_redaction_patterns=[...])`.
 Capture-size limits are opt-in too: `configure(max_value_length=...,
 max_collection_items=...)` bound an over-long captured string or an over-large

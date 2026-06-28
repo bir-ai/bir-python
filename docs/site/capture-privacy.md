@@ -33,6 +33,9 @@ are also scanned for common secret-like text patterns, including:
 - Stripe secret and restricted keys (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`).
 - Azure storage-style account keys (88-character base64 ending in `==`).
 - PEM private-key blocks (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`).
+- Credit-card / PAN numbers: 13-19 digit runs (optionally split into groups by
+  single spaces or hyphens) that pass the Luhn checksum. The checksum gate keeps
+  ordinary long integers, ids, and phone numbers from being redacted.
 
 !!! warning
 

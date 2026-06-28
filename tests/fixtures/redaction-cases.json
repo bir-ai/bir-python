@@ -106,5 +106,64 @@
     "expected": {
       "values": ["[redacted]", "[redacted]", "[redacted]"]
     }
+  },
+  {
+    "name": "pan-visa-unseparated",
+    "input": "Card 4111111111111111 charged",
+    "expected": "Card [redacted] charged"
+  },
+  {
+    "name": "pan-visa-spaces",
+    "input": "Card 4111 1111 1111 1111 on file",
+    "expected": "Card [redacted] on file"
+  },
+  {
+    "name": "pan-mastercard-hyphens",
+    "input": "Card 5555-5555-5555-4444 stored",
+    "expected": "Card [redacted] stored"
+  },
+  {
+    "name": "pan-amex-15-grouped",
+    "input": "Amex 3782 822463 10005 used",
+    "expected": "Amex [redacted] used"
+  },
+  {
+    "name": "pan-visa-13-digit",
+    "input": "Legacy 4222222222222 ok",
+    "expected": "Legacy [redacted] ok"
+  },
+  {
+    "name": "pan-19-digit",
+    "input": "UnionPay 6011000000000000001 done",
+    "expected": "UnionPay [redacted] done"
+  },
+  {
+    "name": "nested-pan-numbers",
+    "input": {
+      "cards": ["4111111111111111", "5555 5555 5555 4444", "1234567890123456"]
+    },
+    "expected": {
+      "cards": ["[redacted]", "[redacted]", "1234567890123456"]
+    }
+  },
+  {
+    "name": "pan-luhn-failing-16-digit",
+    "input": "order 1234567890123456 shipped",
+    "expected": "order 1234567890123456 shipped"
+  },
+  {
+    "name": "pan-luhn-failing-19-digit-id",
+    "input": "request id 1234567890123456789 logged",
+    "expected": "request id 1234567890123456789 logged"
+  },
+  {
+    "name": "pan-phone-number",
+    "input": "call +1 415 555 2671 today",
+    "expected": "call +1 415 555 2671 today"
+  },
+  {
+    "name": "pan-ordinary-long-integer",
+    "input": "counter 12345678901234567890 reset",
+    "expected": "counter 12345678901234567890 reset"
   }
 ]
