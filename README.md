@@ -490,6 +490,14 @@ Inspect persisted experiments from the command line without a server:
 either for a structured form, or `--dir` to point at another experiments
 directory).
 
+Share or archive a result as a single file with
+`bir experiment-report <experiment-id>`: it renders the summary, the evaluator
+aggregate means, and the per-example table to a self-contained, stdlib-only
+report. `--format` selects `html` (default; a standalone document with no
+external assets) or `markdown`, and `--output PATH` writes to a file instead of
+stdout. The same rendering is available in Python as
+`bir.evals.render_experiment_report(load_experiment(path), format="html")`.
+
 Compare a candidate against a baseline and gate CI on regressions with
 `compare_experiments()` or `bir eval-gate`. A global `tolerance` bounds how far a
 shared evaluator may drop, `score_tolerances` (and repeatable

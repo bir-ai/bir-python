@@ -40,6 +40,7 @@ from bir.evals import (
     load_experiment_summary,
     numeric_between,
     regex_match,
+    render_experiment_report,
     retrieved_context_contains,
     run_experiment,
     run_experiment_async,
@@ -2395,6 +2396,127 @@ class RunExperimentMaxWorkersTests(unittest.TestCase):
             run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=True)  # type: ignore[arg-type]
         with self.assertRaisesRegex(TypeError, "max_workers must be an int"):
             run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=2.5)  # type: ignore[arg-type]
+
+
+class RenderExperimentReportTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    @staticmethod
+    def _run_faq_experiment(path: Path) -> ExperimentResult:
+        dataset = Dataset(
+            [
+                DatasetExample(id="q1", input="hi", expected="ok"),
+                DatasetExample(id="q2", input="yo", expected="no"),
+            ]
+        )
+        return run_experiment(
+            "faq",
+            dataset=dataset,
+            task=lambda _question: "ok",
+            evaluators=[exact_match(), contains("o")],
+            path=path,
+        )
+
+    def test_html_report_contains_summary_aggregates_and_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run_faq_experiment(Path(directory) / "faq.jsonl")
+
+            report = render_experiment_report(result)
+
+            # Standalone, self-contained document with inline styles (no external assets).
+            self.assertTrue(report.startswith("<!DOCTYPE html>"))
+            self.assertIn("<style>", report)
+            self.assertNotIn("<link", report)
+            self.assertNotIn("<script", report)
+            # Summary header carries name, id, status, and counts.
+            self.assertIn("Experiment Report: faq", report)
+            self.assertIn(result.id, report)
+            self.assertIn("<td>success</td>", report)
+            # Evaluator aggregates appear as their own table, sorted by name.
+            self.assertIn("<th>Evaluator</th>", report)
+            self.assertLess(report.index("<td>contains</td>"), report.index("<td>exact_match</td>"))
+            self.assertIn("<td>0.50</td>", report)
+            # Per-example rows carry the example id, status, and per-evaluator scores.
+            self.assertIn("<td>q1</td>", report)
+            self.assertIn("contains=1.00 exact_match=1.00", report)
+            self.assertIn("contains=1.00 exact_match=0.00", report)
+
+    def test_html_report_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run_faq_experiment(Path(directory) / "faq.jsonl")
+
+            self.assertEqual(render_experiment_report(result), render_experiment_report(result))
+
+    def test_html_report_escapes_example_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset([DatasetExample(id="<script>alert(1)</script>", input="hi")])
+
+            def boom(_question: str) -> str:
+                raise ValueError("<b>boom</b> & <i>fail</i>")
+
+            result = run_experiment(
+                "inj<ection>",
+                dataset=dataset,
+                task=boom,
+                evaluators=[exact_match("ok")],
+                path=Path(directory) / "inj.jsonl",
+                raise_on_error=False,
+            )
+
+            report = render_experiment_report(result)
+
+            # User-derived strings are HTML-escaped: no raw injected markup survives.
+            self.assertNotIn("<script>alert(1)</script>", report)
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", report)
+            self.assertNotIn("<b>boom</b>", report)
+            self.assertIn("&lt;b&gt;boom&lt;/b&gt; &amp; &lt;i&gt;fail&lt;/i&gt;", report)
+            # The experiment name in the heading is escaped too.
+            self.assertIn("Experiment Report: inj&lt;ection&gt;", report)
+
+    def test_markdown_report_renders_sections_and_escapes_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset([DatasetExample(id="a|b", input="hi", expected="ok")])
+            result = run_experiment(
+                "faq",
+                dataset=dataset,
+                task=lambda _question: "ok",
+                evaluators=[exact_match()],
+                path=Path(directory) / "faq.jsonl",
+            )
+
+            report = render_experiment_report(result, format="markdown")
+
+            self.assertIn("# Experiment Report: faq", report)
+            self.assertIn("## Evaluator aggregates", report)
+            self.assertIn("| Evaluator | Mean |", report)
+            self.assertIn("| exact_match | 1.00 |", report)
+            self.assertIn("## Examples", report)
+            self.assertIn("| Example | Status | Scores | Error |", report)
+            # A pipe in the example id is escaped so the table structure is preserved.
+            self.assertIn(r"| a\|b | success |", report)
+            # Deterministic across renders.
+            self.assertEqual(report, render_experiment_report(result, format="markdown"))
+
+    def test_no_evaluator_scores_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_experiment(
+                "faq",
+                dataset=Dataset([DatasetExample(id="q1", input="hi")]),
+                task=lambda _question: "ok",
+                evaluators=[],
+                path=Path(directory) / "faq.jsonl",
+            )
+
+            self.assertIn("No evaluator scores.", render_experiment_report(result))
+            self.assertIn("No evaluator scores.", render_experiment_report(result, format="markdown"))
+
+    def test_unknown_format_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run_faq_experiment(Path(directory) / "faq.jsonl")
+
+            with self.assertRaisesRegex(ValueError, "format must be one of"):
+                render_experiment_report(result, format="pdf")
 
 
 class FakeHttpResponse:

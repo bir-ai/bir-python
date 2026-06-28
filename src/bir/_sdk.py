@@ -300,11 +300,8 @@ class _InterProcessFileLock:
         lock_file = self._path.open("a+b")
         try:
             if os.name == "nt":
-                # msvcrt locks a byte range, so keep one stable byte in the file.
-                lock_file.seek(0, os.SEEK_END)
-                if lock_file.tell() == 0:
-                    lock_file.write(b"\0")
-                    lock_file.flush()
+                # msvcrt byte-range locks may extend past EOF, so avoid writing
+                # a sentinel first; writes before the lock race with writers.
                 lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
             else:

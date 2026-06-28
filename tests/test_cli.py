@@ -752,6 +752,77 @@ class ExperimentShowCommandTests(CliBaseTest):
             self.assertIn(f"faq ({experiment_id})", out)
 
 
+class ExperimentReportCommandTests(CliBaseTest):
+    def test_html_report_to_stdout_contains_all_sections(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+
+            code, out, err = run_cli("experiment-report", experiment_id, "--dir", str(workdir))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            # A self-contained HTML document with no external assets.
+            self.assertTrue(out.startswith("<!DOCTYPE html>"))
+            self.assertIn("<style>", out)
+            self.assertNotIn("<link", out)
+            # Summary, evaluator aggregates, and per-example rows are all present.
+            self.assertIn("Experiment Report: faq", out)
+            self.assertIn(experiment_id, out)
+            self.assertIn("<th>Evaluator</th>", out)
+            self.assertIn("<td>exact_match</td>", out)
+            self.assertIn("<td>q1</td>", out)
+            self.assertIn("exact_match=1.00", out)
+
+    def test_markdown_format_to_stdout(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+
+            code, out, err = run_cli(
+                "experiment-report", experiment_id, "--dir", str(workdir), "--format", "markdown"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("# Experiment Report: faq", out)
+            self.assertIn("| Evaluator | Mean |", out)
+            self.assertIn("| Example | Status | Scores | Error |", out)
+
+    def test_output_writes_file_and_keeps_stdout_clean(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+            report_path = workdir / "out" / "report.html"
+
+            code, out, err = run_cli(
+                "experiment-report",
+                experiment_id,
+                "--dir",
+                str(workdir),
+                "--output",
+                str(report_path),
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertTrue(report_path.exists())
+            contents = report_path.read_text(encoding="utf-8")
+            self.assertTrue(contents.startswith("<!DOCTYPE html>"))
+            self.assertIn("Experiment Report: faq", contents)
+            # The report itself is written to the file, not stdout.
+            self.assertNotIn("<!DOCTYPE html>", out)
+            self.assertIn(str(report_path), out)
+
+    def test_unknown_id_exits_nonzero_with_clean_stdout(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+
+            code, out, err = run_cli("experiment-report", "does-not-exist", "--dir", str(workdir))
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("bir:", err)
+            self.assertIn("not found", err)
+
+
 class EvalGateCommandTests(CliBaseTest):
     @staticmethod
     def _run_experiment(path: Path, score: float) -> None:

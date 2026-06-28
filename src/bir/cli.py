@@ -25,9 +25,11 @@ from .evals import (
     compare_experiments,
     list_experiments,
     load_experiment,
+    render_experiment_report,
     send_experiment,
 )
 from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
+from .evals import _REPORT_FORMATS  # shared report-format vocabulary
 
 _DEFAULT_SERVER = "http://127.0.0.1:8000"
 _DEFAULT_EXPERIMENT_DIR = ".bir/experiments"
@@ -122,6 +124,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit a nested JSON object instead of a table."
     )
     experiment_show.set_defaults(func=_cmd_experiment_show)
+
+    experiment_report = subparsers.add_parser(
+        "experiment-report",
+        help="Render one experiment to a self-contained HTML or Markdown report file.",
+    )
+    experiment_report.add_argument("experiment_id", help="ID of the experiment to report on.")
+    experiment_report.add_argument(
+        "--dir",
+        dest="directory",
+        help=f"Experiments directory to read (default: {_DEFAULT_EXPERIMENT_DIR}).",
+    )
+    experiment_report.add_argument(
+        "--format",
+        dest="report_format",
+        choices=_REPORT_FORMATS,
+        default="html",
+        help="Report format (default: html).",
+    )
+    experiment_report.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Write the report to PATH instead of stdout.",
+    )
+    experiment_report.set_defaults(func=_cmd_experiment_report)
 
     send = subparsers.add_parser("send", help="Send local events to a Bir server.")
     send.add_argument("--path", help="Trace JSONL file to send (default: .bir/traces.jsonl).")
@@ -576,6 +602,38 @@ def _cmd_experiment_show(args: argparse.Namespace) -> int:
         return 0
 
     _print_experiment_detail(summary, experiment, sys.stdout)
+    return 0
+
+
+def _cmd_experiment_report(args: argparse.Namespace) -> int:
+    directory = args.directory or _DEFAULT_EXPERIMENT_DIR
+    summary = next(
+        (
+            candidate
+            for candidate in list_experiments(directory)
+            if candidate.experiment_id == args.experiment_id
+        ),
+        None,
+    )
+    if summary is None:
+        print(
+            f"bir: experiment {args.experiment_id!r} not found in {directory}",
+            file=sys.stderr,
+        )
+        return 1
+
+    experiment = load_experiment(_resolve_experiment_result_path(summary, directory))
+    report = render_experiment_report(experiment, format=args.report_format)
+
+    if args.output:
+        output_path = Path(args.output)
+        if output_path.parent != Path("."):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+        print(f"Wrote {args.report_format} report to {output_path}")
+        return 0
+
+    sys.stdout.write(report)
     return 0
 
 

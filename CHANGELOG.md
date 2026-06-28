@@ -10,6 +10,19 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir experiment-report <experiment-id>` and the public
+  `bir.evals.render_experiment_report(result, *, format="html")` render one
+  persisted experiment to a self-contained report — the run summary, the
+  per-evaluator aggregate means, and the per-example table of statuses and
+  scores. The default `html` format is a complete standalone document with inline
+  styles and no external assets; `--format markdown` emits the same sections as
+  Markdown. The CLI writes to stdout or to `--output PATH`, reads the same `--dir`
+  directory as `bir experiment-show`, and exits non-zero (printing nothing to
+  stdout) for an unknown id. Output is deterministic (evaluators ordered by name,
+  examples in dataset order) and every experiment-derived string is escaped for
+  the chosen format, so already-redacted example text cannot inject markup. Only
+  already-persisted values are rendered; the experiment JSONL/summary schema and
+  `schema_version` are untouched. Stdlib only; no new dependency.
 - Opt-in per-example detail for experiment comparison:
   `compare_experiments(..., per_example=True)` and `bir eval-gate --per-example`.
   When enabled, the returned `ExperimentDiff` populates an additive

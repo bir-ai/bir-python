@@ -249,6 +249,33 @@ default `.bir/experiments`. `bir experiment-show --json` emits a deterministic
 object with the summary fields and a `results` list of per-example `example_id`,
 `status`, `scores`, and `error`; an unknown id prints nothing and exits non-zero.
 
+## Share a report
+
+`bir experiment-report <experiment-id>` renders one experiment to a
+self-contained, stdlib-only file — the summary, the per-evaluator aggregate
+means, and the per-example table of statuses and scores — so you can share or
+archive a result without standing up the server or dashboard:
+
+```bash
+bir experiment-report <experiment-id>                       # HTML to stdout
+bir experiment-report <experiment-id> --format markdown     # Markdown to stdout
+bir experiment-report <experiment-id> --output report.html  # write to a file
+```
+
+The default `html` format is a complete standalone document with inline styles
+and no external assets; `--format markdown` emits the same sections as a Markdown
+document. Like `experiment-show` it accepts `--dir` and exits non-zero (printing
+nothing to stdout) for an unknown id. Output is deterministic — evaluators are
+ordered by name and examples follow dataset order — and every experiment-derived
+string is escaped for the chosen format, so already-redacted example text cannot
+inject markup. The same rendering is available in Python:
+
+```python
+from bir.evals import load_experiment, render_experiment_report
+
+report = render_experiment_report(load_experiment(result.path), format="html")
+```
+
 ## Compare experiments
 
 Compare aggregate evaluator means against a persisted baseline:

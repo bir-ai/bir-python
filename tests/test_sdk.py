@@ -25,6 +25,7 @@ import bir
 from bir import configure, generation, get_current_span_id, get_current_trace_id, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
 from bir._sdk import (
     _Config,
+    _InterProcessFileLock,
     _MAX_SAMPLE_RULES,
     _config_from_env,
     _parse_env_bool,
@@ -3307,6 +3308,57 @@ for batch in range(int(batches)):
             self.assertEqual(list(sent_path.parent.glob(f".{sent_path.name}.*.tmp")), [])
             _record_sent_ids(sent_path, ["second"])
             self.assertEqual(json.loads(sent_path.read_text(encoding="utf-8")), {"event_ids": ["second"]})
+
+    def test_windows_file_lock_does_not_write_before_locking(self) -> None:
+        operations: list[str] = []
+
+        class FakeLockFile:
+            def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+                operations.append("seek")
+                return 0
+
+            def write(self, data: bytes) -> int:
+                operations.append("write")
+                raise PermissionError("byte is already locked")
+
+            def flush(self) -> None:
+                operations.append("flush")
+                raise PermissionError("byte is already locked")
+
+            def fileno(self) -> int:
+                operations.append("fileno")
+                return 123
+
+            def close(self) -> None:
+                operations.append("close")
+
+        class FakeMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+
+            def locking(self, fileno: int, mode: int, nbytes: int) -> None:
+                operations.append("lock" if mode == self.LK_LOCK else "unlock")
+
+        lock_file = FakeLockFile()
+
+        def fake_open(path: Path, mode: str) -> FakeLockFile:
+            self.assertEqual(mode, "a+b")
+            return lock_file
+
+        target_path = Path("traces.jsonl")
+        with (
+            patch("bir._sdk.os.name", "nt"),
+            patch("bir._sdk.msvcrt", FakeMsvcrt(), create=True),
+            patch("bir._sdk.Path.open", new=fake_open),
+        ):
+            with _InterProcessFileLock(target_path):
+                pass
+
+        self.assertNotIn("write", operations)
+        self.assertNotIn("flush", operations)
+        self.assertEqual(operations.count("lock"), 1)
+        self.assertEqual(operations.count("unlock"), 1)
+        self.assertEqual(operations[-1], "close")
 
     def test_exceptions_are_captured_and_reraised(self) -> None:
         with temporary_workdir() as workdir:

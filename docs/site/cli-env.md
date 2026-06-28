@@ -16,6 +16,8 @@ bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
 bir experiment-show <id>      # one experiment's summary and per-example scores
 bir experiment-show <id> --json  # nested experiment JSON for scripts
+bir experiment-report <id>    # self-contained HTML report to stdout
+bir experiment-report <id> --format markdown --output report.md  # write a file
 bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
@@ -30,6 +32,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
+| `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH]` | Render one experiment to a self-contained HTML or Markdown report. |
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
@@ -81,6 +84,18 @@ a table of evaluator aggregate means, and a per-example table of id, status, and
 scores. `--json` emits a deterministic nested object with the summary fields and a
 `results` list of per-example `example_id`, `status`, `scores`, and `error`. An
 unknown experiment id prints nothing to stdout and exits non-zero.
+
+`bir experiment-report EXPERIMENT_ID` resolves the experiment the same way as
+`bir experiment-show` (the same `--dir` directory, the same non-zero exit and
+clean stdout for an unknown id) and renders it to a self-contained report
+combining the summary, the evaluator aggregate means, and a per-example table of
+id, status, and scores. `--format` chooses `html` (default; a standalone document
+with inline styles and no external assets) or `markdown`. The report is written to
+stdout, or to `--output PATH` (creating parent directories) with a confirmation
+line on stdout instead. Output is deterministic and every experiment-derived
+string is escaped for the chosen format, so already-redacted example text cannot
+inject markup. The same rendering is available in Python as
+`bir.evals.render_experiment_report`.
 
 `bir send` exposes the same options as `send_events()`. `--mark-sent` records the
 event IDs the server accepts in a `<trace_path>.sent` sidecar and skips them on
