@@ -593,7 +593,7 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
                 root=root,
             )
         )
-    return sorted(traces, key=lambda trace: (trace.start_time, trace.id))
+    return sorted(traces, key=lambda trace: trace.start_time)
 
 
 def send_events(
@@ -2858,17 +2858,18 @@ def _price_for_model(model: str) -> _ModelPrice | None:
     return None
 
 
-def _event_sort_key(event: TraceEvent, depth: int = 0) -> tuple[str, int, int, str, str]:
+def _event_sort_key(event: TraceEvent, depth: int = 0) -> tuple[str, int, int, str]:
     # ``depth`` (ancestor count) breaks ``start_time``/priority ties so an enclosing
     # parent sorts before a nested child even when their timestamps are identical.
     # Callers ordering siblings of a single parent can omit it: siblings share a
-    # depth, so it never changes their order.
+    # depth, so it never changes their order. Equal keys intentionally fall back to
+    # Python's stable sort, preserving JSONL read order instead of exposing UUID
+    # ordering when a coarse clock gives back-to-back events the same timestamp.
     return (
         event.start_time,
         _EVENT_SORT_PRIORITY.get(event.type, 99),
         depth,
         event.end_time,
-        event.id,
     )
 
 
