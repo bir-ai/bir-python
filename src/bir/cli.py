@@ -327,7 +327,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_traces(args: argparse.Namespace) -> int:
-    traces = list(reversed(load_traces(args.path, include_rotated=args.include_rotated)))
+    traces = sorted(
+        load_traces(args.path, include_rotated=args.include_rotated),
+        key=lambda trace: trace.start_time,
+        reverse=True,
+    )
     traces = _filter_traces(
         traces,
         name=args.name,
