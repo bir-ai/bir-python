@@ -2323,6 +2323,72 @@ class SdkTests(unittest.TestCase):
             trace = load_traces(trace_path)[0]
             self.assertEqual([event.type for event in trace.events], ["trace", "score"])
 
+    def test_load_traces_orders_parent_before_nested_child_with_same_start_time(self) -> None:
+        with temporary_workdir() as workdir:
+            # A span and the tool call nested inside it share a start_time (as they
+            # do when the clock resolution is coarser than back-to-back event
+            # creation, e.g. on Windows). The nested child ends first, so an
+            # end_time tiebreaker would sort it before its parent; depth must keep
+            # the parent first. The events are written child-first to also rule out
+            # any reliance on file order.
+            trace_path = workdir / "events.jsonl"
+            start = "2026-01-01T00:00:00+00:00"
+            tool = {
+                "schema_version": "1.0",
+                "id": "tool-1",
+                "trace_id": "trace-1",
+                "parent_id": "span-1",
+                "name": "search_docs",
+                "type": "tool_call",
+                "start_time": start,
+                "end_time": "2026-01-01T00:00:01+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+            }
+            span = {
+                "schema_version": "1.0",
+                "id": "span-1",
+                "trace_id": "trace-1",
+                "parent_id": "trace-1",
+                "name": "retrieve_context",
+                "type": "span",
+                "start_time": start,
+                "end_time": "2026-01-01T00:00:02+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+            }
+            root = {
+                "schema_version": "1.0",
+                "id": "trace-1",
+                "trace_id": "trace-1",
+                "parent_id": None,
+                "name": "answer",
+                "type": "trace",
+                "start_time": start,
+                "end_time": "2026-01-01T00:00:03+00:00",
+                "status": "success",
+                "metadata": {},
+                "input": None,
+                "output": None,
+                "error": None,
+            }
+            trace_path.write_text(
+                json.dumps(tool) + "\n" + json.dumps(span) + "\n" + json.dumps(root) + "\n",
+                encoding="utf-8",
+            )
+
+            trace = load_traces(trace_path)[0]
+            self.assertEqual(
+                [event.type for event in trace.events],
+                ["trace", "span", "tool_call"],
+            )
+
     def test_load_traces_skips_events_without_root_trace(self) -> None:
         with temporary_workdir() as workdir:
             trace_path = workdir / "events.jsonl"
@@ -3500,7 +3566,11 @@ for batch in range(int(batches)):
             def answer() -> str:
                 return "ok"
 
-            with self.assertRaises(IsADirectoryError):
+            # Pointing ``trace_path`` at a directory makes the append open fail, and
+            # the error must propagate rather than be swallowed. The concrete
+            # ``OSError`` subclass is platform-specific (``IsADirectoryError`` on
+            # POSIX, ``PermissionError`` on Windows), so assert the shared base.
+            with self.assertRaises(OSError):
                 answer()
 
     def test_observe_can_capture_inputs_and_outputs(self) -> None:

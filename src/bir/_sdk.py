@@ -577,7 +577,8 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
 
     traces: list[LoadedTrace] = []
     for trace_id, trace_events in events_by_trace_id.items():
-        sorted_events = sorted(trace_events, key=_event_sort_key)
+        depths = _event_depths(trace_events)
+        sorted_events = sorted(trace_events, key=lambda event: _event_sort_key(event, depths[event.id]))
         root = next((event for event in sorted_events if event.type == "trace" and event.id == trace_id), None)
         if root is None:
             continue
@@ -2857,8 +2858,44 @@ def _price_for_model(model: str) -> _ModelPrice | None:
     return None
 
 
-def _event_sort_key(event: TraceEvent) -> tuple[str, int, str, str]:
-    return (event.start_time, _EVENT_SORT_PRIORITY.get(event.type, 99), event.end_time, event.id)
+def _event_sort_key(event: TraceEvent, depth: int = 0) -> tuple[str, int, int, str, str]:
+    # ``depth`` (ancestor count) breaks ``start_time``/priority ties so an enclosing
+    # parent sorts before a nested child even when their timestamps are identical.
+    # Callers ordering siblings of a single parent can omit it: siblings share a
+    # depth, so it never changes their order.
+    return (
+        event.start_time,
+        _EVENT_SORT_PRIORITY.get(event.type, 99),
+        depth,
+        event.end_time,
+        event.id,
+    )
+
+
+def _event_depths(events: list[TraceEvent]) -> dict[str, int]:
+    """Map each event id to its depth (ancestor count) within ``events``.
+
+    The trace root has depth 0 and every other event one more than its parent.
+    Depth breaks ``start_time``/priority ties so an enclosing parent sorts before a
+    nested child even when their timestamps are identical — which happens when the
+    clock resolution is coarser than back-to-back event creation (notably on
+    Windows), where a span and the tool call nested inside it can share a
+    ``start_time``. The walk guards against a missing, self-referential, or cyclic
+    ``parent_id`` so a malformed file cannot loop forever.
+    """
+
+    by_id = {event.id: event for event in events}
+    depths: dict[str, int] = {}
+    for event in events:
+        depth = 0
+        seen = {event.id}
+        parent_id = event.parent_id
+        while parent_id is not None and parent_id in by_id and parent_id not in seen:
+            seen.add(parent_id)
+            depth += 1
+            parent_id = by_id[parent_id].parent_id
+        depths[event.id] = depth
+    return depths
 
 
 def _reset_context(

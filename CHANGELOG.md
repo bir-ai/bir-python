@@ -251,6 +251,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `load_traces` (and the `send_events` ordering that builds on it) now sorts an
+  enclosing parent before a nested child even when they share an identical
+  `start_time`. Previously the `start_time` tie fell through to an `end_time`
+  tiebreaker, which placed a nested child (it ends first) ahead of its parent — a
+  latent mis-ordering that only surfaced when the clock resolution was coarser than
+  back-to-back event creation (notably on Windows, where a span and the tool call
+  inside it could share a timestamp). Ties are now broken by event depth (ancestors
+  first), so a parent always precedes its descendants. Internal load-ordering only;
+  no schema, fixture, or stored-event change.
 - Release verification wheel metadata now preserves `pyproject.toml` optional
   extras (`dev`, `docs`, and `otel`) as extra-scoped `Requires-Dist` entries
   while keeping the base install free of unconditional runtime dependencies.
