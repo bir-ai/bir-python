@@ -10,6 +10,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `--mark-sent`, `--retries`, `--backoff`, and `--timeout` options on the
+  `bir send` CLI command, forwarded to `send_events()`. `--mark-sent` records the
+  event IDs the server accepts in a `<trace_path>.sent` sidecar and skips them on
+  later sends for cheap idempotent re-sends; `--retries` (default `2`), `--backoff`
+  seconds (default `0.5`), and `--timeout` seconds (default `10`) tune
+  transient-failure handling, accept non-negative values only, and match the knobs
+  already exposed by `bir send-experiment` and `send_events()`. `--timeout` is only
+  forwarded when supplied, so the library default still applies otherwise. CLI
+  wiring only - no new top-level symbol, dependency, schema, or fixture change, and
+  `bir send` with no new flags behaves exactly as before.
 - `configure(sample_rules=...)`, an opt-in mapping of exact trace root names to
   sampling rates. A matching rule overrides the global `sample_rate` for that
   root; unmatched roots keep using the global rate. The decision is still made

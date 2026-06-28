@@ -1000,6 +1000,123 @@ class SendCommandTests(CliBaseTest):
             posted_starts = [event["start_time"] for event in posted_batches[0]]
             self.assertEqual(posted_starts, sorted(posted_starts))
 
+    def test_send_mark_sent_skips_on_second_send(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                first_code, first_out, first_err = run_cli(
+                    "send", "--path", str(trace_path), "--server", "http://server.test", "--mark-sent"
+                )
+                second_code, second_out, second_err = run_cli(
+                    "send", "--path", str(trace_path), "--server", "http://server.test", "--mark-sent"
+                )
+
+            self.assertEqual(first_code, 0)
+            self.assertEqual(first_err, "")
+            # Two traces, each trace + span + score = 6 events on the first send.
+            self.assertEqual(first_out.strip(), "accepted=6 attempted=6 skipped=0")
+            # The accepted IDs were recorded in the sidecar next to the trace file.
+            self.assertTrue(trace_path.with_name(trace_path.name + ".sent").exists())
+            # The second send finds every event already recorded, so nothing is attempted.
+            self.assertEqual(second_code, 0)
+            self.assertEqual(second_err, "")
+            self.assertEqual(second_out.strip(), "accepted=0 attempted=0 skipped=0")
+
+    def test_send_forwards_retries_and_backoff(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            attempts: list[object] = []
+            sleeps: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                attempts.append(request)
+                if len(attempts) <= 3:
+                    raise urllib.error.URLError("temporary network blip")
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    code, out, err = run_cli(
+                        "send",
+                        "--path",
+                        str(trace_path),
+                        "--server",
+                        "http://server.test",
+                        "--retries",
+                        "3",
+                        "--backoff",
+                        "0.25",
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(out.strip(), "accepted=6 attempted=6 skipped=0")
+            # retries=3 allows four attempts; backoff=0.25 sets the first delay,
+            # confirming both CLI options reach send_events.
+            self.assertEqual(len(attempts), 4)
+            self.assertEqual(sleeps, [0.25, 0.5, 1.0])
+
+    def test_send_forwards_timeout(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            timeouts: list[float] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                timeouts.append(timeout)
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                # Omitting --timeout leaves the library default (10.0) in force.
+                run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
+                # An explicit --timeout reaches the HTTP layer for the batch send.
+                run_cli(
+                    "send", "--path", str(trace_path), "--server", "http://server.test", "--timeout", "2.5"
+                )
+
+            self.assertEqual(timeouts, [10.0, 2.5])
+
+    def test_send_rejects_negative_retries(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            def fail(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid --retries must be rejected before any request")
+
+            with patch("urllib.request.urlopen", side_effect=fail):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli("send", "--path", str(trace_path), "--retries", "-1")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_send_rejects_negative_timeout(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            def fail(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid --timeout must be rejected before any request")
+
+            with patch("urllib.request.urlopen", side_effect=fail):
+                with self.assertRaises(SystemExit) as raised:
+                    run_cli("send", "--path", str(trace_path), "--timeout", "-1")
+            self.assertEqual(raised.exception.code, 2)
+
 
 class SendExperimentCommandTests(CliBaseTest):
     def test_send_experiment_reports_accepted_and_id(self) -> None:

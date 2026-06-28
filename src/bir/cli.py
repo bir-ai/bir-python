@@ -131,6 +131,34 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also send size-rotated trace files (oldest first) alongside the active file.",
     )
+    send.add_argument(
+        "--mark-sent",
+        action="store_true",
+        help=(
+            "Record accepted event IDs in a <trace_path>.sent sidecar and skip them on later "
+            "sends, for cheap idempotent re-sends."
+        ),
+    )
+    send.add_argument(
+        "--retries",
+        type=_non_negative_int,
+        default=2,
+        metavar="N",
+        help="Retry transient send failures (network errors, timeouts, HTTP 5xx) up to N times (default: 2).",
+    )
+    send.add_argument(
+        "--backoff",
+        type=_non_negative_float,
+        default=0.5,
+        metavar="SECONDS",
+        help="Base seconds for exponential backoff between retries; the delay is backoff * 2**attempt (default: 0.5).",
+    )
+    send.add_argument(
+        "--timeout",
+        type=_non_negative_float,
+        metavar="SECONDS",
+        help="Per-request HTTP timeout in seconds for each send (default: 10).",
+    )
     send.set_defaults(func=_cmd_send)
 
     send_experiment_parser = subparsers.add_parser(
@@ -618,7 +646,17 @@ def _print_experiment_detail(summary: ExperimentSummary, experiment: ExperimentR
 
 
 def _cmd_send(args: argparse.Namespace) -> int:
-    result = send_events(args.server, path=args.path, include_rotated=args.include_rotated)
+    # Only forward --timeout when given so the library's default (10.0) applies otherwise.
+    timeout_kwargs = {} if args.timeout is None else {"timeout": args.timeout}
+    result = send_events(
+        args.server,
+        path=args.path,
+        include_rotated=args.include_rotated,
+        mark_sent=args.mark_sent,
+        retries=args.retries,
+        backoff=args.backoff,
+        **timeout_kwargs,
+    )
     print(f"accepted={result.accepted} attempted={result.attempted} skipped={result.skipped}")
     return 0
 

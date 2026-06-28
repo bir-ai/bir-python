@@ -75,15 +75,21 @@ The same operations are available without writing Python:
 ```bash
 bir send --server http://127.0.0.1:8000
 bir send --include-rotated --server http://127.0.0.1:8000
+bir send --mark-sent --server http://127.0.0.1:8000
+bir send --retries 3 --backoff 1.0 --timeout 10 \
+  --server http://127.0.0.1:8000
 bir send-experiment .bir/experiments/<name>-<id>.jsonl \
   --server http://127.0.0.1:8000
 bir send-experiment .bir/experiments/<name>-<id>.jsonl \
   --retries 3 --backoff 1.0
 ```
 
-`bir send-experiment` shares the same bounded retry behavior described above:
-`--retries` (default `2`) and `--backoff` (default `0.5`) retry transient
-failures and accept non-negative values only. See
+`bir send` exposes the same knobs as `send_events()`: `--mark-sent` records
+accepted IDs in the `<trace_path>.sent` sidecar and skips them on later sends,
+and `--retries` (default `2`), `--backoff` (default `0.5`), and `--timeout`
+(default `10`) tune transient-failure handling. `bir send-experiment` shares the
+same bounded retry behavior: `--retries` and `--backoff`. All of these accept
+non-negative values only. See
 [CLI & Environment Config](cli-env.md) for all commands and
 [local evals and experiments](evals-experiments.md#upload-an-experiment) for the
 Python API.
