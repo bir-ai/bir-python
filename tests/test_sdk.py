@@ -28,6 +28,7 @@ from bir._sdk import (
     _MAX_SAMPLE_RULES,
     _config_from_env,
     _parse_env_bool,
+    _parse_env_int,
     _parse_env_sample_rate,
     _record_sent_ids,
     _redact_secret_text,
@@ -43,6 +44,8 @@ _BIR_ENV_VARS = (
     "BIR_SERVICE_NAME",
     "BIR_ENVIRONMENT",
     "BIR_SOURCE",
+    "BIR_MAX_VALUE_LENGTH",
+    "BIR_MAX_COLLECTION_ITEMS",
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -3760,6 +3763,126 @@ for batch in range(int(batches)):
             self.assertEqual(event["output"], {"not_a_number": "nan", "bad": "<unrepresentable BadRepr>"})
             self.assertIn("[max_depth]", raw_trace_file)
 
+    def test_capture_value_length_truncates_long_strings(self) -> None:
+        configure(max_value_length=10)
+        # An over-long string is cut to the limit with a visible marker.
+        self.assertEqual(_safe_capture("a" * 25), "aaaaaaaaaa…[truncated]")
+        # A string at or under the limit is returned unchanged.
+        self.assertEqual(_safe_capture("a" * 10), "a" * 10)
+        self.assertEqual(_safe_capture("short"), "short")
+
+    def test_capture_value_length_truncates_repr_fallback_and_paths(self) -> None:
+        configure(max_value_length=8)
+
+        class Big:
+            def __repr__(self) -> str:
+                return "Big(" + "x" * 50 + ")"
+
+        # The repr fallback path is bounded like any other captured string.
+        self.assertEqual(_safe_capture(Big()), "Big(xxxx…[truncated]")
+        # Path values capture through the same string path and are bounded too.
+        path_capture = _safe_capture(Path("/very/long/path/" + "p" * 40))
+        self.assertTrue(isinstance(path_capture, str) and path_capture.endswith("…[truncated]"))
+
+    def test_capture_collection_items_truncates_lists_and_mappings(self) -> None:
+        configure(max_collection_items=3)
+        self.assertEqual(_safe_capture([1, 2, 3, 4, 5, 6]), [1, 2, 3, "…[truncated]"])
+        self.assertEqual(
+            _safe_capture({"a": 1, "b": 2, "c": 3, "d": 4}),
+            {"a": 1, "b": 2, "c": 3, "…[truncated]": "…[truncated]"},
+        )
+        # Tuples and sets capture as a list and are bounded the same way.
+        self.assertEqual(_safe_capture((1, 2, 3, 4, 5)), [1, 2, 3, "…[truncated]"])
+        truncated_set = _safe_capture({1, 2, 3, 4, 5})
+        self.assertEqual(len(truncated_set), 4)
+        self.assertEqual(truncated_set[-1], "…[truncated]")
+        # A collection at or under the limit keeps every item with no marker.
+        self.assertEqual(_safe_capture([1, 2, 3]), [1, 2, 3])
+
+    def test_capture_size_limits_default_is_unchanged(self) -> None:
+        # With neither limit set, captured output is byte-for-byte identical.
+        payload = {
+            "long": "z" * 500,
+            "items": list(range(50)),
+            "nested": {"deep": ["a", "b", "c"] * 10},
+        }
+        self.assertEqual(_safe_capture(payload), payload)
+
+    def test_capture_size_limits_compose_with_depth_cap(self) -> None:
+        configure(max_value_length=4, max_collection_items=2)
+        # A structure deeper than the depth cap whose leaf would also be
+        # truncated still collapses the deepest level to the depth marker.
+        deep: dict[str, object] = {}
+        current = deep
+        for _ in range(8):
+            nested: dict[str, object] = {}
+            current["nested"] = nested
+            current = nested
+        current["leaf"] = "abcdefghij"
+        captured = _safe_capture(deep)
+        self.assertIn("[max_depth]", json.dumps(captured, allow_nan=False))
+        # A wide-and-long value above the depth cap is bounded by both limits.
+        captured_shallow = _safe_capture({"items": ["abcdefghij", "klmnopqrst", "uvwxyz", "more"]})
+        self.assertEqual(
+            captured_shallow,
+            {"items": ["abcd…[truncated]", "klmn…[truncated]", "…[truncated]"]},
+        )
+
+    def test_capture_size_limits_keep_secrets_redacted(self) -> None:
+        # Redaction runs before truncation: a raw secret longer than the limit
+        # still collapses to the marker, never a leaked prefix.
+        configure(max_value_length=12)
+        self.assertEqual(_safe_capture("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), "[redacted]")
+        captured = _safe_capture({"api_key": "sk-SECRET-VALUE-1234567890", "note": "n" * 40})
+        self.assertEqual(captured["api_key"], "[redacted]")
+        self.assertTrue(captured["note"].endswith("…[truncated]"))
+
+    def test_capture_size_limits_stay_json_safe_and_reach_storage(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(
+                capture_inputs=True,
+                capture_outputs=True,
+                max_value_length=6,
+                max_collection_items=2,
+            )
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(items: list[int], note: str) -> dict[str, object]:
+                return {"note": note, "items": list(items)}
+
+            answer([1, 2, 3, 4, 5], "abcdefghij")
+
+            # read_events round-trips the line through json.loads, so a passing
+            # assertion also proves the truncated capture stayed valid JSON.
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            event = events[0]
+            self.assertEqual(
+                event["input"],
+                {"items": [1, 2, "…[truncated]"], "note": "abcdef…[truncated]"},
+            )
+            self.assertEqual(
+                event["output"],
+                {"note": "abcdef…[truncated]", "items": [1, 2, "…[truncated]"]},
+            )
+
+    def test_configure_rejects_invalid_capture_size_limits(self) -> None:
+        with self.assertRaisesRegex(TypeError, "max_value_length"):
+            configure(max_value_length=cast(Any, "big"))
+        with self.assertRaisesRegex(TypeError, "max_value_length"):
+            configure(max_value_length=cast(Any, True))
+        with self.assertRaisesRegex(TypeError, "max_value_length"):
+            configure(max_value_length=cast(Any, 1.5))
+        with self.assertRaisesRegex(ValueError, "max_value_length"):
+            configure(max_value_length=-1)
+        with self.assertRaisesRegex(TypeError, "max_collection_items"):
+            configure(max_collection_items=cast(Any, "big"))
+        with self.assertRaisesRegex(TypeError, "max_collection_items"):
+            configure(max_collection_items=cast(Any, True))
+        with self.assertRaisesRegex(TypeError, "max_collection_items"):
+            configure(max_collection_items=cast(Any, 1.5))
+        with self.assertRaisesRegex(ValueError, "max_collection_items"):
+            configure(max_collection_items=-1)
+
     def test_sample_rate_zero_drops_entire_trace_workflow(self) -> None:
         with temporary_workdir() as workdir:
             configure(sample_rate=0.0)
@@ -4071,6 +4194,51 @@ for batch in range(int(batches)):
         for out_of_range in ("1.5", "-0.1", "nan", "inf"):
             with self.assertRaisesRegex(ValueError, "sample_rate"):
                 _parse_env_sample_rate(out_of_range)
+
+    def test_env_capture_size_limits_set_defaults(self) -> None:
+        with env_vars(BIR_MAX_VALUE_LENGTH="100", BIR_MAX_COLLECTION_ITEMS=" 5 "):
+            config = _config_from_env()
+        self.assertEqual(config.max_value_length, 100)
+        self.assertEqual(config.max_collection_items, 5)
+
+    def test_env_capture_size_limits_default_to_none_when_unset(self) -> None:
+        with env_vars(BIR_SERVICE_NAME="rag-api"):
+            config = _config_from_env()
+        self.assertIsNone(config.max_value_length)
+        self.assertIsNone(config.max_collection_items)
+
+    def test_env_invalid_capture_size_limit_raises_clear_error(self) -> None:
+        with env_vars(BIR_MAX_VALUE_LENGTH="big"):
+            with self.assertRaisesRegex(ValueError, "BIR_MAX_VALUE_LENGTH"):
+                _config_from_env()
+        with env_vars(BIR_MAX_COLLECTION_ITEMS="-1"):
+            with self.assertRaisesRegex(ValueError, "BIR_MAX_COLLECTION_ITEMS"):
+                _config_from_env()
+
+    def test_parse_env_int_parses_and_range_checks(self) -> None:
+        self.assertEqual(_parse_env_int("0", "BIR_MAX_VALUE_LENGTH"), 0)
+        self.assertEqual(_parse_env_int(" 42 ", "BIR_MAX_COLLECTION_ITEMS"), 42)
+        for bad in ("big", "1.5", "-1"):
+            with self.assertRaisesRegex(ValueError, "BIR_MAX_VALUE_LENGTH"):
+                _parse_env_int(bad, "BIR_MAX_VALUE_LENGTH")
+
+    def test_env_capture_size_limit_bounds_persisted_capture(self) -> None:
+        import bir._sdk as sdk
+
+        with temporary_workdir() as workdir, env_vars(
+            BIR_CAPTURE_OUTPUTS="true", BIR_MAX_VALUE_LENGTH="5"
+        ):
+            sdk._config = _config_from_env()
+
+            @observe()
+            def answer() -> str:
+                return "abcdefghij"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            root = next(event for event in events if event["type"] == "trace")
+            self.assertEqual(root["output"], "abcde…[truncated]")
 
     def test_explicit_configure_arguments_override_env_defaults(self) -> None:
         import bir._sdk as sdk

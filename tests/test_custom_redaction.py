@@ -428,5 +428,90 @@ class CustomRedactionWritePathTests(unittest.TestCase):
             self.assertIn("[redacted]", result_raw)
 
 
+class CaptureTruncationOrderingTests(unittest.TestCase):
+    """The opt-in capture-size limits must never weaken redaction.
+
+    Truncation runs only inside ``_safe_capture`` and only after redaction, so a
+    secret is always replaced before any cut and can never be split into a
+    partially visible value. These tests pin that ordering for the built-in
+    rules, the additive custom rules, and the persistence path.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_builtin_secret_redacted_before_truncation(self) -> None:
+        configure(max_value_length=12)
+        # The raw secret is 35 chars (> 12), but redaction collapses it to the
+        # 10-char marker first, so no truncation marker appears and no key prefix
+        # leaks. Truncating first would have produced "sk-ABCDEFGH…[truncated]".
+        self.assertEqual(_safe_capture("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"), "[redacted]")
+
+    def test_custom_pattern_redacted_before_truncation(self) -> None:
+        # Truncating first could cut the token right after "CUST-" (no trailing
+        # digit), which would no longer match the pattern and would leak it.
+        # Redacting first removes the whole match before any cut.
+        configure(max_value_length=8, additional_redaction_patterns=[r"CUST-\d+"])
+        captured = _safe_capture("abcCUST-123456")
+        self.assertEqual(captured, "abc[reda…[truncated]")
+        self.assertNotIn("CUST", captured)
+
+    def test_additional_secret_key_value_redacted_regardless_of_limit(self) -> None:
+        # A keyed redaction replaces the whole value before the string path runs,
+        # so even a tiny limit cannot turn it into a partially visible value.
+        configure(max_value_length=3, additional_secret_keys=["ssn"])
+        self.assertEqual(_safe_capture({"ssn": "123-45-6789-very-long-value"}), {"ssn": "[redacted]"})
+
+    def test_truncation_may_cut_redaction_marker_but_secret_stays_gone(self) -> None:
+        # When the redacted text is still longer than the limit, truncation can
+        # cut through the [redacted] marker itself. That is cosmetic only: the
+        # secret was already replaced, so no secret bytes are ever exposed.
+        configure(max_value_length=10)
+        captured = _safe_capture("password=SUPERSECRETVALUE12345")
+        self.assertNotIn("SUPERSECRET", captured)
+        self.assertTrue(captured.startswith("password=["))
+        self.assertTrue(captured.endswith("…[truncated]"))
+
+    def test_error_text_is_redacted_but_not_truncated(self) -> None:
+        # Error text is not a capture path, so the size limit does not apply to it
+        # even though redaction always does.
+        configure(max_value_length=5, additional_redaction_patterns=[r"CUST-\d+"])
+        redacted = _safe_error(RuntimeError("failure for CUST-123 " + "x" * 100))
+        self.assertNotIn("CUST-123", redacted)
+        self.assertIn("[redacted]", redacted)
+        self.assertNotIn("…[truncated]", redacted)
+        self.assertGreater(len(redacted), 5)
+
+    def test_truncation_after_redaction_in_trace_jsonl(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(
+                capture_inputs=True,
+                capture_outputs=True,
+                additional_redaction_patterns=[r"CUST-\d+"],
+                max_value_length=12,
+            )
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def handle(note: str) -> str:
+                return "issued sk-SECRETKEY1234567890 for CUST-456 " + "z" * 50
+
+            handle("ref CUST-123 " + "y" * 80)
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            raw = trace_path.read_text(encoding="utf-8")
+            # No secret or custom-pattern value survives, despite aggressive truncation.
+            self.assertNotIn("SECRET", raw)
+            self.assertNotIn("CUST-123", raw)
+            self.assertNotIn("CUST-456", raw)
+            # Truncation still happened and the line round-trips as valid JSON.
+            self.assertIn("truncated", raw)
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertTrue(event["output"].endswith("…[truncated]"))
+            self.assertNotIn("SECRET", event["output"])
+
+
 if __name__ == "__main__":
     unittest.main()

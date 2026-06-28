@@ -115,6 +115,8 @@ Bir reads these variables once when the `bir` package is imported:
 | `BIR_SERVICE_NAME` | Service name on trace roots. | unset |
 | `BIR_ENVIRONMENT` | Deployment environment on trace roots. | unset |
 | `BIR_SOURCE` | Trace source tag on trace roots (`metadata.source`). | unset |
+| `BIR_MAX_VALUE_LENGTH` | Truncate captured strings longer than this many characters. | unlimited |
+| `BIR_MAX_COLLECTION_ITEMS` | Keep at most this many items of a captured list/mapping. | unlimited |
 
 ```bash
 export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
@@ -124,10 +126,15 @@ export BIR_SAMPLE_RATE=0.1
 export BIR_SERVICE_NAME=rag-api
 export BIR_ENVIRONMENT=production
 export BIR_SOURCE=checkout-api
+export BIR_MAX_VALUE_LENGTH=10000
+export BIR_MAX_COLLECTION_ITEMS=100
 ```
 
 Boolean values accept `1`, `true`, `yes`, and `on`, or `0`, `false`, `no`, and
-`off`, case-insensitively. Invalid values raise a configuration error.
+`off`, case-insensitively. `BIR_MAX_VALUE_LENGTH` and `BIR_MAX_COLLECTION_ITEMS`
+take a non-negative integer and bound captured values only (truncating after
+redaction); see [Capture & Privacy](capture-privacy.md#limiting-capture-size).
+Invalid values raise a configuration error.
 
 Explicit calls take precedence:
 

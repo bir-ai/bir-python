@@ -10,6 +10,21 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `configure(max_value_length=..., max_collection_items=...)`, opt-in capture-size
+  limits that bound a single captured value so one huge payload (a base64 image, a
+  megabyte of model output) cannot bloat the local store. `max_value_length`
+  truncates an over-long captured string to that many characters and appends a
+  visible `…[truncated]` marker; `max_collection_items` keeps only the first that
+  many items of a captured list, tuple, set, or mapping and records a single
+  `…[truncated]` marker for the remainder. Truncation always runs *after*
+  redaction, so a secret is replaced before any cut and redaction can never be
+  weakened. Both default to `None` (unlimited), apply to every capture path
+  (inputs, outputs, metadata, repr fallbacks, and dataset/experiment capture),
+  compose with the existing capture-depth cap, and can also be set from the new
+  `BIR_MAX_VALUE_LENGTH` / `BIR_MAX_COLLECTION_ITEMS` environment variables.
+  Additive `configure()` keywords and env vars only - no new top-level symbol,
+  dependency, schema, or fixture change, and with neither limit set captured output
+  is byte-for-byte unchanged.
 - `--mark-sent`, `--retries`, `--backoff`, and `--timeout` options on the
   `bir send` CLI command, forwarded to `send_events()`. `--mark-sent` records the
   event IDs the server accepts in a `<trace_path>.sent` sidecar and skips them on

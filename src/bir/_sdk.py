@@ -38,6 +38,11 @@ _SENT_IDS_SUFFIX = ".sent"
 _SCHEMA_VERSION = "1.0"
 _MAX_CAPTURE_DEPTH = 6
 _MAX_DEPTH_REACHED = "[max_depth]"
+# Sentinel appended when an opt-in capture-size limit truncates a value: as a
+# suffix on an over-long string and as an extra element/sentinel entry on an
+# over-large list or mapping. Like the depth and redaction markers it keeps the
+# captured value valid JSON while making the truncation visible.
+_TRUNCATED = "…[truncated]"
 _REDACTED = "[redacted]"
 _EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
 _EVENT_STATUSES = {"success", "error"}
@@ -150,6 +155,16 @@ class _Config:
     # pairs so the frozen config stays hashable; an explicit ``set_cost`` on a
     # generation always wins over a rate-derived cost.
     model_prices: tuple[tuple[str, _ModelPrice], ...] = ()
+    # Opt-in capture-size limits applied during ``_safe_capture`` after redaction.
+    # Both default to ``None`` (unlimited), so captured output is byte-for-byte
+    # unchanged unless a caller opts in. ``max_value_length`` caps the length of a
+    # captured string (truncating the already-redacted text and appending the
+    # ``_TRUNCATED`` marker); ``max_collection_items`` caps how many items of a
+    # captured list/tuple/set or mapping are kept (the rest are replaced by a
+    # single ``_TRUNCATED`` marker). They bound an individual huge payload, a
+    # different concern from the ``max_bytes`` whole-file rotation cap.
+    max_value_length: int | None = None
+    max_collection_items: int | None = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +350,8 @@ def configure(
     additional_secret_keys: Iterable[str] | None = None,
     additional_redaction_patterns: Iterable[str | re.Pattern[str]] | None = None,
     model_prices: Mapping[str, Mapping[str, Any]] | None = None,
+    max_value_length: int | None = None,
+    max_collection_items: int | None = None,
 ) -> None:
     """Configure local SDK behavior.
 
@@ -415,12 +432,31 @@ def configure(
     the current table unchanged. With no table configured, generation cost behavior
     is unchanged.
 
+    ``max_value_length`` and ``max_collection_items`` are opt-in capture-size
+    limits that bound a single captured value so one huge payload (a base64
+    image, a megabyte of model output) cannot bloat the local store. Both
+    default to ``None`` (unlimited), which keeps captured output byte-for-byte
+    unchanged. When ``max_value_length`` is a non-negative integer, a captured
+    string longer than it is truncated to that many characters with a visible
+    ``…[truncated]`` marker appended; truncation always runs *after* redaction,
+    so a secret is replaced before any cut and can never be split in a way that
+    defeats the redactor. When ``max_collection_items`` is a non-negative
+    integer, a captured list, tuple, set, or mapping larger than it keeps only
+    the first that-many items and records a single ``…[truncated]`` marker for
+    the remainder, leaving the output valid JSON. Both apply uniformly to every
+    capture path (inputs, outputs, metadata, repr fallbacks, and dataset and
+    experiment capture) and compose with the existing capture-depth cap. They
+    only bound captured values, never event names, models, ids, or the schema. A
+    non-integer, boolean, or negative limit raises ``TypeError``/``ValueError``
+    here.
+
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
     ``BIR_CAPTURE_OUTPUTS``, ``BIR_SAMPLE_RATE``, ``BIR_SERVICE_NAME``,
-    ``BIR_ENVIRONMENT``, ``BIR_SOURCE``), which is read once at import time, and otherwise to the
-    hardcoded default. Explicit arguments to this function take precedence over
-    the environment.
+    ``BIR_ENVIRONMENT``, ``BIR_SOURCE``, ``BIR_MAX_VALUE_LENGTH``,
+    ``BIR_MAX_COLLECTION_ITEMS``), which is read once at import time, and
+    otherwise to the hardcoded default. Explicit arguments to this function take
+    precedence over the environment.
     """
 
     global _config
@@ -454,6 +490,10 @@ def configure(
         )
     if model_prices is not None:
         updates["model_prices"] = _validate_model_prices(model_prices)
+    if max_value_length is not None:
+        updates["max_value_length"] = _validate_non_negative_int(max_value_length, "max_value_length")
+    if max_collection_items is not None:
+        updates["max_collection_items"] = _validate_non_negative_int(max_collection_items, "max_collection_items")
 
     _config = replace(_config, **updates)
 
@@ -2407,22 +2447,81 @@ def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, str):
-        return _redact_secret_text(value)
+        return _truncate_captured_text(_redact_secret_text(value))
     if isinstance(value, float):
         return value if math.isfinite(value) else repr(value)
     if isinstance(value, Path):
-        return _redact_secret_text(str(value))
+        return _truncate_captured_text(_redact_secret_text(str(value)))
     if depth >= _MAX_CAPTURE_DEPTH:
         return _MAX_DEPTH_REACHED
     if isinstance(value, Mapping):
-        captured: dict[str, Any] = {}
-        for item_key, item_value in value.items():
-            item_key_text = _safe_key(item_key)
-            captured[item_key_text] = _safe_capture(item_value, key=item_key_text, depth=depth + 1)
-        return captured
+        return _capture_mapping(value, depth)
     if isinstance(value, (list, tuple, set, frozenset)):
-        return [_safe_capture(item, depth=depth + 1) for item in value]
-    return _safe_repr(value)
+        return _capture_sequence(value, depth)
+    return _truncate_captured_text(_safe_repr(value))
+
+
+def _truncate_captured_text(text: str) -> str:
+    """Bound an already-redacted captured string to ``max_value_length``.
+
+    Truncation runs only on text that redaction has already processed, so a
+    secret is always replaced before any cut and can never be split in a way
+    that defeats the redactor. With no ``max_value_length`` configured (the
+    default) the text is returned unchanged, so capture stays byte-for-byte
+    identical unless a caller opts in.
+    """
+
+    limit = _config.max_value_length
+    if limit is None or len(text) <= limit:
+        return text
+    return text[:limit] + _TRUNCATED
+
+
+def _capture_mapping(value: Mapping[Any, Any], depth: int) -> dict[str, Any]:
+    """Capture a mapping, bounding entry count by ``max_collection_items``.
+
+    With no limit configured every entry is captured, matching the historical
+    behavior. When a limit is set and the mapping is larger, only the first that
+    many entries (in iteration order) are kept and a single ``_TRUNCATED``
+    sentinel entry records that the remainder was dropped, keeping the result
+    valid JSON.
+    """
+
+    limit = _config.max_collection_items
+    captured: dict[str, Any] = {}
+    truncated = False
+    for index, (item_key, item_value) in enumerate(value.items()):
+        if limit is not None and index >= limit:
+            truncated = True
+            break
+        item_key_text = _safe_key(item_key)
+        captured[item_key_text] = _safe_capture(item_value, key=item_key_text, depth=depth + 1)
+    if truncated:
+        captured[_TRUNCATED] = _TRUNCATED
+    return captured
+
+
+def _capture_sequence(value: Iterable[Any], depth: int) -> list[Any]:
+    """Capture a list/tuple/set, bounding item count by ``max_collection_items``.
+
+    With no limit configured every item is captured, matching the historical
+    behavior. When a limit is set and the sequence is larger, only the first
+    that many items (in iteration order) are kept and a single ``_TRUNCATED``
+    marker element records that the remainder was dropped, keeping the result
+    valid JSON.
+    """
+
+    limit = _config.max_collection_items
+    captured: list[Any] = []
+    truncated = False
+    for index, item in enumerate(value):
+        if limit is not None and index >= limit:
+            truncated = True
+            break
+        captured.append(_safe_capture(item, depth=depth + 1))
+    if truncated:
+        captured.append(_TRUNCATED)
+    return captured
 
 
 def _is_secret_key(key: str) -> bool:
@@ -2871,6 +2970,21 @@ def _parse_env_sample_rate(value: str) -> float:
     return _validate_sample_rate(numeric)
 
 
+def _parse_env_int(value: str, name: str) -> int:
+    """Parse a non-negative integer capture-size limit from the environment.
+
+    Reuses ``_validate_non_negative_int`` for the range check so the env path
+    rejects the same values ``configure`` does, raising a clear ``ValueError``
+    that names the variable for both non-integer text and a negative value.
+    """
+
+    try:
+        numeric = int(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"bir {name} must be a non-negative integer, got {value!r}") from exc
+    return _validate_non_negative_int(numeric, name)
+
+
 def _config_from_env() -> _Config:
     """Build the starting config from the ``BIR_*`` environment variables.
 
@@ -2888,6 +3002,8 @@ def _config_from_env() -> _Config:
     environment = _env_value("BIR_ENVIRONMENT")
     source = _env_value("BIR_SOURCE")
     sample_rate = _env_value("BIR_SAMPLE_RATE")
+    max_value_length = _env_value("BIR_MAX_VALUE_LENGTH")
+    max_collection_items = _env_value("BIR_MAX_COLLECTION_ITEMS")
     return _Config(
         trace_path=Path(trace_path) if trace_path is not None else defaults.trace_path,
         capture_inputs=(
@@ -2917,6 +3033,16 @@ def _config_from_env() -> _Config:
         ),
         sample_rate=(
             _parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate
+        ),
+        max_value_length=(
+            _parse_env_int(max_value_length, "BIR_MAX_VALUE_LENGTH")
+            if max_value_length is not None
+            else defaults.max_value_length
+        ),
+        max_collection_items=(
+            _parse_env_int(max_collection_items, "BIR_MAX_COLLECTION_ITEMS")
+            if max_collection_items is not None
+            else defaults.max_collection_items
         ),
     )
 

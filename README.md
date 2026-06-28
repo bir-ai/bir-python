@@ -55,7 +55,11 @@ When capture is on, Bir redacts common secret-like fields and text before
 anything is written. Those built-in rules always apply and cannot be turned off,
 but you can widen them for your own credential names and formats with
 `configure(additional_secret_keys=[...], additional_redaction_patterns=[...])`.
-See [capture and privacy](docs/site/capture-privacy.md).
+Capture-size limits are opt-in too: `configure(max_value_length=...,
+max_collection_items=...)` bound an over-long captured string or an over-large
+captured list/mapping (truncating only after redaction) so one huge payload
+cannot bloat the local store. See
+[capture and privacy](docs/site/capture-privacy.md).
 
 ## Sampling traces
 

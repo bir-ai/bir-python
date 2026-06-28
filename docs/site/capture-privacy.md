@@ -75,17 +75,48 @@ Captured values are normalized to JSON-compatible data. Non-finite floats such
 as `NaN` and `Infinity` are stored as strings, and deeply nested values are
 truncated.
 
+### Limiting capture size
+
+Capture is normally written whole, so a single large value — a base64 image, a
+megabyte of model output — can bloat `.bir/traces.jsonl`. Two opt-in `configure()`
+limits bound an individual captured value:
+
+```python
+from bir import configure
+
+configure(max_value_length=10_000, max_collection_items=100)
+```
+
+- `max_value_length` truncates a captured string longer than it to that many
+  characters and appends a visible `…[truncated]` marker.
+- `max_collection_items` keeps only the first that-many items of a captured list,
+  tuple, set, or mapping and records a single `…[truncated]` marker for the rest,
+  leaving the output valid JSON.
+
+Both default to `None` (unlimited), so captured output is byte-for-byte unchanged
+unless you opt in. They apply to every capture path (inputs, outputs, metadata,
+repr fallbacks, and dataset/experiment capture) and compose with the
+nested-depth cap above. Truncation always runs **after** redaction, so a secret
+is replaced before any cut and these limits can never weaken redaction. A
+non-integer, boolean, or negative limit raises immediately at `configure()` time.
+
+These limits bound a single captured value; to cap the whole trace file instead,
+see `configure(max_bytes=...)` size-based rotation.
+
 ## Environment capture settings
 
 ```bash
 export BIR_CAPTURE_INPUTS=true
 export BIR_CAPTURE_OUTPUTS=true
 export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
+export BIR_MAX_VALUE_LENGTH=10000
+export BIR_MAX_COLLECTION_ITEMS=100
 ```
 
 Boolean settings accept `1`, `true`, `yes`, or `on` and `0`, `false`, `no`, or
-`off`, case-insensitively. Variables are read once at import time and explicit
-`configure()` arguments take precedence.
+`off`, case-insensitively. `BIR_MAX_VALUE_LENGTH` and `BIR_MAX_COLLECTION_ITEMS`
+take a non-negative integer and default to unlimited. Variables are read once at
+import time and explicit `configure()` arguments take precedence.
 
 ## Prompt and dataset payloads
 
