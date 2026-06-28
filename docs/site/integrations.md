@@ -75,7 +75,7 @@ output and final token usage when the async stream is exhausted, closed, or rais
 The Vertex async wrappers are re-exported as
 `bir.integrations.trace_vertex_generate_content_async` to avoid colliding with the
 Gemini wrapper. The LangChain, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI,
-and Haystack callback handlers have no async wrapper.
+AutoGen, and Haystack callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -520,6 +520,43 @@ last-in-first-out stack, so concurrent and nested runs stay isolated. The handle
 does not import the `crewai` package, and input/output capture follows the same
 [opt-in settings](capture-privacy.md) as every other integration, overridable per
 handler with `capture_inputs`/`capture_outputs`.
+
+## AutoGen (AG2)
+
+```python
+import autogen
+from bir.integrations.autogen import BirAutoGenHandler
+
+autogen.runtime_logging.start(logger=BirAutoGenHandler())
+user_proxy.initiate_chat(assistant, message="What is Bir?")
+autogen.runtime_logging.stop()
+```
+
+AG2's lowest-coupling observability seam is its runtime logging:
+`autogen.runtime_logging.start(logger=...)` installs a process-wide logger that AG2
+drives purely by calling its methods by name — `log_chat_completion`,
+`log_function_use`, `log_event`, `log_new_agent` (and the wrapper/client variants),
+plus `start` / `stop` / `get_connection`. `BirAutoGenHandler` implements that
+`BaseLogger` interface, so registering it turns each multi-agent run into a Bir
+trace.
+
+Callbacks are read by duck typing — tolerant of the field changes across AG2
+versions. `start` opens a Bir trace root (a structural span instead when a Bir trace
+is already active, so an AG2 run nested in another integration stays a subtree); each
+agent's turn becomes a structural span, opened lazily on the first event whose
+`source` is that agent and closed when the speaking agent changes; `log_chat_completion`
+becomes a generation carrying the model and token usage (read from the OpenAI-shaped
+response) plus the cost AG2 reports; `log_function_use` becomes a tool call; and a
+failing completion, function, or `exception` event is recorded with error status. AG2's
+runtime logging is a process-wide singleton without per-call correlation ids, so open
+nodes are tracked on a per-thread last-in-first-out stack, so concurrent runs on
+separate threads and nested runs stay isolated. The handler does not import the
+`autogen` / `ag2` package, and input/output capture follows the same
+[opt-in settings](capture-privacy.md) as every other integration, overridable per
+handler with `capture_inputs`/`capture_outputs`.
+
+(AutoGen 0.4+ / `autogen-core` instead emits OpenTelemetry spans; that line is served
+by the same OTel span-processor pattern as [Pydantic AI](#pydantic-ai).)
 
 ## Haystack
 

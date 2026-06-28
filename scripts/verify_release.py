@@ -32,6 +32,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/__init__.py",
     "bir/integrations/_common.py",
     "bir/integrations/anthropic.py",
+    "bir/integrations/autogen.py",
     "bir/integrations/bedrock.py",
     "bir/integrations/cohere.py",
     "bir/integrations/crewai.py",

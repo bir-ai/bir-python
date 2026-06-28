@@ -312,7 +312,8 @@ For agent frameworks, Bir ships dependency-free callback handlers that map a
 framework's own events into Bir traces without importing the framework:
 `BirCallbackHandler` for LangChain, `BirLlamaIndexHandler` for LlamaIndex,
 `BirAgentsTracingProcessor` for the OpenAI Agents SDK, `BirPydanticAIHandler` for
-Pydantic AI, `BirCrewAIHandler` for CrewAI, and `BirHaystackTracer` for Haystack.
+Pydantic AI, `BirCrewAIHandler` for CrewAI, `BirAutoGenHandler` for AutoGen (AG2),
+and `BirHaystackTracer` for Haystack.
 The Agents processor implements the
 SDK's tracing-processor interface, turning an agent run into a Bir trace whose model
 spans become generations and tool spans become tool calls; register it with
@@ -323,7 +324,12 @@ spans the same way; register it on the tracer provider Pydantic AI uses. The Cre
 handler bridges CrewAI's event bus (no `crewai` import): forward each
 `(source, event)` to `BirCrewAIHandler.on_event` and each crew run becomes a Bir
 trace whose task and agent steps are spans, LLM calls are generations, and tool uses
-are tool calls. The Haystack tracer implements Haystack 2.x's tracing seam (no
+are tool calls. The AutoGen handler implements AG2's runtime-logging interface (no
+`autogen` import): register it with
+`autogen.runtime_logging.start(logger=BirAutoGenHandler())` and each multi-agent run
+becomes a Bir trace whose agent turns are spans, chat completions are generations,
+and function executions are tool calls. The Haystack tracer implements Haystack 2.x's
+tracing seam (no
 `haystack` import): register it with `haystack.tracing.enable_tracing(BirHaystackTracer())`
 and each pipeline run becomes a Bir trace whose generator components are generations,
 tool components are tool calls, and other components are spans.

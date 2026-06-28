@@ -10,6 +10,20 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `BirAutoGenHandler` (`bir.integrations.autogen`) bridges **AutoGen (AG2)**
+  multi-agent runs into Bir traces without importing `autogen` / `ag2`. It
+  implements AG2's runtime-logging `BaseLogger` interface by method name, so
+  `autogen.runtime_logging.start(logger=BirAutoGenHandler())` records each run as a
+  Bir trace: `start` opens the trace (a structural span when nested in another
+  active trace), each agent's turn becomes a span, `log_chat_completion` becomes a
+  generation carrying the model, token usage, and reported cost, `log_function_use`
+  becomes a tool call, and a failing completion, function, or `exception` event is
+  recorded with error status. Open nodes are tracked on a per-thread last-in-first-out
+  stack, so concurrent runs on separate threads and nested runs stay isolated, and
+  input/output capture follows the same opt-in settings as every other integration,
+  overridable per handler with `capture_inputs`/`capture_outputs`. The symbol is
+  re-exported from `bir.integrations`. Dependency-free (`dependencies = []`), no
+  schema (`schema_version` stays `1.0`) or fixture change.
 - A generated **API Reference** page on the documentation site
   (`docs/site/api-reference.md`, in the nav) that renders the public surface from
   the source docstrings via the mkdocstrings Python handler: the top-level `bir`
