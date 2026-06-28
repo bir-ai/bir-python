@@ -4,13 +4,18 @@ import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from bir import configure, load_events, load_traces, trace
 from bir._sdk import _reset_config_for_tests
-from bir.integrations.bedrock import trace_converse, trace_converse_async, trace_converse_stream
+from bir.integrations.bedrock import (
+    trace_converse,
+    trace_converse_async,
+    trace_converse_stream,
+    trace_converse_stream_async,
+)
 
 
 @contextmanager
@@ -88,6 +93,36 @@ def _converse_stream_response(events: object) -> dict[str, object]:
     # boto3's ``converse_stream`` returns a dict whose ``stream`` member is an
     # EventStream iterable of typed events alongside response metadata.
     return {"stream": events, "ResponseMetadata": {"HTTPStatusCode": 200}}
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built Converse events, like an aioboto3 stream.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the events. With ``error`` set it raises that exception
+    after the events are exhausted, modeling a mid-stream failure.
+    """
+
+    def __init__(self, events: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._events = list(events)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._events):
+            event = self._events[self._index]
+            self._index += 1
+            return event
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 class BedrockIntegrationTests(unittest.TestCase):
@@ -468,6 +503,131 @@ class BedrockAsyncIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_events_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            events = [
+                _content_block_delta("Bir "),
+                _content_block_delta("streams"),
+                _message_stop("end_turn"),
+                _stream_metadata({"inputTokens": 12, "outputTokens": 6, "totalTokens": 18}),
+            ]
+            received: dict[str, object] = {}
+
+            async def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                received.update(kwargs)
+                return _converse_stream_response(FakeAsyncStream(events))
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_converse_stream_async(
+                        fake_converse_stream,
+                        modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+                        messages=[{"role": "user", "content": [{"text": "Stream it"}]}],
+                    )
+                    collected = [event async for event in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The stream's events are yielded unchanged and in order.
+            self.assertEqual(consumed, events)
+            self.assertEqual(received["modelId"], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "bedrock.converse_stream")
+            self.assertEqual(generation_event.status, "success")
+            # Converse stream events carry no model, so the request modelId stands.
+            self.assertEqual(generation_event.model, "anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.metadata["integration"], "bedrock")
+            self.assertEqual(generation_event.metadata["stop_reason"], "end_turn")
+
+    def test_stream_falls_back_when_response_is_not_a_stream(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                # A stub that ignored the streaming API and returned one response.
+                return _converse_dict(usage={"inputTokens": 7, "outputTokens": 3, "totalTokens": 10})
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_converse_stream_async(
+                        fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+                    collected = [event async for event in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The non-streamed response is recorded in one piece; nothing is yielded.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "amazon.titan-text-premier-v1:0")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(
+                generation_event.output["output"]["message"]["content"][0]["text"],
+                "Bir traces locally.",
+            )
+
+    def test_records_partial_output_when_stream_closed_early(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                return _converse_stream_response(
+                    FakeAsyncStream([_content_block_delta("Bir "), _content_block_delta("streams")])
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_converse_stream_async(
+                        fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+                    iterator = stream.__aiter__()
+                    await iterator.__anext__()
+                    # Closing the wrapper finalizes the generation from the partial output.
+                    await stream.aclose()
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir ")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_converse_stream(**kwargs: object) -> dict[str, object]:
+                return _converse_stream_response(
+                    FakeAsyncStream(
+                        [_content_block_delta("partial api_key=sk-secret123 ")],
+                        error=RuntimeError("stream failed api_key=sk-secret123"),
+                    )
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_converse_stream_async(
+                        fake_converse_stream, modelId="amazon.titan-text-premier-v1:0", messages=[]
+                    )
+                    async for _event in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():

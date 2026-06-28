@@ -30,10 +30,12 @@ async with trace("chat"):
 ```
 
 For the streaming surfaces (OpenAI Chat Completions and Responses, Anthropic,
-Gemini, Mistral, Cohere, and LiteLLM), passing `stream=True` resolves to an async
-iterator that yields the provider's events unchanged and finalizes the model,
-output, and usage when the stream is exhausted, closed (`aclose()`), or raises
-mid-stream:
+Gemini, Mistral, Cohere, LiteLLM, and Vertex AI), passing `stream=True` resolves to
+an async iterator that yields the provider's events unchanged and finalizes the
+model, output, and usage when the stream is exhausted, closed (`aclose()`), or
+raises mid-stream. AWS Bedrock's Converse stream is a distinct method rather than a
+`stream=True` flag, so it has a dedicated `trace_converse_stream_async` that
+behaves the same way:
 
 ```python
 async with trace("chat"):
@@ -61,16 +63,19 @@ The async wrappers, by provider:
 | Instructor | `bir.integrations.instructor` | `trace_create_async` |
 | DSPy | `bir.integrations.dspy` | `trace_lm_async` |
 | AWS Bedrock Converse | `bir.integrations.bedrock` | `trace_converse_async` |
+| AWS Bedrock Converse stream | `bir.integrations.bedrock` | `trace_converse_stream_async` |
 | Google Vertex AI | `bir.integrations.vertexai` | `trace_generate_content_async` |
 
 They require an active trace just like the sync wrappers — an async `@observe()`
 function or `async with bir.trace(...)` — and take the same `bir_`-prefixed
-options. The AWS Bedrock and Vertex AI async wrappers cover the non-streaming call
-only; their streaming surfaces (`trace_converse_stream` and
-`trace_generate_content(..., stream=True)`) stay synchronous, and the Vertex async
-wrapper is re-exported as `bir.integrations.trace_vertex_generate_content_async` to
-avoid colliding with the Gemini wrapper. The LangChain, LlamaIndex, OpenAI Agents
-SDK, Pydantic AI, CrewAI, and Haystack callback handlers have no async wrapper.
+options. Vertex AI streams asynchronously through
+`trace_generate_content_async(..., stream=True)`, and AWS Bedrock's Converse stream
+through the dedicated `trace_converse_stream_async`; both finalize the accumulated
+output and final token usage when the async stream is exhausted, closed, or raises.
+The Vertex async wrappers are re-exported as
+`bir.integrations.trace_vertex_generate_content_async` to avoid colliding with the
+Gemini wrapper. The LangChain, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI,
+and Haystack callback handlers have no async wrapper.
 
 ## OpenAI
 
@@ -218,8 +223,22 @@ model from a chunk `model_version` when present.
 
 For async clients, `trace_generate_content_async` awaits
 `model.generate_content_async` inside one generation (re-exported as
-`bir.integrations.trace_vertex_generate_content_async`); it covers the
-non-streaming call only.
+`bir.integrations.trace_vertex_generate_content_async`). With `stream=True` it
+resolves to an async iterator that yields the chunks unchanged and records the
+accumulated text and final `usage_metadata` when the stream is exhausted, closed
+(`aclose()`), or raises, refining the model from a chunk `model_version`:
+
+```python
+async with trace("chat"):
+    stream = await trace_generate_content_async(
+        model.generate_content_async,
+        "Stream it",
+        bir_model="gemini-1.5-flash",
+        stream=True,
+    )
+    async for chunk in stream:
+        ...
+```
 
 ## AWS Bedrock
 
@@ -263,8 +282,22 @@ Bir accumulates text from each `contentBlockDelta.delta.text` and records the
 the stream is consumed.
 
 For async clients, `trace_converse_async` awaits an async `converse` (for example
-an `aioboto3` `bedrock-runtime` client) inside one generation; it covers the
-non-streaming Converse call only.
+an `aioboto3` `bedrock-runtime` client) inside one generation, and
+`trace_converse_stream_async` awaits an async `converse_stream` and resolves to an
+async iterator over its `stream` member's events, recording the same accumulated
+text, `messageStop` stop reason, and terminal `metadata` usage when the stream is
+exhausted, closed (`aclose()`), or raises:
+
+```python
+async with trace("chat"):
+    stream = await trace_converse_stream_async(
+        client.converse_stream,
+        modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        messages=[{"role": "user", "content": [{"text": "Stream it"}]}],
+    )
+    async for event in stream:
+        ...
+```
 
 ## LiteLLM
 

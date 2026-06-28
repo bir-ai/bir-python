@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.integrations.trace_converse_stream_async` (AWS Bedrock) and async
+  `stream=True` support for the Vertex `trace_generate_content_async` wrapper,
+  completing async streaming coverage across every dependency-free provider. Both
+  resolve to a lazy async iterator that yields the provider's stream events
+  unchanged via `async for` and finalizes the model, accumulated output, and final
+  token usage when the stream is exhausted, `aclose()`d, or raises mid-stream (the
+  error re-raised unchanged with its text redacted). Bedrock reuses the sync
+  Converse-stream accumulation (`contentBlockDelta.delta.text`, the `messageStop`
+  stop reason, and the terminal `metadata` usage block) and Vertex reuses the sync
+  chunk accumulation (each chunk's `text` with a candidate-parts fallback,
+  `model_version`, and the final `usage_metadata`). A provider that returns a
+  one-shot response still records via the non-streaming path, and the Bedrock async
+  non-streaming and Vertex non-streaming async paths are unchanged. `boto3`,
+  `aioboto3`, and `vertexai` stay unimported; `trace_converse_stream_async` is
+  re-exported from `bir.integrations`. Stdlib only; no new dependency, schema, or
+  fixture change.
 - `configure(max_value_length=..., max_collection_items=...)`, opt-in capture-size
   limits that bound a single captured value so one huge payload (a base64 image, a
   megabyte of model output) cannot bloat the local store. `max_value_length`

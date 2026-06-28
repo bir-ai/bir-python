@@ -7,17 +7,20 @@ model from the request and token usage from the response when they are present.
 The Converse stream API (``converse_stream``) returns a response whose ``stream``
 member is an iterable of typed events, so :func:`trace_converse_stream` yields
 those events unchanged and records the accumulated text and final usage once the
-stream is consumed.
+stream is consumed. :func:`trace_converse_stream_async` is its asynchronous
+counterpart for async Bedrock Runtime clients whose ``stream`` member is an async
+iterable of those same events.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -92,8 +95,8 @@ async def trace_converse_async(
     Like the sync wrapper this must run inside an active trace (for example an
     async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
     prefixed options never collide with Converse keyword arguments such as
-    ``inferenceConfig``. Async streaming (``converse_stream``) is not wrapped yet;
-    use the sync :func:`trace_converse_stream` for streaming.
+    ``inferenceConfig``. For async ``converse_stream`` clients use
+    :func:`trace_converse_stream_async`.
     """
 
     metadata: dict[str, Any] = {"integration": "bedrock"}
@@ -193,6 +196,107 @@ def _stream_converse(
 
         try:
             for event in stream:
+                text = _event_delta_text(event)
+                if text is not None:
+                    output_parts.append(text)
+
+                stop_reason = _event_stop_reason(event)
+                if stop_reason is not None:
+                    last_stop_reason = stop_reason
+
+                usage = _event_usage(event)
+                if usage is not None:
+                    last_usage = usage
+
+                yield event
+        finally:
+            gen.set_output("".join(output_parts))
+            if last_stop_reason is not None:
+                gen.set_metadata({"stop_reason": last_stop_reason})
+            _record_usage(gen, last_usage)
+
+
+async def trace_converse_stream_async(
+    converse_stream: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    bir_name: str = "bedrock.converse_stream",
+    bir_metadata: Mapping[str, Any] | None = None,
+    bir_capture_input: bool | None = None,
+    bir_capture_output: bool | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Await an async Bedrock Runtime ``converse_stream`` and record one generation.
+
+    The asynchronous counterpart of :func:`trace_converse_stream` for async Bedrock
+    Runtime clients (for example an ``aioboto3`` ``bedrock-runtime`` client).
+    ``converse_stream`` returns a coroutine resolving to a Converse response whose
+    ``stream`` member is an async iterable of typed events; positional and keyword
+    arguments are forwarded to it unchanged. ``await`` this wrapper to obtain a lazy
+    async iterator that yields those events unchanged in order, so iterate it
+    directly instead of reaching into ``response["stream"]``. As in the sync wrapper
+    the output is assembled from each ``contentBlockDelta.delta.text``, the stop
+    reason is read from the ``messageStop`` event, and the final token usage is read
+    from the terminal ``metadata`` event's ``usage`` block
+    (``inputTokens``/``outputTokens``/``totalTokens``); these are finalized when the
+    stream is exhausted, ``aclose()``-d, or raises. The generation model comes from
+    the request ``modelId`` keyword argument (Converse stream events carry no
+    model). A response that is not an async event stream (for example a stub that
+    returned a one-shot Converse response) is recorded in one piece instead.
+
+    Like the sync wrapper this must run inside an active trace (for example an async
+    ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_`` prefixed
+    options never collide with Converse keyword arguments such as ``inferenceConfig``
+    or ``additionalModelRequestFields``.
+    """
+
+    metadata: dict[str, Any] = {"integration": "bedrock"}
+    if bir_metadata:
+        metadata.update(bir_metadata)
+
+    return _stream_converse_async(
+        converse_stream,
+        args,
+        kwargs,
+        bir_name=bir_name,
+        metadata=metadata,
+        bir_capture_input=bir_capture_input,
+        bir_capture_output=bir_capture_output,
+    )
+
+
+async def _stream_converse_async(
+    converse_stream: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(kwargs.get("modelId")),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        response = await converse_stream(*args, **kwargs)
+        stream = _value(response, "stream")
+        if not _is_async_streamed_response(stream):
+            # The call did not actually stream (a stub returned a whole Converse
+            # response, or the ``stream`` member is absent); record it one-shot.
+            _record_response(gen, response)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+        last_stop_reason: str | None = None
+
+        try:
+            async for event in stream:
                 text = _event_delta_text(event)
                 if text is not None:
                     output_parts.append(text)

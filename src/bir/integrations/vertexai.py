@@ -7,17 +7,19 @@ wrapper invokes it inside a single Bir ``generation`` event and reads token usag
 from the response when it is present. Passing ``stream=True`` (Vertex returns an
 iterator of response chunks) makes the wrapper yield those chunks unchanged and
 record the accumulated text and final ``usage_metadata`` once the stream is
-consumed.
+consumed. The async wrapper :func:`trace_generate_content_async` mirrors this:
+``stream=True`` resolves to an async iterator over those same chunks.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from bir import generation
 
 from ._common import (
+    _is_async_streamed_response,
     _is_streamed_response,
     _response_output,
     _string_or_none,
@@ -123,18 +125,37 @@ async def trace_generate_content_async(
     used; when the response carries a resolved ``model_version`` it refines that
     value.
 
+    With ``stream=True`` (``GenerativeModel.generate_content_async`` returns a
+    coroutine resolving to an async iterator of ``GenerationResponse`` chunks) the
+    wrapper resolves to a lazy async iterator that yields those chunks unchanged and
+    assembles the output from each chunk's ``text`` (falling back to the first
+    candidate's text parts), refining the model from a chunk ``model_version`` and
+    reading the final ``usage_metadata`` when the stream is exhausted, closed, or
+    raises.
+
     Like the sync wrapper this must run inside an active trace (for example an
     async ``@observe()`` function or ``async with bir.trace(...)``); the ``bir_``
     prefixed options never collide with ``generate_content`` keyword arguments such
     as ``generation_config``. It is exported from ``bir.integrations`` as
     ``trace_vertex_generate_content_async`` so it does not collide with the Google
-    Gemini wrapper of the same name. Async streaming (``stream=True``) is not
-    wrapped yet; use the sync :func:`trace_generate_content` for streaming.
+    Gemini wrapper of the same name.
     """
 
     metadata: dict[str, Any] = {"integration": "vertexai"}
     if bir_metadata:
         metadata.update(bir_metadata)
+
+    if kwargs.get("stream") is True:
+        return _stream_generate_content_async(
+            generate,
+            args,
+            kwargs,
+            bir_name=bir_name,
+            bir_model=bir_model,
+            metadata=metadata,
+            bir_capture_input=bir_capture_input,
+            bir_capture_output=bir_capture_output,
+        )
 
     async with generation(
         bir_name,
@@ -180,6 +201,55 @@ def _stream_generate_content(
 
         try:
             for chunk in stream:
+                response_model = _string_or_none(_value(chunk, "model_version"))
+                if response_model is not None:
+                    gen.model = response_model
+
+                text = _chunk_text(chunk)
+                if text is not None:
+                    output_parts.append(text)
+
+                usage = _value(chunk, "usage_metadata")
+                if usage is not None:
+                    last_usage = usage
+
+                yield chunk
+        finally:
+            gen.set_output("".join(output_parts))
+            _record_usage(gen, last_usage)
+
+
+async def _stream_generate_content_async(
+    generate: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    bir_name: str,
+    bir_model: str | None,
+    metadata: Mapping[str, Any],
+    bir_capture_input: bool | None,
+    bir_capture_output: bool | None,
+) -> AsyncIterator[Any]:
+    async with generation(
+        bir_name,
+        model=_string_or_none(bir_model),
+        input=_request_input(args, kwargs),
+        metadata=metadata,
+        capture_input=bir_capture_input,
+        capture_output=bir_capture_output,
+    ) as gen:
+        stream = await generate(*args, **kwargs)
+        if not _is_async_streamed_response(stream):
+            # The provider ignored ``stream=True`` and returned one response;
+            # record it via the one-shot path.
+            _record_response(gen, stream)
+            return
+
+        output_parts: list[str] = []
+        last_usage: Any = None
+
+        try:
+            async for chunk in stream:
                 response_model = _string_or_none(_value(chunk, "model_version"))
                 if response_model is not None:
                     gen.model = response_model

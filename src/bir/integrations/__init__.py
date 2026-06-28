@@ -5,7 +5,12 @@ from .anthropic import trace_messages, trace_messages_async
 from .crewai import BirCrewAIHandler
 from .dspy import trace_lm, trace_lm_async
 from .instructor import trace_create, trace_create_async
-from .bedrock import trace_converse, trace_converse_async, trace_converse_stream
+from .bedrock import (
+    trace_converse,
+    trace_converse_async,
+    trace_converse_stream,
+    trace_converse_stream_async,
+)
 from .google import trace_generate_content, trace_generate_content_async
 from .haystack import BirHaystackTracer
 from .langchain import BirCallbackHandler
@@ -36,6 +41,7 @@ __all__ = [
     "trace_converse",
     "trace_converse_async",
     "trace_converse_stream",
+    "trace_converse_stream_async",
     "trace_generate_content",
     "trace_generate_content_async",
     "trace_vertex_generate_content",

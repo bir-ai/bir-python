@@ -4,7 +4,7 @@ import asyncio
 import os
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -96,6 +96,36 @@ class FakeRaisingTextChunk:
     @property
     def candidates(self) -> object | None:
         return self._candidates
+
+
+class FakeAsyncStream:
+    """An async iterator over pre-built stream chunks, like an async Vertex stream.
+
+    ``__aiter__`` makes the object an async stream that the wrapper detects, and
+    ``__anext__`` replays the chunks. With ``error`` set it raises that exception
+    after the chunks are exhausted, modeling a mid-stream failure.
+    """
+
+    def __init__(self, chunks: Sequence[object], *, error: BaseException | None = None) -> None:
+        self._chunks = list(chunks)
+        self._index = 0
+        self._error = error
+        self.aclosed = False
+
+    def __aiter__(self) -> FakeAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._error is not None:
+            raise self._error
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclosed = True
 
 
 class VertexAIIntegrationTests(unittest.TestCase):
@@ -520,6 +550,139 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.status, "error")
             self.assertEqual(generation_event.error, "request failed api_key=[redacted]")
+
+    def test_records_streamed_generation_after_chunks_are_consumed(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            chunks = [
+                FakeStreamChunk(text="Bir ", model_version="gemini-1.5-flash-002"),
+                FakeStreamChunk(text="streams"),
+                FakeStreamChunk(
+                    usage_metadata=FakeUsageMetadata(
+                        prompt_token_count=12,
+                        candidates_token_count=6,
+                        total_token_count=18,
+                    ),
+                ),
+            ]
+            received: dict[str, object] = {}
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeAsyncStream:
+                received.update(kwargs)
+                return FakeAsyncStream(chunks)
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate,
+                        "Stream it",
+                        bir_model="gemini-1.5-flash",
+                        stream=True,
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The chunks are yielded unchanged and in order.
+            self.assertEqual(consumed, chunks)
+            self.assertIs(received["stream"], True)
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.name, "vertexai.generate_content")
+            self.assertEqual(generation_event.status, "success")
+            # ``bir_model`` seeds the model; a chunk ``model_version`` refines it.
+            self.assertEqual(generation_event.model, "gemini-1.5-flash-002")
+            self.assertEqual(generation_event.output, "Bir streams")
+            self.assertEqual(generation_event.usage, {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18})
+            self.assertEqual(generation_event.input["args"], ["Stream it"])
+            self.assertEqual(generation_event.input["stream"], True)
+
+    def test_stream_falls_back_when_provider_returns_full_response(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
+                # A provider that ignored ``stream=True`` and returned one response.
+                return FakeGenerationResponse(
+                    model_version="gemini-1.5-flash-002",
+                    usage_metadata=FakeUsageMetadata(prompt_token_count=7, candidates_token_count=3),
+                    payload={"candidates": [{"content": {"parts": [{"text": "One shot."}]}}]},
+                )
+
+            async def driver() -> list[object]:
+                collected: list[object] = []
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                    )
+                    collected = [chunk async for chunk in stream]
+                return collected
+
+            consumed = asyncio.run(driver())
+
+            # The non-streamed response is recorded in one piece; nothing is yielded.
+            self.assertEqual(consumed, [])
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
+            self.assertEqual(generation_event.model, "gemini-1.5-flash-002")
+            self.assertEqual(generation_event.usage, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+            self.assertEqual(
+                generation_event.output["candidates"][0]["content"]["parts"][0]["text"],
+                "One shot.",
+            )
+
+    def test_records_partial_output_when_stream_closed_early(self) -> None:
+        with temporary_workdir():
+            configure(capture_outputs=True)
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeStreamChunk(text="Bir "), FakeStreamChunk(text="streams")]
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                    )
+                    iterator = stream.__aiter__()
+                    await iterator.__anext__()
+                    # Closing the wrapper finalizes the generation from the partial output.
+                    await stream.aclose()
+
+            asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.output, "Bir ")
+
+    def test_records_stream_error_and_redacts_secret(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+
+            async def fake_generate(*args: object, **kwargs: object) -> FakeAsyncStream:
+                return FakeAsyncStream(
+                    [FakeStreamChunk(text="partial api_key=sk-secret123 ")],
+                    error=RuntimeError("stream failed api_key=sk-secret123"),
+                )
+
+            async def driver() -> None:
+                async with trace("chat"):
+                    stream = await trace_generate_content_async(
+                        fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
+                    )
+                    async for _chunk in stream:
+                        pass
+
+            with self.assertRaises(RuntimeError):
+                asyncio.run(driver())
+
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "error")
+            self.assertEqual(generation_event.error, "stream failed api_key=[redacted]")
+            # Partial output collected before the failure is recorded and redacted.
+            self.assertEqual(generation_event.output, "partial api_key=[redacted] ")
 
     def test_requires_active_trace(self) -> None:
         with temporary_workdir():
