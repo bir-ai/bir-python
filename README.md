@@ -529,7 +529,10 @@ The documentation site is published at
 [capture and privacy](docs/site/capture-privacy.md),
 [server uploads](docs/site/sending.md),
 [optional integrations](docs/site/integrations.md), and
-[local evals and experiments](docs/site/evals-experiments.md).
+[local evals and experiments](docs/site/evals-experiments.md). A generated
+[API reference](docs/site/api-reference.md) renders the public `bir`,
+`bir.evals`, `bir.testing`, and `bir.logging` surface directly from the source
+docstrings.
 
 Build it locally with the isolated documentation extra:
 

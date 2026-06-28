@@ -10,6 +10,17 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- A generated **API Reference** page on the documentation site
+  (`docs/site/api-reference.md`, in the nav) that renders the public surface from
+  the source docstrings via the mkdocstrings Python handler: the top-level `bir`
+  tracing API, loaders, trace-context accessors, and dataclasses, plus the
+  `bir.evals`, `bir.testing`, and `bir.logging` modules. Each module block follows
+  its `__all__`, so the reference stays in sync with the code and never leaks
+  imports. The page builds under the existing `mkdocs build --strict` gate (no
+  warnings) and reuses the same `docs` extra. Docs tooling only: `mkdocstrings`
+  and `mkdocstrings-python` are added to the optional `docs` extra in
+  `pyproject.toml`; the runtime install stays dependency-free (`dependencies = []`).
+  No code, public API, schema, or fixture change.
 - `bir traces` now filters the listing with `--name` (case-sensitive substring of
   the trace name), `--status {success,error}` (exact status), and `--since`/`--until`
   (inclusive ISO 8601 bounds on the trace start time; values without an offset are

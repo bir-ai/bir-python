@@ -9,6 +9,20 @@ site_dir: site
 theme:
   name: mkdocs
 
+plugins:
+  # ``search`` is MkDocs' implicit default; it must be listed explicitly once a
+  # ``plugins:`` block is declared, or the search index would be dropped.
+  - search
+  # API reference is generated from the package docstrings. Docs tooling only —
+  # mkdocstrings lives in the optional ``docs`` extra, never a runtime dependency.
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+
 nav:
   - Overview: index.md
   - Quickstart: quickstart.md
@@ -19,6 +33,7 @@ nav:
   - Integrations: integrations.md
   - Evals & Experiments: evals-experiments.md
   - CLI & Environment Config: cli-env.md
+  - API Reference: api-reference.md
 
 markdown_extensions:
   - admonition

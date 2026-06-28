@@ -45,7 +45,7 @@ bir = "bir.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-docs = ["mkdocs>=1.5"]
+docs = ["mkdocs>=1.5", "mkdocstrings>=0.24", "mkdocstrings-python>=1.10"]
 otel = [
   "opentelemetry-sdk>=1.20",
   "opentelemetry-exporter-otlp-proto-http>=1.20",
