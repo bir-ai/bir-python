@@ -44,7 +44,15 @@ Issues = "https://github.com/bir-ai/bir-python/issues"
 bir = "bir.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# ``build``/``setuptools``/``wheel`` let scripts/verify_release.py build and
+# install the sdist offline (``python -m build --sdist --no-isolation``); they
+# are dev-only tooling and never become runtime dependencies.
+dev = [
+  "build>=1.0",
+  "pytest>=8.0",
+  "setuptools>=77",
+  "wheel>=0.40",
+]
 docs = ["mkdocs>=1.5", "mkdocstrings>=0.24", "mkdocstrings-python>=1.10"]
 otel = [
   "opentelemetry-sdk>=1.20",

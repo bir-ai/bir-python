@@ -296,6 +296,24 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- The release gate (`scripts/verify_release.py`) now verifies the **source
+  distribution (sdist) in addition to the wheel**. After building and checking
+  the wheel, it builds the sdist (`python -m build --sdist --no-isolation`, with
+  a deterministic stdlib fallback when the build backend is absent), asserts the
+  tarball ships the `src/bir` sources, `bir/py.typed`, `pyproject.toml`,
+  `LICENSE`, and `README.md`, asserts it excludes local/generated paths
+  (`.bir/`, `build/`, `site/`, caches, virtualenvs), confirms the sdist's
+  `PKG-INFO` name/version match `pyproject.toml`, and installs the sdist into a
+  fresh virtual environment offline before running the same import/behavior
+  smoke test as the wheel. This closes a gap where a broken sdist (missing
+  marker/metadata or a leaked local path) could publish to PyPI undetected, since
+  many downstream installs and mirrors build from the sdist. The wheel and sdist
+  inspectors now share a single forbidden-path list. `build`, `setuptools`, and
+  `wheel` are added to the optional `dev` extra as the build tooling the gate
+  uses; the runtime install stays dependency-free (`dependencies = []`). The
+  check remains offline/hermetic, so CI gains no network dependency. Tooling
+  only — no runtime dependency, public API, event schema (`schema_version` stays
+  `1.0`), or fixture change.
 - CI now runs the SDK unit tests and example smoke tests on Windows and macOS in
   addition to Linux. The `sdk` job is a matrix of `ubuntu-latest`,
   `windows-latest`, and `macos-latest` crossed with Python 3.10–3.13

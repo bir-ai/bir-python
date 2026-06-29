@@ -12,7 +12,10 @@ from __future__ import annotations
 import importlib.resources
 import importlib.util
 import base64
+import gzip
 import hashlib
+import io
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -266,6 +269,158 @@ class VerifyReleaseEntryPointTests(unittest.TestCase):
         self.assertIn("bir = bir.cli:main", entry_points)
         # The entry-point file is accounted for in RECORD like every shipped file.
         self.assertIn(f"bir_sdk-{version}.dist-info/entry_points.txt", record)
+
+
+class VerifyReleaseSdistTests(unittest.TestCase):
+    """``verify_release`` builds and validates the source distribution (sdist)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.verify_release = _load_verify_release()
+        cls.version = cls.verify_release.package_version()
+        cls.prefix = f"bir_sdk-{cls.version}"
+        cls._tmp = tempfile.TemporaryDirectory(prefix="bir-sdist-test-")
+        cls.tmp_path = Path(cls._tmp.name)
+        # The deterministic assembler needs no build backend, so the content and
+        # failure-path assertions stay hermetic and fast. A separate test covers
+        # the real ``python -m build`` path.
+        cls.assembled = cls.verify_release._assemble_sdist(cls.tmp_path, cls.version)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _names(sdist: Path) -> set[str]:
+        with tarfile.open(sdist, "r:*") as archive:
+            return set(archive.getnames())
+
+    def test_assembled_sdist_ships_sources_license_and_marker(self) -> None:
+        names = self._names(self.assembled)
+
+        self.assertIn(f"{self.prefix}/src/bir/__init__.py", names)
+        self.assertIn(f"{self.prefix}/src/bir/integrations/openai.py", names)
+        self.assertIn(f"{self.prefix}/src/bir/py.typed", names)
+        self.assertIn(f"{self.prefix}/pyproject.toml", names)
+        self.assertIn(f"{self.prefix}/LICENSE", names)
+        self.assertIn(f"{self.prefix}/README.md", names)
+        self.assertIn(f"{self.prefix}/PKG-INFO", names)
+
+        forbidden = {".bir", "build", "dist", "site", "__pycache__", ".venv"}
+        self.assertFalse(
+            any(forbidden.intersection(Path(name).parts) for name in names),
+            msg="assembled sdist leaked a local/generated path",
+        )
+        # Should not raise: the assembled tarball carries every required file.
+        self.verify_release.inspect_sdist(self.assembled, self.version)
+
+    def test_assembled_sdist_is_deterministic(self) -> None:
+        first_dir = self.tmp_path / "det-first"
+        second_dir = self.tmp_path / "det-second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+
+        first = self.verify_release._assemble_sdist(first_dir, self.version)
+        second = self.verify_release._assemble_sdist(second_dir, self.version)
+
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_pkg_info_declares_distribution_name_and_version(self) -> None:
+        with tarfile.open(self.assembled, "r:*") as archive:
+            member = archive.extractfile(f"{self.prefix}/PKG-INFO")
+            assert member is not None
+            pkg_info = member.read().decode("utf-8").splitlines()
+
+        self.assertIn("Name: bir-sdk", pkg_info)
+        self.assertIn(f"Version: {self.version}", pkg_info)
+
+    def test_real_build_sdist_passes_inspect(self) -> None:
+        # Exercises the actual setuptools packaging config -- the path PyPI
+        # mirrors and downstream package managers build from. ``build_sdist``
+        # transparently falls back to the deterministic assembler when the build
+        # backend is unavailable, so this still runs in a minimal environment.
+        out = self.tmp_path / "real"
+        out.mkdir()
+        egg_info = REPO_ROOT / "src" / "bir_sdk.egg-info"
+        preexisting = egg_info.exists()
+        sdist = self.verify_release.build_sdist(out, self.version)
+
+        # Should not raise.
+        self.verify_release.inspect_sdist(sdist, self.version)
+        names = self._names(sdist)
+        self.assertIn(f"{self.prefix}/src/bir/py.typed", names)
+        # A build we triggered must not leave its egg-info behind in the tree;
+        # an egg-info that predates the build (e.g. from an editable install) is
+        # left untouched and not our concern here.
+        if not preexisting:
+            self.assertFalse(
+                egg_info.exists(),
+                msg="build_sdist left an egg-info artifact in the source tree",
+            )
+
+    def test_inspect_sdist_rejects_missing_py_typed(self) -> None:
+        broken = self.tmp_path / "no-pytyped.tar.gz"
+        self._repack(self.assembled, broken, drop=f"{self.prefix}/src/bir/py.typed")
+
+        with self.assertRaisesRegex(RuntimeError, "missing expected files"):
+            self.verify_release.inspect_sdist(broken, self.version)
+
+    def test_inspect_sdist_rejects_missing_license(self) -> None:
+        broken = self.tmp_path / "no-license.tar.gz"
+        self._repack(self.assembled, broken, drop=f"{self.prefix}/LICENSE")
+
+        with self.assertRaisesRegex(RuntimeError, "missing expected files"):
+            self.verify_release.inspect_sdist(broken, self.version)
+
+    def test_inspect_sdist_rejects_local_trace_leak(self) -> None:
+        broken = self.tmp_path / "bir-leak.tar.gz"
+        self._repack(self.assembled, broken, add=(f"{self.prefix}/.bir/traces.jsonl", b"{}\n"))
+
+        with self.assertRaisesRegex(RuntimeError, "forbidden local/generated path"):
+            self.verify_release.inspect_sdist(broken, self.version)
+
+    def test_inspect_sdist_rejects_build_tree_leak(self) -> None:
+        broken = self.tmp_path / "build-leak.tar.gz"
+        self._repack(self.assembled, broken, add=(f"{self.prefix}/build/lib/bir/__init__.py", b"\n"))
+
+        with self.assertRaisesRegex(RuntimeError, "forbidden local/generated path"):
+            self.verify_release.inspect_sdist(broken, self.version)
+
+    def test_inspect_sdist_rejects_unexpected_top_level_directory(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "exactly one top-level directory"):
+            self.verify_release.inspect_sdist(self.assembled, "9.9.9")
+
+    @staticmethod
+    def _repack(
+        source: Path,
+        destination: Path,
+        *,
+        drop: str | None = None,
+        add: tuple[str, bytes] | None = None,
+    ) -> None:
+        """Rewrite a gzipped tarball while dropping or adding a single member."""
+
+        with tarfile.open(source, "r:*") as original:
+            members: list[tuple[tarfile.TarInfo, bytes | None]] = []
+            for member in original.getmembers():
+                extracted = original.extractfile(member)
+                members.append((member, extracted.read() if extracted is not None else None))
+
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as changed:
+            for member, data in members:
+                if drop is not None and member.name == drop:
+                    continue
+                changed.addfile(member, io.BytesIO(data) if data is not None else None)
+            if add is not None:
+                name, payload = add
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                changed.addfile(info, io.BytesIO(payload))
+
+        with open(destination, "wb") as handle:
+            with gzip.GzipFile(fileobj=handle, mode="wb", mtime=0) as gz:
+                gz.write(buffer.getvalue())
 
 
 class VersionSurfaceTests(unittest.TestCase):

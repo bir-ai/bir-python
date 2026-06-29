@@ -6,11 +6,14 @@ import os
 import re
 import base64
 import csv
+import gzip
 import hashlib
+import importlib.util
 import io
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import venv
@@ -54,6 +57,20 @@ REQUIRED_PACKAGE_FILES = {
     "bir/testing.py",
 }
 
+# Path components that must never appear inside a published distribution: local
+# trace output, dev environments, caches, and generated build trees. Shared by
+# the wheel and sdist inspectors so both reject the same local/generated leaks.
+FORBIDDEN_PATH_PARTS = {
+    ".bir",
+    ".env",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "site",
+}
+
 
 def main() -> int:
     """Run the full SDK verification workflow."""
@@ -64,15 +81,26 @@ def main() -> int:
         wheelhouse = temp_dir / "wheelhouse"
         smoke_dir = temp_dir / "smoke"
         smoke_env = temp_dir / "venv"
+        sdist_dir = temp_dir / "sdist"
+        sdist_smoke_dir = temp_dir / "sdist-smoke"
+        sdist_env = temp_dir / "sdist-venv"
+        backend_dir = temp_dir / "build-backend"
 
         wheelhouse.mkdir()
         smoke_dir.mkdir()
+        sdist_dir.mkdir()
+        sdist_smoke_dir.mkdir()
 
         run_sdk_tests()
         run_pyright()
+
         wheel = build_wheel(wheelhouse, version)
         inspect_wheel(wheel)
         run_install_smoke_test(smoke_env, smoke_dir, wheel, version)
+
+        sdist = build_sdist(sdist_dir, version)
+        inspect_sdist(sdist, version)
+        run_sdist_install_smoke_test(sdist_env, sdist_smoke_dir, backend_dir, sdist, version)
 
     print("Bir SDK release verification passed.")
     return 0
@@ -218,14 +246,6 @@ def metadata(version: str) -> str:
 def inspect_wheel(wheel: Path) -> None:
     """Validate that the wheel contains expected files and excludes local artifacts."""
 
-    forbidden_parts = {
-        ".bir",
-        ".env",
-        ".pytest_cache",
-        "__pycache__",
-        "build",
-        "dist",
-    }
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
@@ -253,7 +273,7 @@ def inspect_wheel(wheel: Path) -> None:
 
     for name in names:
         parts = set(Path(name).parts)
-        if forbidden_parts.intersection(parts):
+        if FORBIDDEN_PATH_PARTS.intersection(parts):
             raise RuntimeError(f"wheel contains forbidden local/generated path: {name}")
 
 
@@ -271,7 +291,41 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
         label="fresh venv wheel install",
     )
 
-    smoke_test = smoke_dir / "smoke_test.py"
+    run_smoke_imports(smoke_python, smoke_dir, version, distribution_label="wheel")
+    run_console_scripts(smoke_env, smoke_dir)
+
+
+def run_smoke_imports(
+    python_exe: Path, work_dir: Path, version: str, *, distribution_label: str
+) -> None:
+    """Run the shared SDK import/behavior smoke test with the given interpreter.
+
+    Reused by both the wheel and sdist install checks so the installed package is
+    exercised identically however it was produced.
+    """
+
+    smoke_test = work_dir / "smoke_test.py"
+    smoke_test.write_text(smoke_test_source(version, distribution_label), encoding="utf-8")
+    run([str(python_exe), str(smoke_test)], cwd=work_dir, label=f"fresh venv {distribution_label} smoke test")
+
+
+def run_console_scripts(env_dir: Path, work_dir: Path) -> None:
+    """Exercise the installed ``bir`` console script, if one is declared."""
+
+    # The console_scripts entry point must be installed by the real distribution
+    # and be invokable as ``bir``. ``--version`` exercises the SDK import path and
+    # ``traces``/``stats`` exercise subcommands (no local traces exist, so they
+    # exit 0).
+    if console_scripts():
+        bir_script = env_dir / "bin" / "bir"
+        run([str(bir_script), "--version"], cwd=work_dir, label="installed bir --version")
+        run([str(bir_script), "traces"], cwd=work_dir, label="installed bir traces")
+        run([str(bir_script), "stats"], cwd=work_dir, label="installed bir stats")
+
+
+def smoke_test_source(version: str, distribution_label: str) -> str:
+    """Return the SDK smoke-test program asserting the installed package works."""
+
     # Assert the installed distribution resolves as "bir-sdk" at the expected
     # version, so future drift between the dist name and __version__ fails here.
     version_check = textwrap.dedent(
@@ -291,7 +345,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
                 bir.integrations.__path__, bir.integrations.__name__ + "."
             )
         )
-        assert integration_modules, "installed wheel has no integration modules"
+        assert integration_modules, "installed {distribution_label} has no integration modules"
         for module_name in integration_modules:
             importlib.import_module(module_name)
 
@@ -306,10 +360,8 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
         )
         """
     )
-    smoke_test.write_text(
-        version_check
-        + textwrap.dedent(
-            """
+    return version_check + textwrap.dedent(
+        """
             from bir import configure, generation, load_traces, observe, prompt, retrieval, score, span, trace
             from bir.evals import Dataset, DatasetExample, contains, exact_match, run_experiment
 
@@ -377,20 +429,214 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
             assert experiment.status == "success"
             assert experiment.aggregate_scores == {"contains": 1.0, "exact_match": 1.0}
             """
-        ),
-        encoding="utf-8",
     )
-    run([str(smoke_python), str(smoke_test)], cwd=smoke_dir, label="fresh venv smoke test")
 
-    # The console_scripts entry point must be installed by the real wheel and be
-    # invokable as ``bir``. ``--version`` exercises the SDK import path and
-    # ``traces``/``stats`` exercise subcommands (no local traces exist, so they
-    # exit 0).
-    if console_scripts():
-        bir_script = smoke_env / "bin" / "bir"
-        run([str(bir_script), "--version"], cwd=smoke_dir, label="installed bir --version")
-        run([str(bir_script), "traces"], cwd=smoke_dir, label="installed bir traces")
-        run([str(bir_script), "stats"], cwd=smoke_dir, label="installed bir stats")
+
+def build_sdist(sdist_dir: Path, version: str) -> Path:
+    """Build the source distribution (``.tar.gz``) into ``sdist_dir``.
+
+    Prefer the real PEP 517 build (``python -m build --sdist --no-isolation``) so
+    the gate exercises the *actual* packaging config that PyPI mirrors and many
+    downstream package managers build from. ``--no-isolation`` keeps the build
+    hermetic by reusing the already-installed setuptools backend instead of
+    fetching one over the network. When that backend is unavailable (a minimal
+    environment without the ``dev`` extra), fall back to assembling a
+    deterministic tarball directly so its contents can still be inspected.
+    """
+
+    print("==> sdist build", flush=True)
+    expected = sdist_dir / f"bir_sdk-{version}.tar.gz"
+    if not _build_backend_available():
+        return _assemble_sdist(sdist_dir, version)
+
+    # setuptools writes ``src/bir_sdk.egg-info`` as a side effect of the in-place
+    # build; remove it afterward if we are the ones who created it so the working
+    # tree stays clean.
+    egg_info = PACKAGE_ROOT / "src" / "bir_sdk.egg-info"
+    preexisting = egg_info.exists()
+    try:
+        # Capture the verbose backend output and surface it only on failure so a
+        # healthy build keeps the "==> sdist build" progress line uncluttered.
+        completed = subprocess.run(
+            [sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(sdist_dir)],
+            cwd=PACKAGE_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            sys.stdout.write(completed.stdout)
+            sys.stderr.write(completed.stderr)
+            raise RuntimeError("python -m build --sdist failed")
+    finally:
+        if not preexisting and egg_info.exists():
+            shutil.rmtree(egg_info)
+
+    if not expected.is_file():
+        raise RuntimeError(f"sdist build did not produce {expected.name}")
+    return expected
+
+
+def _build_backend_available() -> bool:
+    """Report whether ``python -m build`` can run offline with setuptools."""
+
+    build_spec = importlib.util.find_spec("build")
+    # ``build_spec.origin`` is ``None`` for a namespace package, which is what a
+    # stray gitignored ``build/`` directory next to pyproject.toml resolves to.
+    # Require a real installed ``build`` so a leftover directory does not look
+    # like the frontend and break the in-place ``python -m build`` invocation.
+    if build_spec is None or build_spec.origin is None:
+        return False
+    return importlib.util.find_spec("setuptools") is not None
+
+
+def _assemble_sdist(sdist_dir: Path, version: str) -> Path:
+    """Assemble a deterministic sdist tarball without the build backend.
+
+    Mirrors the standard PEP 517 source layout (a single ``bir_sdk-<version>/``
+    top-level directory holding ``pyproject.toml``, ``README.md``, ``LICENSE``,
+    ``PKG-INFO``, and the ``src/bir`` tree) so ``inspect_sdist`` validates the
+    same shape whether the tarball came from setuptools or from this fallback.
+    """
+
+    prefix = f"bir_sdk-{version}"
+    members: list[tuple[str, bytes]] = [
+        (f"{prefix}/pyproject.toml", (PACKAGE_ROOT / "pyproject.toml").read_bytes()),
+        (f"{prefix}/README.md", (PACKAGE_ROOT / "README.md").read_bytes()),
+        (f"{prefix}/LICENSE", (PACKAGE_ROOT / "LICENSE").read_bytes()),
+        (f"{prefix}/PKG-INFO", metadata(version).encode("utf-8")),
+        (f"{prefix}/src/bir/py.typed", (PACKAGE_SOURCE / "py.typed").read_bytes()),
+    ]
+    for source in package_python_files(PACKAGE_SOURCE):
+        archive_name = (Path("bir") / source.relative_to(PACKAGE_SOURCE)).as_posix()
+        members.append((f"{prefix}/src/{archive_name}", source.read_bytes()))
+    members.sort()
+
+    # Fixed member metadata plus a fixed gzip mtime keep repeated builds
+    # byte-for-byte reproducible, matching the deterministic wheel build.
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w") as tar:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = 0
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+
+    sdist = sdist_dir / f"{prefix}.tar.gz"
+    with open(sdist, "wb") as handle:
+        with gzip.GzipFile(filename="", fileobj=handle, mode="wb", mtime=0) as gz:
+            gz.write(raw.getvalue())
+    return sdist
+
+
+def inspect_sdist(sdist: Path, version: str) -> None:
+    """Validate that the sdist ships the sources and excludes local artifacts."""
+
+    print("==> sdist inspect", flush=True)
+    prefix = f"bir_sdk-{version}"
+    with tarfile.open(sdist, "r:*") as archive:
+        names = [member.name for member in archive.getmembers()]
+        top_level = {name.split("/", 1)[0] for name in names if name}
+        if top_level != {prefix}:
+            raise RuntimeError(
+                f"sdist must contain exactly one top-level directory {prefix!r}, found {sorted(top_level)}"
+            )
+
+        relative = set()
+        for name in names:
+            if name == prefix:
+                continue
+            relative.add(name[len(prefix) + 1 :])
+
+        for rel in relative:
+            if FORBIDDEN_PATH_PARTS.intersection(Path(rel).parts):
+                raise RuntimeError(f"sdist contains forbidden local/generated path: {rel}")
+
+        required = {"pyproject.toml", "LICENSE", "README.md", "PKG-INFO"}
+        required |= {f"src/{name}" for name in REQUIRED_PACKAGE_FILES}
+        required |= {
+            f"src/{(Path('bir') / source.relative_to(PACKAGE_SOURCE)).as_posix()}"
+            for source in package_python_files(PACKAGE_SOURCE)
+        }
+        missing = required.difference(relative)
+        if missing:
+            raise RuntimeError(f"sdist is missing expected files: {sorted(missing)}")
+
+        pkg_info_member = archive.extractfile(f"{prefix}/PKG-INFO")
+        if pkg_info_member is None:
+            raise RuntimeError("sdist PKG-INFO is not a readable file")
+        pkg_info = pkg_info_member.read().decode("utf-8").splitlines()
+
+    if "Name: bir-sdk" not in pkg_info:
+        raise RuntimeError("sdist PKG-INFO does not declare the bir-sdk distribution name")
+    if f"Version: {version}" not in pkg_info:
+        raise RuntimeError(f"sdist PKG-INFO version does not match the pyproject version {version}")
+
+
+def run_sdist_install_smoke_test(
+    sdist_env: Path, sdist_dir: Path, backend_dir: Path, sdist: Path, version: str
+) -> None:
+    """Install the sdist into a fresh venv offline and run the SDK smoke test."""
+
+    print("==> sdist install", flush=True)
+    backend = _stage_build_backend(backend_dir)
+
+    venv.EnvBuilder(with_pip=True).create(sdist_env)
+    sdist_python = sdist_env / "bin" / "python"
+    install_env = os.environ.copy()
+    install_env["PIP_NO_CACHE_DIR"] = "1"
+    # Building the sdist into a wheel needs a PEP 517 backend. ``--no-index``
+    # forbids fetching one, so provide the host's setuptools/wheel on PYTHONPATH
+    # for the build only; the smoke test below runs with a clean environment and
+    # imports the freshly installed distribution from the venv's site-packages.
+    install_env["PYTHONPATH"] = str(backend)
+    run(
+        [
+            str(sdist_python),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-build-isolation",
+            "--no-deps",
+            str(sdist),
+        ],
+        cwd=sdist_dir,
+        env=install_env,
+        label="fresh venv sdist install",
+    )
+
+    run_smoke_imports(sdist_python, sdist_dir, version, distribution_label="sdist")
+    run_console_scripts(sdist_env, sdist_dir)
+
+
+def _stage_build_backend(backend_dir: Path) -> Path:
+    """Stage a minimal setuptools/wheel build backend copied from the host.
+
+    Copying only the backend packages (not the whole host environment) keeps the
+    offline sdist build from importing the host's ``bir-sdk`` or other packages,
+    so the install resolves the sources straight from the sdist.
+    """
+
+    spec = importlib.util.find_spec("setuptools")
+    if spec is None or not spec.submodule_search_locations:
+        raise RuntimeError(
+            "setuptools is required to verify the sdist install; install the dev extra "
+            '(``pip install -e ".[dev]"``)'
+        )
+
+    host_site = Path(spec.submodule_search_locations[0]).parent
+    backend_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("setuptools", "_distutils_hack", "pkg_resources", "wheel"):
+        source = host_site / name
+        if source.is_dir():
+            shutil.copytree(source, backend_dir / name, dirs_exist_ok=True)
+    precedence = host_site / "distutils-precedence.pth"
+    if precedence.is_file():
+        shutil.copy2(precedence, backend_dir / precedence.name)
+    for info in list(host_site.glob("setuptools-*.dist-info")) + list(host_site.glob("wheel-*.dist-info")):
+        shutil.copytree(info, backend_dir / info.name, dirs_exist_ok=True)
+    return backend_dir
 
 
 def package_version() -> str:

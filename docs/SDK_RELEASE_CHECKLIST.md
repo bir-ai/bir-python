@@ -55,6 +55,17 @@ covers trace, span, retrieval, prompt metadata,
 generation, usage, cost, score events, deterministic evaluators, and local
 experiment writing.
 
+The script then verifies the **source distribution (sdist)** the same way many
+downstream installs and mirrors consume it. It builds the sdist
+(`python -m build --sdist --no-isolation`, with a deterministic stdlib fallback
+when the build backend is absent), asserts the tarball ships the `src/bir`
+sources, the `bir/py.typed` marker, `pyproject.toml`, `LICENSE`, and `README.md`
+while excluding local/generated paths (`.bir/`, `build/`, `site/`, caches,
+virtualenvs), confirms the sdist `PKG-INFO` name/version match `pyproject.toml`,
+and installs the sdist into a second fresh virtual environment offline before
+running the same smoke test. So a broken sdist (missing marker/metadata or a
+leaked local path) fails verification instead of publishing to PyPI undetected.
+
 CI runs the same release verification script on pushes and pull requests to
 `main`. The server and dashboard contract tests run in the `bir-app`
 repository, against the published `bir-sdk` package.
@@ -75,8 +86,10 @@ dependencies and cannot import server code), so `tests/test_redaction_parity.py`
 and the schema-contract assertions in `tests/test_sdk.py` are what keep the SDK
 from drifting away from the `bir-app` server and dashboard.
 
-The release verification script does not require `build`, `twine`, or network
-access. When you are ready to publish, the package-index checks are:
+The release verification script needs no `twine` and no network access. It
+builds the sdist with `build`/`setuptools`/`wheel` from the `dev` extra (falling
+back to a stdlib-only tarball when they are absent). When you are ready to
+publish, the package-index checks are:
 
 ```bash
 python -m build
@@ -133,8 +146,11 @@ PY
 - Confirm the wheel contains only the SDK package and expected metadata.
 - Confirm the wheel ships the `bir/py.typed` PEP 561 marker so downstream type
   checkers honor the SDK's inline types.
+- Confirm the sdist (`.tar.gz`) ships the `src/bir` sources, `bir/py.typed`,
+  `pyproject.toml`, `LICENSE`, and `README.md`, and installs into a clean
+  virtual environment.
 - Confirm no `.env`, local trace files, caches, or generated artifacts are
-  included in the package.
+  included in the package (wheel or sdist).
 - Confirm the version in `pyproject.toml` matches the changelog entry.
 - Confirm `README.md` documents `retrieval()` without implying a new event type.
 
