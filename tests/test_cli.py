@@ -1887,5 +1887,202 @@ class ModuleEntryPointTests(CliBaseTest):
             self.assertEqual(result.stdout, expected)
 
 
+class PruneCommandTests(CliBaseTest):
+    def test_before_removes_only_older_whole_traces(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+            loaded = bir.load_traces(trace_path)  # oldest first: checkout, search, checkout_retry
+            cutoff = loaded[1].start_time  # strictly removes the oldest (checkout) only
+
+            code, out, err = run_cli("prune", "--path", str(trace_path), "--before", cutoff, "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("removed=1", out)
+            self.assertIn("kept=2", out)
+            remaining = bir.load_traces(trace_path)
+            self.assertEqual({trace.name for trace in remaining}, {"search", "checkout_retry"})
+            # Every surviving line is still valid JSONL the loaders can read.
+            self.assertEqual(len(bir.load_events(trace_path)), sum(len(t.events) for t in remaining))
+
+    def test_keep_last_keeps_only_n_most_recent(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+            newest_id = bir.load_traces(trace_path)[-1].id
+
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--keep-last", "1", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=2", out)
+            self.assertIn("kept=1", out)
+            remaining = bir.load_traces(trace_path)
+            self.assertEqual([trace.id for trace in remaining], [newest_id])
+
+    def test_status_restricts_removal(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--status", "error", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=1", out)
+            remaining = bir.load_traces(trace_path)
+            self.assertEqual({trace.name for trace in remaining}, {"checkout", "search"})
+
+    def test_keep_last_combines_with_status_restriction(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            # keep-last protects the newest two (search, checkout_retry); among the
+            # rest only the success-status checkout is left, so only it is removed.
+            code, out, _ = run_cli(
+                "prune", "--path", str(trace_path), "--keep-last", "2", "--status", "success", "--yes"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=1", out)
+            remaining = bir.load_traces(trace_path)
+            self.assertEqual({trace.name for trace in remaining}, {"search", "checkout_retry"})
+
+    def test_dry_run_reports_counts_but_writes_nothing(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            code, out, _ = run_cli(
+                "prune", "--path", str(trace_path), "--before", "2999-01-01", "--dry-run"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=2", out)
+            self.assertIn("(dry run; pass --yes to apply)", out)
+            # The store is untouched and still readable.
+            self.assertEqual(trace_path.read_bytes(), original)
+            self.assertEqual(len(bir.load_traces(trace_path)), 2)
+
+    def test_default_previews_without_yes(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01")
+
+            self.assertEqual(code, 0)
+            self.assertIn("(dry run; pass --yes to apply)", out)
+            self.assertEqual(trace_path.read_bytes(), original)
+
+    def test_dry_run_overrides_yes(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            code, out, _ = run_cli(
+                "prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes", "--dry-run"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("(dry run; pass --yes to apply)", out)
+            self.assertEqual(trace_path.read_bytes(), original)
+
+    def test_requires_a_selection_filter(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            code, out, err = run_cli("prune", "--path", str(trace_path), "--yes")
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("at least one selection filter", err)
+            self.assertEqual(trace_path.read_bytes(), original)
+
+    def test_rejects_non_positive_keep_last(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("prune", "--path", str(workdir / "traces.jsonl"), "--keep-last", "0")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_rejects_malformed_before(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("prune", "--path", str(workdir / "traces.jsonl"), "--before", "not-a-date")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_empty_store_exits_zero_and_creates_nothing(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+
+            code, out, err = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("removed=0", out)
+            # Pruning a never-written store neither creates the file nor a lock file.
+            self.assertFalse(trace_path.exists())
+            self.assertEqual(list(workdir.iterdir()), [])
+
+    def test_nothing_matched_writes_nothing(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--before", "2000-01-01", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=0", out)
+            self.assertEqual(trace_path.read_bytes(), original)
+            self.assertEqual(len(bir.load_traces(trace_path)), 2)
+
+    def test_include_rotated_prunes_across_files(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_active_and_rotated_trace(trace_path)  # .1 holds the older trace, active the newer
+            rotated_path = trace_path.with_name(trace_path.name + ".1")
+            active_before = trace_path.read_bytes()
+
+            code, out, _ = run_cli(
+                "prune", "--path", str(trace_path), "--include-rotated", "--keep-last", "1", "--yes"
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=1", out)
+            self.assertIn("kept=1", out)
+            # The newest trace (active file) survives; the rotated trace is gone.
+            remaining = bir.load_traces(trace_path, include_rotated=True)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0].root.name, "answer")
+            self.assertEqual(bir.load_traces(rotated_path), [])
+            # The active file, which held no removed trace, is left byte-for-byte intact.
+            self.assertEqual(trace_path.read_bytes(), active_before)
+
+    def test_write_failure_leaves_original_intact(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            original = trace_path.read_bytes()
+
+            # The temp file is written via Path.write_text; making it fail mid-prune
+            # must leave the original file untouched (atomic replace never happens).
+            with patch.object(cli._sdk.Path, "write_text", side_effect=OSError("disk full")):
+                code, out, err = run_cli(
+                    "prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes"
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("bir:", err)
+            self.assertEqual(trace_path.read_bytes(), original)
+            self.assertEqual(len(bir.load_traces(trace_path)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

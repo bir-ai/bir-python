@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- New **`bir prune`** CLI command to reclaim space by removing whole old or
+  unwanted traces from the local store, so a long-lived `.bir/traces.jsonl` (and
+  its rotated siblings) no longer grows without bound. Selection is by
+  `--before ISO` (drop traces starting before the cutoff), `--keep-last N` (keep
+  only the N most recent), and an optional `--status {success,error}` restriction;
+  `--include-rotated` extends pruning to size-rotated siblings. It operates on
+  whole traces (never splitting one across the keep/drop boundary) and rewrites
+  each file via a temp file + atomic replace under the same advisory lock an append
+  takes, so a concurrent writer can never interleave and a partial failure leaves
+  the original file intact. It is **destructive but safe by default**: a bare
+  `bir prune` with no selection filter is rejected, and even with a filter it only
+  previews unless `--yes` is given (`--dry-run` always forces a preview),
+  reporting `removed=<traces> kept=<traces> events=<dropped> bytes=<reclaimed>`. An
+  empty store and a no-match run both exit 0 and write nothing. Traces only;
+  experiments are untouched.
+
 - Dependency-free **Ollama** integration (`bir.integrations.ollama`) for the
   official `ollama` Python client. `trace_chat` wraps `ollama.chat` (or a
   client's `.chat`) and `trace_generate` wraps `ollama.generate` (or `.generate`),

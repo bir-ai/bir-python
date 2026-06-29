@@ -2091,6 +2091,184 @@ def _rotate_trace_files(trace_path: Path, backup_count: int) -> None:
     trace_path.replace(trace_path.with_name(f"{trace_path.name}.1"))
 
 
+@dataclass(frozen=True)
+class _PruneResult:
+    """Outcome of a :func:`_prune_trace_store` call.
+
+    ``removed_traces``/``kept_traces`` count whole traces; ``removed_events`` is
+    the number of event lines dropped and ``bytes_reclaimed`` the on-disk bytes
+    freed. ``dry_run`` is True when selection ran but nothing was written, so the
+    counts describe what *would* be removed.
+    """
+
+    removed_traces: int
+    kept_traces: int
+    removed_events: int
+    bytes_reclaimed: int
+    dry_run: bool
+
+
+def _trace_starts_before(start_time: str, cutoff: datetime) -> bool:
+    """Return True when ``start_time`` precedes ``cutoff``, comparing both in UTC.
+
+    Trace start times are recorded in UTC; a naive ``start_time`` is treated as UTC
+    so it compares against the (already UTC-normalized) cutoff without raising.
+    """
+
+    start = datetime.fromisoformat(start_time)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    return start < cutoff
+
+
+def _select_removed_trace_ids(
+    traces: list[LoadedTrace],
+    *,
+    before: datetime | None,
+    keep_last: int | None,
+    status: str | None,
+) -> set[str]:
+    """Choose the trace ids to drop from ``traces`` for the given prune filters.
+
+    ``before`` selects traces whose start time precedes the cutoff; ``keep_last``
+    selects every trace except the ``N`` most recent (by start time); ``status``
+    restricts removal to traces with that exact status. The ``before`` and
+    ``keep_last`` selectors combine by union — a trace is removed when it matches
+    any active selector — and the ``status`` restriction is applied last, so a
+    trace is removed only when it also matches ``status``. When neither ``before``
+    nor ``keep_last`` is given, every trace matching ``status`` is removed. Returns
+    an empty set when nothing matches.
+    """
+
+    beyond_keep_last: set[str] = set()
+    if keep_last is not None:
+        by_recent = sorted(traces, key=lambda trace: trace.start_time, reverse=True)
+        beyond_keep_last = {trace.id for trace in by_recent[keep_last:]}
+
+    has_selector = before is not None or keep_last is not None
+    removed: set[str] = set()
+    for trace in traces:
+        if status is not None and trace.status != status:
+            continue
+        if not has_selector:
+            removed.add(trace.id)
+        elif before is not None and _trace_starts_before(trace.start_time, before):
+            removed.add(trace.id)
+        elif keep_last is not None and trace.id in beyond_keep_last:
+            removed.add(trace.id)
+    return removed
+
+
+def _filter_trace_file(file_path: Path, removed_trace_ids: set[str]) -> tuple[list[str], int, int]:
+    """Return ``file_path``'s surviving lines, dropped-event count, and current size.
+
+    Every non-blank line is parsed only far enough to read its ``trace_id``; a line
+    whose trace was selected for removal is dropped and the rest are kept as
+    normalized ``<json>\\n`` lines so the rewritten file stays valid JSONL. The size
+    is read after the scan (before any rewrite) so a caller can report the bytes a
+    rewrite would reclaim.
+    """
+
+    kept_lines: list[str] = []
+    removed_events = 0
+    with file_path.open("r", encoding="utf-8") as trace_file:
+        for line in trace_file:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            trace_id = json.loads(stripped).get("trace_id")
+            if trace_id in removed_trace_ids:
+                removed_events += 1
+                continue
+            kept_lines.append(stripped + "\n")
+    return kept_lines, removed_events, file_path.stat().st_size
+
+
+def _prune_trace_store(
+    path: str | Path | None = None,
+    *,
+    include_rotated: bool = False,
+    before: datetime | None = None,
+    keep_last: int | None = None,
+    status: str | None = None,
+    dry_run: bool = False,
+) -> _PruneResult:
+    """Remove whole traces from the local store, serialized against appends.
+
+    Loads complete traces with the public loaders, selects the trace ids to drop
+    via :func:`_select_removed_trace_ids`, then rewrites each affected trace file
+    keeping only events whose ``trace_id`` was not selected. Keying the rewrite on
+    the removed ids means a trace is never split across the keep/drop boundary and
+    orphan events whose root is unread (for example split into a rotated file not
+    being pruned) are preserved rather than dropped.
+
+    The load, selection, and rewrite all run while holding the in-process
+    ``_write_lock`` and the trace path's :class:`_InterProcessFileLock` — the same
+    locks an append takes — so a concurrent writer can never interleave. Each file
+    is rewritten via a sibling temp file and an atomic ``replace``, so a failure
+    leaves the original file intact. With ``dry_run`` the selection and counts are
+    computed but nothing is written. Only the active file is rewritten unless
+    ``include_rotated`` is set, matching the loaders' default scope.
+    """
+
+    trace_path = Path(path) if path is not None else _config.trace_path
+    candidate_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
+    # An empty store has nothing to lock or rewrite; short-circuit so a prune of a
+    # never-written store does not create the directory or lock file as a side effect.
+    if not any(file_path.exists() for file_path in candidate_files):
+        return _PruneResult(0, 0, 0, 0, dry_run)
+
+    with _write_lock:
+        with _InterProcessFileLock(trace_path):
+            traces = load_traces(trace_path, include_rotated=include_rotated)
+            removed_ids = _select_removed_trace_ids(
+                traces, before=before, keep_last=keep_last, status=status
+            )
+            removed_traces = sum(1 for trace in traces if trace.id in removed_ids)
+            kept_traces = len(traces) - removed_traces
+            if not removed_ids:
+                return _PruneResult(0, kept_traces, 0, 0, dry_run)
+
+            files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
+            removed_events = 0
+            bytes_reclaimed = 0
+            staged: list[tuple[Path, Path]] = []
+            try:
+                for file_path in files:
+                    if not file_path.exists():
+                        continue
+                    kept_lines, file_removed_events, original_size = _filter_trace_file(
+                        file_path, removed_ids
+                    )
+                    if file_removed_events == 0:
+                        continue
+                    removed_events += file_removed_events
+                    new_text = "".join(kept_lines)
+                    bytes_reclaimed += original_size - len(new_text.encode("utf-8"))
+                    if dry_run:
+                        continue
+                    temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+                    temp_path.write_text(new_text, encoding="utf-8")
+                    staged.append((temp_path, file_path))
+                # Write every temp file before replacing any so the failure-prone
+                # step is done up front; an error here leaves all originals intact.
+                for temp_path, target_path in staged:
+                    temp_path.replace(target_path)
+            finally:
+                for temp_path, _ in staged:
+                    temp_path.unlink(missing_ok=True)
+
+            return _PruneResult(
+                removed_traces=removed_traces,
+                kept_traces=kept_traces,
+                removed_events=removed_events,
+                bytes_reclaimed=bytes_reclaimed,
+                dry_run=dry_run,
+            )
+
+
 def _events_endpoint(server_url: str) -> str:
     normalized_url = server_url.rstrip("/")
     if not normalized_url:

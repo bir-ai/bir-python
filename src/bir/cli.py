@@ -18,7 +18,15 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import __version__, _sdk
-from ._sdk import LoadedTrace, TraceEvent, _event_sort_key, load_events, load_traces, send_events
+from ._sdk import (
+    LoadedTrace,
+    TraceEvent,
+    _event_sort_key,
+    _prune_trace_store,
+    load_events,
+    load_traces,
+    send_events,
+)
 from .evals import (
     ExperimentExampleResult,
     ExperimentResult,
@@ -350,6 +358,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-export timeout in seconds forwarded to the OTLP exporter.",
     )
     export_otel.set_defaults(func=_cmd_export_otel)
+
+    prune = subparsers.add_parser(
+        "prune",
+        help="Remove old or unwanted whole traces from the local store (destructive; safe by default).",
+    )
+    prune.add_argument("--path", help="Trace JSONL file to prune (default: .bir/traces.jsonl).")
+    prune.add_argument(
+        "--include-rotated",
+        action="store_true",
+        help="Also prune size-rotated trace files (oldest first) alongside the active file.",
+    )
+    prune.add_argument(
+        "--before",
+        type=_iso_datetime,
+        metavar="ISO",
+        help=(
+            "Remove traces whose start time is before this ISO datetime "
+            "(naive values are treated as UTC)."
+        ),
+    )
+    prune.add_argument(
+        "--keep-last",
+        dest="keep_last",
+        type=_positive_int,
+        metavar="N",
+        help="Remove all but the N most recent traces (by start time).",
+    )
+    prune.add_argument(
+        "--status",
+        choices=("success", "error"),
+        help="Restrict removal to traces with this status.",
+    )
+    prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be removed without writing (this is the default without --yes).",
+    )
+    prune.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete the selected traces; without it (or with --dry-run) prune only previews.",
+    )
+    prune.set_defaults(func=_cmd_prune)
 
     return parser
 
@@ -888,6 +939,39 @@ def _cmd_export_otel(args: argparse.Namespace) -> int:
         print(f"bir: {exc}", file=sys.stderr)
         return 1
     print(f"exported {len(traces)} trace(s) ({exported} spans) to {args.endpoint}")
+    return 0
+
+
+def _cmd_prune(args: argparse.Namespace) -> int:
+    # Safe by default twice over: a bare ``bir prune`` with no selection filter is
+    # rejected so the store can never be wiped by accident, and even with a filter
+    # nothing is written unless ``--yes`` is given (``--dry-run`` always wins,
+    # forcing a preview), so a confirmation-free run only reports what it would do.
+    if args.before is None and args.keep_last is None and args.status is None:
+        print(
+            "bir: prune requires at least one selection filter "
+            "(--before, --keep-last, or --status)",
+            file=sys.stderr,
+        )
+        return 1
+
+    before = _as_aware_utc(args.before) if args.before is not None else None
+    write = args.yes and not args.dry_run
+    result = _prune_trace_store(
+        args.path,
+        include_rotated=args.include_rotated,
+        before=before,
+        keep_last=args.keep_last,
+        status=args.status,
+        dry_run=not write,
+    )
+    summary = (
+        f"removed={result.removed_traces} kept={result.kept_traces} "
+        f"events={result.removed_events} bytes={result.bytes_reclaimed}"
+    )
+    if result.dry_run:
+        summary += " (dry run; pass --yes to apply)"
+    print(summary)
     return 0
 
 

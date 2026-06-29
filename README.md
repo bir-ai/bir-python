@@ -49,6 +49,10 @@ indented tree of its spans, generations, tool calls, and scores, and `bir stats`
 summarizes trace counts, token usage, cost per currency, and latency (count, mean,
 and p95) for a quick cost or health check (and accepts the same `--name`,
 `--status`, `--since`, and `--until` filters as `bir traces` to summarize a subset).
+`bir prune` reclaims space by removing whole old or unwanted traces (`--before ISO`,
+`--keep-last N`, optionally restricted by `--status`); it is destructive but
+safe-by-default — it requires a selection filter and only previews unless you pass
+`--yes`, rewriting the store atomically under the same lock as appends.
 Add `--json` to any of them for a structured form. The
 same commands run as `python -m bir <command>` when the `bir` console script
 isn't on `PATH` (fresh venvs, `pipx run`, CI). See

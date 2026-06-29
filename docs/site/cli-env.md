@@ -14,6 +14,8 @@ bir show <trace-id> --json    # nested {event, children} JSON tree
 bir stats                     # summarize counts, tokens, cost, and latency
 bir stats --json              # the same figures as machine-readable JSON
 bir stats --status error --since 2026-01-01  # summarize a filtered subset
+bir prune --before 2026-01-01            # preview removing traces older than a date
+bir prune --keep-last 500 --yes          # keep only the 500 newest traces (writes)
 bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
 bir experiment-show <id>      # one experiment's summary and per-example scores
@@ -31,6 +33,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 | `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
 | `bir stats [--path P] [--include-rotated] [--json] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
+| `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
@@ -76,6 +79,26 @@ errors only, or usage since yesterday). Filters combine with AND and apply befor
 aggregation, so every figure — counts, tokens, cost, and latency — reflects only the
 matching traces. An empty filtered result still exits 0 with zeroed counts; with no
 filters the output is unchanged.
+
+`bir prune` is the **destructive** counterpart that reclaims space: it removes
+whole traces from the local store so a long-lived `.bir/traces.jsonl` (and its
+rotated siblings) does not grow without bound. It operates on whole traces and
+never splits one across the keep/drop boundary, rewriting each file via a temp
+file and atomic replace under the same advisory lock an append takes, so a
+concurrent writer can never interleave and a partial failure leaves the original
+file intact. Selection: `--before ISO` removes traces whose start time precedes
+the cutoff, `--keep-last N` removes all but the N most recent, and `--status
+{success,error}` restricts removal to that status (`--before` and `--keep-last`
+combine by union; `--status` is applied as a further restriction). It is **safe by
+default in two ways**: a bare `bir prune` with no selection filter is rejected so
+the store can never be wiped by accident, and even with a filter it only *previews*
+unless you pass `--yes` — without it (or with `--dry-run`, which always wins) it
+prints what it would remove and writes nothing. The summary is
+`removed=<traces> kept=<traces> events=<dropped> bytes=<reclaimed>` (a dry run adds
+`(dry run; pass --yes to apply)`). `--include-rotated` extends pruning to the
+size-rotated siblings; without it only the active file is rewritten. An empty store
+and a run that matches nothing both exit 0 and write nothing. Pruning never touches
+experiments, only traces.
 
 `bir export-otel` replays local traces to an OpenTelemetry/OTLP endpoint using
 the optional `otel` extra (`pip install 'bir-sdk[otel]'`), reading the same files
