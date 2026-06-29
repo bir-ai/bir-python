@@ -124,6 +124,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also read size-rotated trace files (oldest first) alongside the active file.",
     )
     stats.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
+    stats.add_argument(
+        "--name",
+        metavar="SUBSTRING",
+        help="Only list traces whose name contains this case-sensitive substring.",
+    )
+    stats.add_argument(
+        "--status",
+        choices=("success", "error"),
+        help="Only list traces with this status.",
+    )
+    stats.add_argument(
+        "--since",
+        type=_iso_datetime,
+        metavar="ISO",
+        help=(
+            "Only list traces whose start time is at or after this ISO datetime "
+            "(naive values are treated as UTC)."
+        ),
+    )
+    stats.add_argument(
+        "--until",
+        type=_iso_datetime,
+        metavar="ISO",
+        help=(
+            "Only list traces whose start time is at or before this ISO datetime "
+            "(naive values are treated as UTC)."
+        ),
+    )
     stats.set_defaults(func=_cmd_stats)
 
     tail = subparsers.add_parser("tail", help="Follow the trace file and print new events as they are written.")
@@ -532,6 +560,22 @@ def _format_usage(usage: dict[str, int | float]) -> str:
 def _cmd_stats(args: argparse.Namespace) -> int:
     traces = load_traces(args.path, include_rotated=args.include_rotated)
     events = load_events(args.path, include_rotated=args.include_rotated)
+
+    if any(value is not None for value in (args.name, args.status, args.since, args.until)):
+        traces = _filter_traces(
+            traces,
+            name=args.name,
+            status=args.status,
+            since=args.since,
+            until=args.until,
+        )
+        # Restrict token/cost aggregation to events belonging to the surviving
+        # traces. This branch only runs when a filter was given, so the no-filter
+        # path keeps aggregating the full event list (including events whose trace
+        # root is absent, e.g. split across an unread rotated file) byte for byte.
+        surviving_ids = {trace.id for trace in traces}
+        events = [event for event in events if event.trace_id in surviving_ids]
+
     stats = _aggregate_stats(traces, events)
 
     if args.json:

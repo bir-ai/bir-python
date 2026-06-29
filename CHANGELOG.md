@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir stats` now accepts the same `--name`, `--status`, `--since`, and `--until`
+  filters as `bir traces`, with identical semantics (case-sensitive name substring,
+  exact status, inclusive ISO 8601 start-time bounds with naive values treated as
+  UTC, malformed timestamps exiting non-zero). Filters combine with AND and apply
+  before aggregation, so every figure — counts, tokens, cost, and latency, in both
+  the table and `--json` — reflects only the matching traces. An empty filtered
+  result exits 0 with zeroed counts, and `bir stats` with no filters is unchanged.
+  CLI-only; no schema (`schema_version` stays `1.0`) or fixture change.
+
 - `BirAutoGenHandler` (`bir.integrations.autogen`) bridges **AutoGen (AG2)**
   multi-agent runs into Bir traces without importing `autogen` / `ag2`. It
   implements AG2's runtime-logging `BaseLogger` interface by method name, so

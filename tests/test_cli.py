@@ -723,6 +723,132 @@ class StatsCommandTests(CliBaseTest):
             self.assertEqual(json.loads(out)["traces"]["total"], 2)
 
 
+class StatsFilterTests(CliBaseTest):
+    """The stats filters share ``bir traces`` semantics and bound the input set."""
+
+    def test_status_filter_narrows_aggregation(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            # Only the single error trace survives; it carries no generation, so
+            # tokens and cost zero out while the error count stays 1.
+            code, out, err = run_cli("stats", "--path", str(trace_path), "--status", "error", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"], {"total": 1, "success": 0, "error": 1})
+            self.assertEqual(payload["tokens"], {"input": 0, "output": 0, "total": 0})
+            self.assertEqual(payload["cost"], [])
+            self.assertEqual(payload["latency_ms"]["count"], 1)
+
+            # The two successful traces keep every generation's tokens and cost,
+            # and the table view honors the same filter.
+            code, table, _ = run_cli("stats", "--path", str(trace_path), "--status", "success")
+            self.assertEqual(code, 0)
+            rows = stats_table_map(table)
+            self.assertEqual(rows["traces"], "2")
+            self.assertEqual(rows["success"], "2")
+            self.assertEqual(rows["error"], "0")
+            self.assertEqual(rows["total_tokens"], "60")
+            self.assertEqual(rows["cost[USD]"], "input=0.002000 output=0.004000 total=0.006000")
+
+    def test_name_filter_is_case_sensitive_substring(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            # "ok" matches the two successful traces; the error trace is named "boom".
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--name", "ok", "--json")
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"]["total"], 2)
+            self.assertEqual(payload["tokens"]["total"], 60)
+
+            # Matching is case-sensitive, so "OK" selects nothing and zeroes out.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--name", "OK", "--json")
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"]["total"], 0)
+            self.assertEqual(payload["tokens"]["total"], 0)
+
+    def test_since_and_until_bound_start_time(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+            loaded = sorted(bir.load_traces(trace_path), key=lambda trace: trace.start_time)
+
+            # An inclusive lower bound at the last (error) trace's start keeps only it.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--since", loaded[-1].start_time, "--json")
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"]["total"], 1)
+            self.assertEqual(payload["tokens"]["total"], 0)
+
+            # An upper bound at the second trace's start keeps the two successful traces.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--until", loaded[1].start_time, "--json")
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["traces"]["total"], 2)
+            self.assertEqual(payload["tokens"]["total"], 60)
+
+    def test_filters_combine_with_and(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_filterable_traces(trace_path)
+
+            # "checkout" matches two traces but only one is successful, so the AND
+            # of both filters aggregates exactly that one trace.
+            code, out, _ = run_cli(
+                "stats",
+                "--path",
+                str(trace_path),
+                "--name",
+                "checkout",
+                "--status",
+                "success",
+                "--json",
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["traces"], {"total": 1, "success": 1, "error": 0})
+
+    def test_empty_filter_result_exits_zero_with_zeroed_output(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            code, out, err = run_cli("stats", "--path", str(trace_path), "--name", "absent", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(
+                json.loads(out),
+                {
+                    "cost": [],
+                    "latency_ms": {"count": 0, "mean": None, "p95": None},
+                    "tokens": {"input": 0, "output": 0, "total": 0},
+                    "traces": {"total": 0, "success": 0, "error": 0},
+                },
+            )
+
+    def test_rejects_malformed_since(self) -> None:
+        with temporary_workdir() as workdir:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("stats", "--path", str(workdir / "traces.jsonl"), "--since", "not-a-date")
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_match_all_filter_is_byte_identical_to_no_filter(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_stats_traces(trace_path)
+
+            _code, baseline, _err = run_cli("stats", "--path", str(trace_path), "--json")
+            # A bound past every start time keeps every trace, so the filtered
+            # figures stay byte-identical to the unfiltered run.
+            code, out, _ = run_cli("stats", "--path", str(trace_path), "--until", "2999-01-01", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual(out, baseline)
+
+
 class AggregateStatsTests(unittest.TestCase):
     """Unit-level coverage of the aggregation helper with controlled inputs."""
 

@@ -13,6 +13,7 @@ bir show <trace-id>           # print one trace as an indented event tree
 bir show <trace-id> --json    # nested {event, children} JSON tree
 bir stats                     # summarize counts, tokens, cost, and latency
 bir stats --json              # the same figures as machine-readable JSON
+bir stats --status error --since 2026-01-01  # summarize a filtered subset
 bir tail                      # follow the local trace file
 bir experiments               # list local experiments and scores
 bir experiment-show <id>      # one experiment's summary and per-example scores
@@ -29,7 +30,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 | --- | --- |
 | `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
-| `bir stats [--path P] [--include-rotated] [--json]` | Summarize trace counts, token usage, cost per currency, and latency. |
+| `bir stats [--path P] [--include-rotated] [--json] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
@@ -68,6 +69,13 @@ figures as a deterministic object for scripts. An empty store exits 0 with zeroe
 counts and `-` latency. Latency is read from each trace's root duration, so partial
 traces split across rotated files are counted only when `--include-rotated` brings
 in their root.
+
+`bir stats` accepts the same `--name`, `--status`, `--since`, and `--until` filters
+as `bir traces`, with identical semantics, so you can summarize a subset (e.g.
+errors only, or usage since yesterday). Filters combine with AND and apply before
+aggregation, so every figure — counts, tokens, cost, and latency — reflects only the
+matching traces. An empty filtered result still exits 0 with zeroed counts; with no
+filters the output is unchanged.
 
 `bir export-otel` replays local traces to an OpenTelemetry/OTLP endpoint using
 the optional `otel` extra (`pip install 'bir-sdk[otel]'`), reading the same files

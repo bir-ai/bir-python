@@ -47,8 +47,9 @@ traces (filter with `--name`, `--status {success,error}`, and
 `--since`/`--until` ISO timestamps), `bir show <trace-id>` prints one trace as an
 indented tree of its spans, generations, tool calls, and scores, and `bir stats`
 summarizes trace counts, token usage, cost per currency, and latency (count, mean,
-and p95) for a quick cost or health check (add `--json` to any of them for a
-structured form). The
+and p95) for a quick cost or health check (and accepts the same `--name`,
+`--status`, `--since`, and `--until` filters as `bir traces` to summarize a subset).
+Add `--json` to any of them for a structured form. The
 same commands run as `python -m bir <command>` when the `bir` console script
 isn't on `PATH` (fresh venvs, `pipx run`, CI). See
 [CLI & environment](docs/site/cli-env.md).
