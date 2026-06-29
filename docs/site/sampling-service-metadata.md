@@ -93,6 +93,37 @@ Set the same default from the environment with:
 export BIR_SAMPLE_RATE=0.1
 ```
 
+## Disabling tracing
+
+`sample_rate=0.0` drops every trace, but the clearer way to turn recording off
+entirely is the master switch `enabled`. It is an explicit, intent-revealing
+kill switch for a feature flag, an incident toggle, or a test:
+
+```python
+from bir import configure
+
+configure(enabled=False)  # record nothing
+configure(enabled=True)   # restore full recording
+```
+
+While disabled, every primitive — `@observe`, `trace`, `span`, `generation`,
+`tool_call`, `retrieval`, and `score` — still runs your code and still raises on
+error, but nothing is written, making Bir a true no-op without touching any call
+site. The switch is enforced through the same path as sampling, so a trace
+already in flight when recording is disabled stops writing immediately, and
+re-enabling records traces started afterward. `get_current_trace_id()` and
+`get_current_span_id()` still return the live ids inside a trace while disabled,
+so log correlation keeps working even though nothing is persisted.
+
+Set the same default from the environment with the inverse `BIR_DISABLED`
+variable (a truthy value disables recording):
+
+```bash
+export BIR_DISABLED=1
+```
+
+An explicit `configure(enabled=...)` always wins over `BIR_DISABLED`.
+
 ## Trace file rotation
 
 The local trace file grows without bound by default. Opt in to size-based

@@ -143,6 +143,7 @@ Bir reads these variables once when the `bir` package is imported:
 | `BIR_TRACE_PATH` | Local trace JSONL path. | `.bir/traces.jsonl` |
 | `BIR_CAPTURE_INPUTS` | Enable input capture. | `false` |
 | `BIR_CAPTURE_OUTPUTS` | Enable output capture. | `false` |
+| `BIR_DISABLED` | Master kill switch: a truthy value records nothing (inverse of `enabled`). | `false` |
 | `BIR_SAMPLE_RATE` | Trace recording probability from `0.0` to `1.0`. | `1.0` |
 | `BIR_SERVICE_NAME` | Service name on trace roots. | unset |
 | `BIR_ENVIRONMENT` | Deployment environment on trace roots. | unset |
@@ -154,6 +155,7 @@ Bir reads these variables once when the `bir` package is imported:
 export BIR_TRACE_PATH=/var/log/bir/traces.jsonl
 export BIR_CAPTURE_INPUTS=false
 export BIR_CAPTURE_OUTPUTS=false
+export BIR_DISABLED=0
 export BIR_SAMPLE_RATE=0.1
 export BIR_SERVICE_NAME=rag-api
 export BIR_ENVIRONMENT=production
@@ -163,7 +165,11 @@ export BIR_MAX_COLLECTION_ITEMS=100
 ```
 
 Boolean values accept `1`, `true`, `yes`, and `on`, or `0`, `false`, `no`, and
-`off`, case-insensitively. `BIR_MAX_VALUE_LENGTH` and `BIR_MAX_COLLECTION_ITEMS`
+`off`, case-insensitively. `BIR_DISABLED` is the master kill switch and the
+inverse of the `enabled` setting: a truthy value turns all recording off (every
+primitive still runs your code and still raises, but nothing is written), while
+an explicit `configure(enabled=...)` always wins over it. `BIR_MAX_VALUE_LENGTH`
+and `BIR_MAX_COLLECTION_ITEMS`
 take a non-negative integer and bound captured values only (truncating after
 redaction); see [Capture & Privacy](capture-privacy.md#limiting-capture-size).
 Invalid values raise a configuration error.

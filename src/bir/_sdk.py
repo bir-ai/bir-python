@@ -126,6 +126,13 @@ class _Config:
     # server/dashboard filter on by exact match, giving SDK callers a first-class
     # way to tag where a trace came from. ``None`` records nothing.
     source: str | None = None
+    # Master on/off switch for all recording. When False, every primitive still
+    # runs the user's body and still propagates exceptions, but nothing is ever
+    # written — an explicit, intent-revealing kill switch (feature flag, incident
+    # toggle, tests) enforced through the same "trace dropped" path as sampling
+    # (see ``_should_drop_trace`` and ``_write_event``) so the contract matches
+    # exactly. Defaults to True, so untouched behavior is byte-for-byte unchanged.
+    enabled: bool = True
     sample_rate: float = 1.0
     # Optional exact trace-root-name sampling overrides. Empty by default so the
     # global ``sample_rate`` remains the only sampling input unless a caller opts
@@ -340,6 +347,7 @@ def configure(
     service_name: str | None = None,
     environment: str | None = None,
     source: str | None = None,
+    enabled: bool | None = None,
     sample_rate: float | None = None,
     sample_rules: Mapping[str, float] | None = None,
     max_bytes: int | None = None,
@@ -364,10 +372,26 @@ def configure(
     block still wins over this configured default. Defaults to ``None`` (no source
     recorded).
 
+    ``enabled`` is the master on/off switch for all recording. The default
+    ``True`` keeps every primitive recording as configured. Set it to ``False``
+    for an explicit, intent-revealing kill switch (a feature flag, an incident
+    toggle, a test): ``@observe``, ``trace``/``span``/``generation``/
+    ``tool_call``/``retrieval``, and ``score`` all still run the wrapped code and
+    still propagate exceptions, but nothing is ever written, making Bir a true
+    no-op without touching call sites. It is enforced through the same path as
+    sampling, so a trace already in flight when recording is disabled stops
+    writing immediately, and ``configure(enabled=True)`` restores full recording
+    for traces started afterward. ``get_current_trace_id()`` /
+    ``get_current_span_id()`` still return the live in-process ids inside a trace
+    while disabled (matching a sampled-out trace), so log correlation keeps
+    working even though nothing is persisted.
+
     ``sample_rate`` is the probability (``0.0`` to ``1.0``) that a trace is
     recorded. It is decided once per trace root; when a trace is sampled out the
     function still runs and still raises, but the trace and every event under it
-    write nothing. The default ``1.0`` records every trace.
+    write nothing. The default ``1.0`` records every trace. ``sample_rate`` only
+    applies while ``enabled`` is ``True``; ``enabled=False`` turns everything off
+    regardless of the rate.
 
     ``sample_rules`` is an opt-in mapping of exact trace root name to a sampling
     rate for that root. A matching rule overrides the global ``sample_rate``; an
@@ -449,11 +473,15 @@ def configure(
 
     Any field left unset falls back to the value supplied by the matching
     environment variable (``BIR_TRACE_PATH``, ``BIR_CAPTURE_INPUTS``,
-    ``BIR_CAPTURE_OUTPUTS``, ``BIR_SAMPLE_RATE``, ``BIR_SERVICE_NAME``,
-    ``BIR_ENVIRONMENT``, ``BIR_SOURCE``, ``BIR_MAX_VALUE_LENGTH``,
-    ``BIR_MAX_COLLECTION_ITEMS``), which is read once at import time, and
-    otherwise to the hardcoded default. Explicit arguments to this function take
-    precedence over the environment.
+    ``BIR_CAPTURE_OUTPUTS``, ``BIR_DISABLED``, ``BIR_SAMPLE_RATE``,
+    ``BIR_SERVICE_NAME``, ``BIR_ENVIRONMENT``, ``BIR_SOURCE``,
+    ``BIR_MAX_VALUE_LENGTH``, ``BIR_MAX_COLLECTION_ITEMS``), which is read once at
+    import time, and otherwise to the hardcoded default. A truthy ``BIR_DISABLED``
+    sets ``enabled=False`` (it is the inverse of the ``enabled`` field, so the
+    common "turn it off in production" case is a single boolean variable).
+    Explicit arguments to this function take precedence over the environment, so
+    ``configure(enabled=True)`` re-enables recording even when ``BIR_DISABLED`` is
+    set.
     """
 
     global _config
@@ -471,6 +499,8 @@ def configure(
         updates["environment"] = _validate_event_name(environment, "environment")
     if source is not None:
         updates["source"] = _validate_event_name(source, "source")
+    if enabled is not None:
+        updates["enabled"] = _validate_bool(enabled, "enabled")
     if sample_rate is not None:
         updates["sample_rate"] = _validate_sample_rate(sample_rate)
     if sample_rules is not None:
@@ -1333,6 +1363,9 @@ def get_current_trace_id() -> str | None:
     recorded while this trace is active, so an application log stamped with it can
     later be correlated with the trace. Read from a task-local context, so each
     asyncio task and thread observes its own active trace and never another's.
+    While recording is disabled (``configure(enabled=False)``) or the trace was
+    sampled out, this still returns the live id inside the trace so log
+    correlation keeps working even though nothing is persisted.
     """
 
     return _current_trace_id.get()
@@ -1346,7 +1379,9 @@ def get_current_span_id() -> str | None:
     trace root's id. The value is the same id written to the ``parent_id`` field
     of any child event created at this point, so it names what an event recorded
     now would attach to. Read from a task-local context, so each asyncio task and
-    thread observes its own ids and never another's.
+    thread observes its own ids and never another's. Like
+    :func:`get_current_trace_id`, this still returns the live id while recording
+    is disabled or the trace was sampled out, so log correlation is unaffected.
     """
 
     return _current_parent_id.get()
@@ -1991,6 +2026,11 @@ def _service_metadata() -> dict[str, str] | None:
 
 
 def _write_event(event: dict[str, Any]) -> None:
+    # The master ``enabled`` switch short-circuits every write, so disabling
+    # recording mid-trace (an incident toggle) stops even a trace that was
+    # already sampled in, and any direct writer (``score``) is covered too.
+    if not _config.enabled:
+        return
     # Child events (spans, generations, tool calls, scores) run while the root's
     # contextvar is still active, so dropping them is centralized here. Trace
     # roots reset their contextvars before writing, so they check their own
@@ -2414,6 +2454,9 @@ def _should_capture(override: bool | None, target: str) -> bool:
 def _should_drop_trace(trace_name: str) -> bool:
     """Decide whether the trace starting now should be sampled out.
 
+    The master ``enabled`` switch is checked first: when recording is disabled
+    every trace root is dropped (and its descendants inherit the decision), so a
+    single flag turns all recording off without re-rolling sampling. Otherwise
     ``sample_rate`` is the probability of keeping a trace. An exact-name
     ``sample_rules`` entry overrides the global rate for the matching trace root;
     otherwise the global rate applies. The deterministic edges (``1.0`` keeps
@@ -2421,6 +2464,8 @@ def _should_drop_trace(trace_name: str) -> bool:
     partial rates draw from ``random.random()``.
     """
 
+    if not _config.enabled:
+        return True
     sample_rate = _sample_rate_for_trace(trace_name)
     if sample_rate >= 1.0:
         return False
@@ -2742,6 +2787,14 @@ def _validate_event_name(value: Any, field: str) -> str:
         raise TypeError(f"bir {field} must be a string")
     if not value:
         raise ValueError(f"bir {field} must not be empty")
+    return value
+
+
+def _validate_bool(value: Any, field: str) -> bool:
+    # Reject ints (and everything else): ``enabled`` is a strict on/off switch,
+    # so ``1``/``0`` or a truthy string must not silently pass as a bool.
+    if not isinstance(value, bool):
+        raise TypeError(f"bir {field} must be a bool")
     return value
 
 
@@ -3079,6 +3132,7 @@ def _config_from_env() -> _Config:
     service_name = _env_value("BIR_SERVICE_NAME")
     environment = _env_value("BIR_ENVIRONMENT")
     source = _env_value("BIR_SOURCE")
+    disabled = _env_value("BIR_DISABLED")
     sample_rate = _env_value("BIR_SAMPLE_RATE")
     max_value_length = _env_value("BIR_MAX_VALUE_LENGTH")
     max_collection_items = _env_value("BIR_MAX_COLLECTION_ITEMS")
@@ -3108,6 +3162,14 @@ def _config_from_env() -> _Config:
             _validate_event_name(source, "BIR_SOURCE")
             if source is not None
             else defaults.source
+        ),
+        # ``BIR_DISABLED`` is the inverse of the ``enabled`` field: a truthy value
+        # disables all recording. Parsed with the shared boolean parser so it
+        # rejects the same ambiguous values as the other BIR_* booleans.
+        enabled=(
+            not _parse_env_bool(disabled, "BIR_DISABLED")
+            if disabled is not None
+            else defaults.enabled
         ),
         sample_rate=(
             _parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate

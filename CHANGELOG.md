@@ -10,6 +10,24 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- A master tracing kill switch: `configure(enabled=False)` (and the inverse
+  `BIR_DISABLED` environment variable) turns **all** recording off cleanly while
+  user code runs unchanged. `@observe`, `trace`/`span`/`generation`/`tool_call`/
+  `retrieval`, and `score` still run the wrapped body and still propagate
+  exceptions, but nothing is written — an explicit, intent-revealing alternative
+  to the implicit `sample_rate=0.0` workaround for feature flags, incident
+  toggles, and tests. It is enforced through the same "trace dropped" path as
+  sampling: a trace already in flight when recording is disabled stops writing
+  immediately, and `configure(enabled=True)` restores full recording for traces
+  started afterward. `get_current_trace_id()` / `get_current_span_id()` still
+  return the live in-process ids inside a trace while disabled, so log
+  correlation keeps working even though nothing is persisted. `enabled` defaults
+  to `True`, so untouched behavior is byte-for-byte unchanged; a truthy
+  `BIR_DISABLED` (`1`/`true`/`yes`/`on`) sets `enabled=False` at import and an
+  explicit `configure(enabled=...)` always wins over it. Dependency-free
+  (`dependencies = []`), no schema (`schema_version` stays `1.0`) or fixture
+  change.
+
 - `bir stats` now accepts the same `--name`, `--status`, `--since`, and `--until`
   filters as `bir traces`, with identical semantics (case-sensitive name substring,
   exact status, inclusive ISO 8601 start-time bounds with naive values treated as

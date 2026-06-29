@@ -41,6 +41,7 @@ _BIR_ENV_VARS = (
     "BIR_TRACE_PATH",
     "BIR_CAPTURE_INPUTS",
     "BIR_CAPTURE_OUTPUTS",
+    "BIR_DISABLED",
     "BIR_SAMPLE_RATE",
     "BIR_SERVICE_NAME",
     "BIR_ENVIRONMENT",
@@ -4238,6 +4239,164 @@ for batch in range(int(batches)):
                 sample_rules={f"trace-{index}": 1.0 for index in range(_MAX_SAMPLE_RULES + 1)}
             )
 
+    def test_enabled_defaults_to_true(self) -> None:
+        self.assertTrue(_Config().enabled)
+
+    def test_disabled_drops_every_primitive_but_runs_user_code(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(enabled=False, capture_inputs=True, capture_outputs=True)
+
+            calls: list[str] = []
+
+            @observe(capture_inputs=True, capture_outputs=True)
+            def answer(question: str) -> str:
+                calls.append(question)
+                with span("retrieve_context"):
+                    with tool_call("search_docs", input={"query": question}) as tool:
+                        tool.set_output(["doc-1"])
+                    with retrieval("vector_search", query=question) as result:
+                        result.add_document(id="doc-1")
+                with generation("local.llm", model="demo") as gen:
+                    gen.set_output("ok")
+                score("helpfulness", 0.9)
+                return "ok"
+
+            # The body still runs and returns; only the writes are skipped.
+            self.assertEqual(answer("hello"), "ok")
+            self.assertEqual(calls, ["hello"])
+
+            # A manual trace/span/score block writes nothing either.
+            with trace("manual_workflow"):
+                with span("inner"):
+                    score("quality", 1.0)
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_disabled_still_runs_and_reraises_user_exception(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(enabled=False)
+
+            @observe()
+            def fail() -> None:
+                with span("explode"):
+                    raise ValueError("boom")
+
+            with self.assertRaisesRegex(ValueError, "boom"):
+                fail()
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_disabled_drops_async_observe_but_still_runs(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(enabled=False)
+
+            @observe()
+            async def answer(question: str) -> str:
+                await asyncio.sleep(0)
+                async with span("retrieve_context"):
+                    score("helpfulness", 0.9)
+                return "ok"
+
+            self.assertEqual(asyncio.run(answer("hello")), "ok")
+
+            self.assertFalse((workdir / ".bir" / "traces.jsonl").exists())
+            self.assertEqual(load_events(), [])
+
+    def test_disabled_keeps_live_trace_ids_for_log_correlation(self) -> None:
+        with temporary_workdir():
+            configure(enabled=False)
+
+            seen: dict[str, str | None] = {}
+
+            @observe()
+            def answer() -> None:
+                seen["trace"] = get_current_trace_id()
+                with span("inner"):
+                    seen["span"] = get_current_span_id()
+
+            answer()
+
+            # Ids are live inside the trace even though nothing is persisted, so
+            # an application log stamped with them still correlates later.
+            self.assertIsNotNone(seen["trace"])
+            self.assertIsNotNone(seen["span"])
+            self.assertEqual(load_events(), [])
+            # Outside any trace the accessors stay None, disabled or not.
+            self.assertIsNone(get_current_trace_id())
+            self.assertIsNone(get_current_span_id())
+
+    def test_disabling_mid_trace_stops_writes_for_sampled_in_root(self) -> None:
+        with temporary_workdir():
+            configure(enabled=True)
+
+            # An incident toggle flipped while a trace is in flight stops every
+            # write, including the already-open root's terminal event.
+            with trace("t1"):
+                with span("s1"):
+                    configure(enabled=False)
+                    score("q", 0.5)
+
+            self.assertEqual(load_events(), [])
+
+    def test_reenabling_records_new_traces_fully(self) -> None:
+        with temporary_workdir():
+            configure(enabled=False)
+
+            @observe()
+            def disabled_run() -> str:
+                with span("inner"):
+                    score("quality", 0.9)
+                return "off"
+
+            disabled_run()
+            self.assertEqual(load_events(), [])
+
+            configure(enabled=True)
+
+            @observe(name="enabled_run")
+            def enabled_run() -> str:
+                with span("inner"):
+                    score("quality", 0.9)
+                return "on"
+
+            enabled_run()
+
+            self.assertEqual(
+                sorted((event.type, event.name) for event in load_events()),
+                [
+                    ("score", "quality"),
+                    ("span", "inner"),
+                    ("trace", "enabled_run"),
+                ],
+            )
+
+    def test_explicit_configure_overrides_env_disabled(self) -> None:
+        import bir._sdk as sdk
+
+        with temporary_workdir():
+            with env_vars(BIR_DISABLED="1"):
+                # Install the env-derived config the way import time would, so the
+                # process starts with recording disabled by BIR_DISABLED.
+                sdk._config = _config_from_env()
+                self.assertFalse(sdk._config.enabled)
+
+                # Explicit configure(enabled=True) wins over the env default.
+                configure(enabled=True)
+
+                @observe(name="job")
+                def job() -> str:
+                    return "ok"
+
+                job()
+                self.assertEqual([trace.name for trace in load_traces()], ["job"])
+
+    def test_configure_rejects_non_bool_enabled(self) -> None:
+        for bad in (1, 0, "yes", 1.0):
+            with self.assertRaisesRegex(TypeError, "enabled"):
+                configure(enabled=cast(Any, bad))
+
     def test_config_from_env_with_nothing_set_matches_hardcoded_defaults(self) -> None:
         with env_vars():
             self.assertEqual(_config_from_env(), _Config())
@@ -4263,6 +4422,29 @@ for batch in range(int(batches)):
         with env_vars(BIR_SAMPLE_RATE="0.25"):
             config = _config_from_env()
         self.assertEqual(config.sample_rate, 0.25)
+
+    def test_env_disabled_truthy_disables_recording(self) -> None:
+        for value in ("1", "true", "yes", "on"):
+            with env_vars(BIR_DISABLED=value):
+                config = _config_from_env()
+            self.assertFalse(config.enabled, f"BIR_DISABLED={value!r} should disable")
+
+    def test_env_disabled_falsey_keeps_recording_enabled(self) -> None:
+        for value in ("0", "false", "no", "off"):
+            with env_vars(BIR_DISABLED=value):
+                config = _config_from_env()
+            self.assertTrue(config.enabled, f"BIR_DISABLED={value!r} should stay enabled")
+
+    def test_env_disabled_unset_or_blank_defaults_to_enabled(self) -> None:
+        with env_vars(BIR_SERVICE_NAME="rag-api"):
+            self.assertTrue(_config_from_env().enabled)
+        with env_vars(BIR_DISABLED="   "):
+            self.assertTrue(_config_from_env().enabled)
+
+    def test_env_invalid_disabled_raises_clear_error(self) -> None:
+        with env_vars(BIR_DISABLED="maybe"):
+            with self.assertRaisesRegex(ValueError, "BIR_DISABLED"):
+                _config_from_env()
 
     def test_env_service_name_and_environment_set_defaults(self) -> None:
         with env_vars(BIR_SERVICE_NAME="  rag-api  ", BIR_ENVIRONMENT="production"):

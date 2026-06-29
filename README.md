@@ -96,6 +96,33 @@ configure(
 Passing `sample_rules={}` clears the overrides; omitting `sample_rules` in a
 later `configure()` call leaves the current rules unchanged.
 
+## Disabling tracing
+
+For an explicit kill switch — a feature flag, an incident toggle, or a test —
+pass `enabled=False` instead of leaning on `sample_rate=0.0`. Every primitive
+(`@observe`, `trace`, `span`, `generation`, `tool_call`, `retrieval`, and
+`score`) still runs your code and still raises on error, but nothing is written,
+so Bir becomes a true no-op without touching any call site.
+
+```python
+from bir import configure
+
+configure(enabled=False)  # record nothing; configure(enabled=True) turns it back on
+```
+
+The same switch is available as the `BIR_DISABLED` environment variable, so a
+deployment can turn recording off without a code change. A truthy value
+(`1`/`true`/`yes`/`on`) disables recording at import:
+
+```bash
+export BIR_DISABLED=1
+```
+
+An explicit `configure(enabled=...)` always wins over `BIR_DISABLED`. While
+disabled, `get_current_trace_id()` / `get_current_span_id()` still return the
+live ids inside a trace, so log correlation keeps working even though nothing is
+persisted.
+
 ## Correlating your logs with traces
 
 The easy path is the `bir.logging` filter. Attach `BirTraceIdFilter` once (the

@@ -24,13 +24,15 @@ are done and intentionally not re-proposed:
   RECORD hashes, asserts forbidden local paths are excluded, smoke-installs into a
   clean venv, and verifies the console script.
 - **Env-var config** — `BIR_TRACE_PATH`, `BIR_CAPTURE_INPUTS`,
-  `BIR_CAPTURE_OUTPUTS`, `BIR_SAMPLE_RATE`, `BIR_SERVICE_NAME`, `BIR_ENVIRONMENT`,
-  `BIR_SOURCE`, `BIR_MAX_VALUE_LENGTH`, `BIR_MAX_COLLECTION_ITEMS`.
+  `BIR_CAPTURE_OUTPUTS`, `BIR_DISABLED`, `BIR_SAMPLE_RATE`, `BIR_SERVICE_NAME`,
+  `BIR_ENVIRONMENT`, `BIR_SOURCE`, `BIR_MAX_VALUE_LENGTH`,
+  `BIR_MAX_COLLECTION_ITEMS`.
 - **CLI** — `traces` (with `--name/--status/--since/--until`), `show`, `stats`,
   `tail`, `experiments`, `experiment-show`, `experiment-report`, `send` (with
   `--mark-sent/--retries/--backoff/--timeout`), `send-experiment`, `eval-gate`,
   `export-otel`, `--version`.
-- **Sampling** — global `sample_rate` **and** exact-name `sample_rules` overrides.
+- **Sampling** — global `sample_rate` **and** exact-name `sample_rules` overrides,
+  plus a master `enabled` kill switch (`BIR_DISABLED`) that turns all recording off.
 - **Persistence** — size rotation (`max_bytes`/`backup_count`), `include_rotated`
   on loaders / `send`, in-process + advisory cross-process file locks
   (POSIX `flock` / Windows `msvcrt`), opt-in `mark_sent` sidecar.

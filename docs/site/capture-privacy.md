@@ -16,6 +16,12 @@ def answer(question: str) -> str:
 Capture stays disabled unless an environment variable, a `configure()` call,
 or a per-observation/per-event argument explicitly enables it.
 
+To stop recording entirely — no traces, spans, generations, tool calls,
+retrievals, or scores written at all — use the master switch `configure(enabled=False)`
+or set `BIR_DISABLED=1`. Your code still runs and still raises; Bir simply
+becomes a no-op. See [Disabling tracing](sampling-service-metadata.md#disabling-tracing)
+for how it relates to sampling.
+
 ## Redaction
 
 Before captured events are written, Bir redacts common secret-like fields such
