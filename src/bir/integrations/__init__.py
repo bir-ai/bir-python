@@ -18,6 +18,10 @@ from .langchain import BirCallbackHandler
 from .llamaindex import BirLlamaIndexHandler
 from .litellm import trace_completion, trace_completion_async
 from .mistral import trace_chat, trace_chat_async
+from .ollama import trace_chat as trace_ollama_chat
+from .ollama import trace_chat_async as trace_ollama_chat_async
+from .ollama import trace_generate as trace_ollama_generate
+from .ollama import trace_generate_async as trace_ollama_generate_async
 from .openai import (
     trace_chat_completion,
     trace_chat_completion_async,
@@ -58,6 +62,10 @@ __all__ = [
     "trace_completion_async",
     "trace_chat",
     "trace_chat_async",
+    "trace_ollama_chat",
+    "trace_ollama_chat_async",
+    "trace_ollama_generate",
+    "trace_ollama_generate_async",
     "trace_chat_completion",
     "trace_chat_completion_async",
     "trace_response",

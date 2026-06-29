@@ -60,6 +60,8 @@ The async wrappers, by provider:
 | Mistral | `bir.integrations.mistral` | `trace_chat_async` |
 | Cohere | `bir.integrations.cohere` | `trace_chat_async` |
 | LiteLLM | `bir.integrations.litellm` | `trace_completion_async` |
+| Ollama chat | `bir.integrations.ollama` | `trace_chat_async` |
+| Ollama generate | `bir.integrations.ollama` | `trace_generate_async` |
 | Instructor | `bir.integrations.instructor` | `trace_create_async` |
 | DSPy | `bir.integrations.dspy` | `trace_lm_async` |
 | AWS Bedrock Converse | `bir.integrations.bedrock` | `trace_converse_async` |
@@ -317,6 +319,48 @@ The wrapper reads the OpenAI-shaped response and derives a provider metadata
 hint from the model prefix before `/`. With `stream=True` the wrapper returns a
 lazy iterable that yields the OpenAI-shaped chunks unchanged and records the
 accumulated text and final usage after the stream is consumed.
+
+## Ollama
+
+[Ollama](https://ollama.com/) is the canonical local LLM runtime. Its two surfaces
+return different response shapes, so Bir ships a wrapper for each: `trace_chat` for
+`ollama.chat` and `trace_generate` for `ollama.generate`. Both accept either the
+module-level functions or a client's `.chat`/`.generate` methods; the `ollama`
+package is never imported.
+
+```python
+import ollama
+from bir import trace
+from bir.integrations.ollama import trace_chat, trace_generate
+
+with trace("chat"):
+    response = trace_chat(
+        ollama.chat,
+        model="llama3.2:1b",
+        messages=[{"role": "user", "content": "What is Bir?"}],
+    )
+
+with trace("generate"):
+    response = trace_generate(
+        ollama.generate,
+        model="llama3.2:1b",
+        prompt="What is Bir?",
+    )
+```
+
+The wrappers record the response `model`, the assistant text (`message.content` for
+chat, `response` for generate), and token usage from the top-level
+`prompt_eval_count` (input) and `eval_count` (output), deriving the total. With
+`stream=True` each returns a lazy iterable that yields Ollama's chunks unchanged and
+accumulates the output from each chunk's `message.content` (chat) or `response`
+(generate) delta, reading the final usage from the terminal `done` chunk after the
+stream is consumed.
+
+For the async `ollama.AsyncClient`, use `trace_chat_async` and
+`trace_generate_async`. They are re-exported from `bir.integrations` as
+`trace_ollama_chat`, `trace_ollama_chat_async`, `trace_ollama_generate`, and
+`trace_ollama_generate_async` to avoid colliding with the Mistral and Cohere
+`trace_chat` wrappers.
 
 ## Instructor
 

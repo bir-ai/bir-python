@@ -47,6 +47,7 @@ REQUIRED_PACKAGE_FILES = {
     "bir/integrations/litellm.py",
     "bir/integrations/llamaindex.py",
     "bir/integrations/mistral.py",
+    "bir/integrations/ollama.py",
     "bir/integrations/openai.py",
     "bir/integrations/openai_agents.py",
     "bir/integrations/otel.py",

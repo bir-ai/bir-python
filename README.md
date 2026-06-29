@@ -332,7 +332,14 @@ model and token usage from the raw completion regardless of whether Instructor
 returns the parsed model directly or a `(parsed_model, completion)` tuple. For
 [DSPy](https://dspy.ai/) programs, `trace_lm` (and the async `trace_lm_async`)
 wraps a `dspy.LM` instance's request method (`lm.forward`/`lm.aforward`) and
-records model and token usage from the LiteLLM-style response. AWS Bedrock's Converse stream is a distinct method rather
+records model and token usage from the LiteLLM-style response. For the local
+[Ollama](https://ollama.com/) runtime, `trace_chat` and `trace_generate`
+(`bir.integrations.ollama`, with async `trace_chat_async`/`trace_generate_async`
+and `stream=True` support) wrap the official `ollama` client's `chat`/`generate`
+calls — recording the model, assistant text, and `prompt_eval_count`/`eval_count`
+token usage without importing `ollama`; they are re-exported from
+`bir.integrations` as `trace_ollama_chat`, `trace_ollama_chat_async`,
+`trace_ollama_generate`, and `trace_ollama_generate_async`. AWS Bedrock's Converse stream is a distinct method rather
 than a `stream=True` flag, so it has its own `trace_converse_stream` wrapper (and
 the async `trace_converse_stream_async`) that yields the stream's events unchanged
 and records the same way.

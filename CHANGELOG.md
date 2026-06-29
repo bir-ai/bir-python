@@ -10,6 +10,25 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Dependency-free **Ollama** integration (`bir.integrations.ollama`) for the
+  official `ollama` Python client. `trace_chat` wraps `ollama.chat` (or a
+  client's `.chat`) and `trace_generate` wraps `ollama.generate` (or `.generate`),
+  each invoking the provider callable inside one Bir `generation`, forwarding
+  arguments unchanged, stripping the `bir_`-prefixed options, and returning the
+  provider result unchanged. They record the response `model`, the assistant text
+  (`message.content` for chat, `response` for generate), and token usage from the
+  top-level `prompt_eval_count` (input) and `eval_count` (output), deriving the
+  total. With `stream=True` each returns a lazy iterable that yields Ollama's
+  chunks unchanged and finalizes the accumulated output and final token usage from
+  the terminal `done` chunk when the stream is exhausted, closed, or raises (the
+  error re-raised unchanged with its text redacted). Async counterparts
+  `trace_chat_async` / `trace_generate_async` await the `ollama.AsyncClient`
+  methods and stream the same chunks via `async for`. The `ollama` package is
+  never imported, so it adds no runtime dependency (`dependencies = []`); the four
+  wrappers are re-exported from `bir.integrations` as `trace_ollama_chat`,
+  `trace_ollama_chat_async`, `trace_ollama_generate`, and
+  `trace_ollama_generate_async` to avoid colliding with the Mistral and Cohere
+  `trace_chat`. No schema (`schema_version` stays `1.0`) or fixture change.
 - A master tracing kill switch: `configure(enabled=False)` (and the inverse
   `BIR_DISABLED` environment variable) turns **all** recording off cleanly while
   user code runs unchanged. `@observe`, `trace`/`span`/`generation`/`tool_call`/
