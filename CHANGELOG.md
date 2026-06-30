@@ -10,6 +10,15 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- **`SECURITY.md`** at the repo root documenting Bir's privacy and security posture:
+  that input/output capture is opt-in and disabled by default, the built-in
+  (non-disableable, best-effort) redaction categories actually implemented today and how
+  to widen them via `configure(additional_secret_keys=..., additional_redaction_patterns=...)`,
+  the local-first `.bir/` storage model, the shared cross-repo redaction contract, and a
+  private vulnerability-disclosure process via GitHub Security Advisories. Docs-only — no
+  code, redaction rule, schema (`schema_version` stays `1.0`), or fixture change. Linked
+  from the README.
+
 - New **`bir config`** CLI command that prints the effective, resolved SDK
   configuration so the most common support question — "is capture on, where is the
   trace path, what is the sampling rate?" — can be answered without a Python REPL.

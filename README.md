@@ -72,7 +72,9 @@ Capture-size limits are opt-in too: `configure(max_value_length=...,
 max_collection_items=...)` bound an over-long captured string or an over-large
 captured list/mapping (truncating only after redaction) so one huge payload
 cannot bloat the local store. See
-[capture and privacy](docs/site/capture-privacy.md).
+[capture and privacy](docs/site/capture-privacy.md). The
+[security policy](SECURITY.md) summarizes the privacy posture and how to report a
+vulnerability.
 
 ## Sampling traces
 
