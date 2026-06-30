@@ -552,6 +552,13 @@ keeping results, JSONL rows, and summary aggregates in dataset order. It accepts
 async tasks, plain sync callables, and sync callables that return an awaitable,
 and otherwise matches `run_experiment()`.
 
+Both runners accept an opt-in `timeout=<seconds>` (a positive, finite number) so
+one stuck example — a hung network LLM call — cannot stall the whole run. An
+example that exceeds the limit is recorded as an `"error"`-status result with a
+`"task timed out after Ns"` message (honoring `raise_on_error` and preserving
+dataset order) and the run continues. The default `timeout=None` is unlimited and
+byte-for-byte identical to the previous behavior.
+
 Evaluators range from exact and substring string checks to `similarity_above()`,
 a stdlib-only fuzzy match that scores by `difflib` similarity ratio, plus
 structured-field, numeric, latency/cost, and RAG heuristics. See

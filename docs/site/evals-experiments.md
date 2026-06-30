@@ -112,6 +112,41 @@ isolated trace tree per example even when they run concurrently. If the
 surrounding coroutine is cancelled, the in-flight example tasks are cancelled and
 awaited and `CancelledError` propagates without writing a summary.
 
+## Bound each example with a timeout
+
+Experiments often call real, network-backed model clients, where a single stuck
+request can otherwise hang the whole run. Pass `timeout=<seconds>` (a positive,
+finite number) to bound each example. It works on both runners:
+
+```python
+result = run_experiment(
+    "quickstart",
+    dataset=dataset,
+    task=answer_question,
+    evaluators=[contains("observability")],
+    timeout=30,          # seconds per example
+    raise_on_error=False,
+)
+```
+
+An example whose task runs longer than `timeout` is recorded as an
+`"error"`-status result with a `"task timed out after Ns"` message — the same
+shape as any other failed example, so it counts toward the summary `error_count`,
+honors `raise_on_error` (raising a `TimeoutError` when `True`), and keeps its
+place in dataset order. The rest of the run continues.
+
+`run_experiment()` enforces the limit by running each example on a worker thread
+and waiting at most `timeout` seconds for it; the serial `max_workers=1` path
+uses a dedicated single-worker executor per example so a timed-out worker never
+blocks the next one. Because Python cannot force a thread to stop, a timed-out
+synchronous task keeps running in the background until it returns on its own —
+its result is simply discarded. `run_experiment_async()` wraps each example in
+`asyncio.wait_for(...)`, so a timed-out example's task is cancelled and awaited
+cleanly.
+
+The default is `timeout=None` (unlimited), which is byte-for-byte identical to
+the previous behavior.
+
 ## Store datasets as JSONL
 
 ```json

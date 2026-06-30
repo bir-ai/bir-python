@@ -950,6 +950,7 @@ def run_experiment(
     raise_on_error: bool = True,
     record_traces: bool = False,
     max_workers: int = 1,
+    timeout: float | None = None,
 ) -> ExperimentResult:
     """Run a task over a dataset and persist per-example evaluator results.
 
@@ -961,11 +962,24 @@ def run_experiment(
     example in dataset order and re-raises that exception; ``record_traces``
     isolation is preserved because each worker thread inherits its own copy of
     the context-var state, so trace trees never bleed across examples.
+
+    ``timeout`` is an optional per-example limit in seconds (a positive, finite
+    number; default ``None`` means unlimited). When set, an example whose task
+    runs longer than ``timeout`` is recorded as an ``"error"``-status result with
+    a ``"task timed out after Ns"`` message — the same shape as any other failed
+    example, so ``raise_on_error`` is honored — and the run continues with the
+    remaining examples. The timeout is enforced by running each example on a
+    worker thread and waiting at most ``timeout`` seconds for it (the serial
+    ``max_workers=1`` path uses a dedicated single-worker executor per example).
+    Python cannot force a thread to stop, so a timed-out task keeps running in
+    the background until it returns on its own; its result is discarded.
+    ``timeout=None`` is byte-for-byte identical to the previous behavior.
     """
 
     if not name:
         raise ValueError("experiment name must not be empty")
     max_workers = _validate_positive_int(max_workers, "max_workers")
+    timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
 
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
@@ -985,6 +999,7 @@ def run_experiment(
             raise_on_error=raise_on_error,
             record_traces=record_traces,
             max_workers=max_workers,
+            timeout=timeout,
         )
 
     results: list[ExperimentExampleResult] = []
@@ -992,55 +1007,29 @@ def run_experiment(
 
     with output_path.open("w", encoding="utf-8") as experiment_file:
         for example in examples:
-            if record_traces:
-                result, error = _run_traced_example(
-                    experiment_id=experiment_id,
-                    experiment_name=name,
-                    example=example,
-                    task=task,
-                    evaluators=evaluator_list,
-                )
-                if error is not None:
-                    results.append(result)
-                    _write_experiment_result(experiment_file, experiment_id, name, result)
-                    if raise_on_error:
-                        end_time = _now()
-                        experiment_result = _experiment_result(
-                            experiment_id=experiment_id,
-                            name=name,
-                            start_time=start_time,
-                            end_time=end_time,
-                            results=results,
-                            path=output_path,
-                        )
-                        _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
-                        raise error
-                    continue
-                results.append(result)
-                _write_experiment_result(experiment_file, experiment_id, name, result)
-                continue
-
-            try:
-                result = _run_example(example, task, evaluator_list)
-            except Exception as exc:
-                result = _error_example_result(example, exc)
-                results.append(result)
-                _write_experiment_result(experiment_file, experiment_id, name, result)
-                if raise_on_error:
-                    end_time = _now()
-                    experiment_result = _experiment_result(
-                        experiment_id=experiment_id,
-                        name=name,
-                        start_time=start_time,
-                        end_time=end_time,
-                        results=results,
-                        path=output_path,
-                    )
-                    _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
-                    raise
-                continue
+            result, error = _run_example_capturing_sync(
+                experiment_id=experiment_id,
+                experiment_name=name,
+                example=example,
+                task=task,
+                evaluators=evaluator_list,
+                record_traces=record_traces,
+                timeout=timeout,
+            )
             results.append(result)
             _write_experiment_result(experiment_file, experiment_id, name, result)
+            if error is not None and raise_on_error:
+                end_time = _now()
+                experiment_result = _experiment_result(
+                    experiment_id=experiment_id,
+                    name=name,
+                    start_time=start_time,
+                    end_time=end_time,
+                    results=results,
+                    path=output_path,
+                )
+                _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
+                raise error
 
     end_time = _now()
     experiment_result = _experiment_result(
@@ -1065,6 +1054,7 @@ async def run_experiment_async(
     raise_on_error: bool = True,
     record_traces: bool = False,
     max_concurrency: int = 1,
+    timeout: float | None = None,
 ) -> ExperimentResult:
     """Run a task over a dataset with bounded concurrency and persist results.
 
@@ -1091,11 +1081,21 @@ async def run_experiment_async(
     coroutine is cancelled, the in-flight example tasks are cancelled and awaited
     and ``CancelledError`` propagates without writing a misleading success
     summary.
+
+    ``timeout`` is an optional per-example limit in seconds (a positive, finite
+    number; default ``None`` means unlimited). When set, each example coroutine
+    is wrapped in :func:`asyncio.wait_for`; an example that runs longer than
+    ``timeout`` has its task cancelled and awaited (so no pending-task warning
+    leaks) and is recorded as an ``"error"``-status result with a ``"task timed
+    out after Ns"`` message — the same shape as any other failed example, so
+    ``raise_on_error`` is honored and dataset order is preserved.
+    ``timeout=None`` is byte-for-byte identical to the previous behavior.
     """
 
     if not name:
         raise ValueError("experiment name must not be empty")
     max_concurrency = _validate_positive_int(max_concurrency, "max_concurrency")
+    timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
 
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
@@ -1109,21 +1109,31 @@ async def run_experiment_async(
 
     async def run_one(index: int, example: DatasetExample) -> None:
         async with semaphore:
-            if record_traces:
-                result, error = await _run_traced_example_async(
+            if timeout is None:
+                result, error = await _capture_example_async(
                     experiment_id=experiment_id,
                     experiment_name=name,
                     example=example,
                     task=task,
                     evaluators=evaluator_list,
+                    record_traces=record_traces,
                 )
             else:
                 try:
-                    result = await _run_example_async(example, task, evaluator_list)
-                    error = None
-                except Exception as exc:
-                    result = _error_example_result(example, exc)
-                    error = exc
+                    result, error = await asyncio.wait_for(
+                        _capture_example_async(
+                            experiment_id=experiment_id,
+                            experiment_name=name,
+                            example=example,
+                            task=task,
+                            evaluators=evaluator_list,
+                            record_traces=record_traces,
+                        ),
+                        timeout,
+                    )
+                except asyncio.TimeoutError:
+                    exc = _timeout_exc(timeout)
+                    result, error = _error_example_result(example, exc), exc
             results_by_index[index] = result
             if error is not None:
                 errors_by_index[index] = error
@@ -1488,6 +1498,37 @@ async def _run_example_async(
     )
 
 
+async def _capture_example_async(
+    *,
+    experiment_id: str,
+    experiment_name: str,
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+    record_traces: bool,
+) -> tuple[ExperimentExampleResult, Exception | None]:
+    """Async counterpart to :func:`_capture_example`.
+
+    Returns the example result paired with any failure. A cancellation (including
+    the one :func:`asyncio.wait_for` raises on timeout) is a ``BaseException`` and
+    is intentionally not caught here, so it propagates to ``wait_for`` and surfaces
+    as a recorded timeout in the caller.
+    """
+
+    if record_traces:
+        return await _run_traced_example_async(
+            experiment_id=experiment_id,
+            experiment_name=experiment_name,
+            example=example,
+            task=task,
+            evaluators=evaluators,
+        )
+    try:
+        return await _run_example_async(example, task, evaluators), None
+    except Exception as exc:
+        return _error_example_result(example, exc), exc
+
+
 def _evaluate_example_output(
     example: DatasetExample,
     output: Any,
@@ -1675,33 +1716,39 @@ def _run_experiment_threaded(
     raise_on_error: bool,
     record_traces: bool,
     max_workers: int,
+    timeout: float | None,
 ) -> ExperimentResult:
     def run_one(index: int, example: DatasetExample) -> tuple[int, ExperimentExampleResult, Exception | None]:
-        if record_traces:
-            result, error = _run_traced_example(
-                experiment_id=experiment_id,
-                experiment_name=name,
-                example=example,
-                task=task,
-                evaluators=evaluator_list,
-            )
-            return index, result, error
-        try:
-            result = _run_example(example, task, evaluator_list)
-            return index, result, None
-        except Exception as exc:
-            return index, _error_example_result(example, exc), exc
+        result, error = _capture_example(
+            experiment_id=experiment_id,
+            experiment_name=name,
+            example=example,
+            task=task,
+            evaluators=evaluator_list,
+            record_traces=record_traces,
+        )
+        return index, result, error
 
     results_by_index: dict[int, ExperimentExampleResult] = {}
     errors_by_index: dict[int, Exception] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
-        concurrent.futures.wait(futures)
-    for future in futures:
-        index, result, error = future.result()
-        results_by_index[index] = result
-        if error is not None:
-            errors_by_index[index] = error
+    if timeout is None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
+            concurrent.futures.wait(futures)
+        for future in futures:
+            index, result, error = future.result()
+            results_by_index[index] = result
+            if error is not None:
+                errors_by_index[index] = error
+    else:
+        _collect_threaded_results_with_timeout(
+            run_one=run_one,
+            examples=examples,
+            max_workers=max_workers,
+            timeout=timeout,
+            results_by_index=results_by_index,
+            errors_by_index=errors_by_index,
+        )
 
     ordered_results = [results_by_index[i] for i in range(len(examples))]
     end_time = _now()
@@ -1726,6 +1773,126 @@ def _run_experiment_threaded(
         end_time=end_time,
         results=ordered_results,
     )
+
+
+def _collect_threaded_results_with_timeout(
+    *,
+    run_one: Callable[[int, DatasetExample], tuple[int, ExperimentExampleResult, Exception | None]],
+    examples: list[DatasetExample],
+    max_workers: int,
+    timeout: float,
+    results_by_index: dict[int, ExperimentExampleResult],
+    errors_by_index: dict[int, Exception],
+) -> None:
+    """Run examples on a thread pool, recording a timeout error per example.
+
+    Every example is submitted up front, then awaited in dataset order with
+    :meth:`concurrent.futures.Future.result(timeout=...)`. An example that does
+    not finish within ``timeout`` seconds is recorded as a failed example via the
+    same :func:`_error_example_result` shape, with the timeout exception stored so
+    ``raise_on_error`` can re-raise it. The executor is shut down without waiting,
+    so a timed-out worker that is still running (Python cannot force a thread to
+    stop) never blocks the run from finishing; it keeps running in the background
+    until its task returns.
+    """
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
+        for index, (future, example) in enumerate(zip(futures, examples)):
+            try:
+                result_index, result, error = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                exc = _timeout_exc(timeout)
+                result_index, result, error = index, _error_example_result(example, exc), exc
+            results_by_index[result_index] = result
+            if error is not None:
+                errors_by_index[result_index] = error
+    finally:
+        executor.shutdown(wait=False)
+
+
+def _capture_example(
+    *,
+    experiment_id: str,
+    experiment_name: str,
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+    record_traces: bool,
+) -> tuple[ExperimentExampleResult, Exception | None]:
+    """Run one example and return its result paired with any failure.
+
+    A traced example delegates to :func:`_run_traced_example`; an untraced one
+    runs :func:`_run_example`, converting an exception into an error result. The
+    returned ``error`` is non-``None`` only when the example failed, so callers
+    can honor ``raise_on_error`` uniformly.
+    """
+
+    if record_traces:
+        return _run_traced_example(
+            experiment_id=experiment_id,
+            experiment_name=experiment_name,
+            example=example,
+            task=task,
+            evaluators=evaluators,
+        )
+    try:
+        return _run_example(example, task, evaluators), None
+    except Exception as exc:
+        return _error_example_result(example, exc), exc
+
+
+def _run_example_capturing_sync(
+    *,
+    experiment_id: str,
+    experiment_name: str,
+    example: DatasetExample,
+    task: Callable[..., Any],
+    evaluators: list[DeterministicEvaluator],
+    record_traces: bool,
+    timeout: float | None,
+) -> tuple[ExperimentExampleResult, Exception | None]:
+    """Run one example for the serial path, optionally bounded by ``timeout``.
+
+    With ``timeout=None`` the example runs inline, exactly as before. Otherwise it
+    runs on a dedicated single-worker executor so a timed-out (still-running)
+    worker never blocks the next example; a worker that exceeds ``timeout`` is
+    recorded as a failed example and the executor is abandoned without waiting.
+    """
+
+    if timeout is None:
+        return _capture_example(
+            experiment_id=experiment_id,
+            experiment_name=experiment_name,
+            example=example,
+            task=task,
+            evaluators=evaluators,
+            record_traces=record_traces,
+        )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        _capture_example,
+        experiment_id=experiment_id,
+        experiment_name=experiment_name,
+        example=example,
+        task=task,
+        evaluators=evaluators,
+        record_traces=record_traces,
+    )
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        exc = _timeout_exc(timeout)
+        return _error_example_result(example, exc), exc
+    finally:
+        executor.shutdown(wait=False)
+
+
+def _timeout_exc(timeout: float) -> TimeoutError:
+    """Return the exception used for a timed-out example's error result."""
+
+    return TimeoutError(f"task timed out after {timeout}s")
 
 
 def _persist_experiment(
@@ -2108,6 +2275,13 @@ def _validate_positive_int(value: Any, field: str) -> int:
     if value < 1:
         raise ValueError(f"{field} must be a positive integer")
     return value
+
+
+def _validate_positive_number(value: Any, field: str) -> float:
+    numeric_value = _validate_finite_number(value, field)
+    if numeric_value <= 0:
+        raise ValueError(f"{field} must be positive")
+    return numeric_value
 
 
 def _validate_finite_number(value: Any, field: str) -> float:

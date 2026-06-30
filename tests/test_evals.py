@@ -2484,6 +2484,243 @@ class RunExperimentMaxWorkersTests(unittest.TestCase):
             run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], max_workers=2.5)  # type: ignore[arg-type]
 
 
+class RunExperimentTimeoutTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_sync_serial_timeout_records_error_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            release = threading.Event()
+            self.addCleanup(release.set)
+            dataset = Dataset(
+                [
+                    DatasetExample(id="slow", input={"slow": True}),
+                    DatasetExample(id="fast", input={"slow": False}),
+                ]
+            )
+
+            def task(slow: bool) -> str:
+                if slow:
+                    release.wait(timeout=5)  # bounded so a missed cleanup can never hang
+                    return "slow-done"
+                return "fast-done"
+
+            result = run_experiment(
+                "timeout",
+                dataset=dataset,
+                task=task,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                raise_on_error=False,
+                timeout=0.05,
+            )
+
+            self.assertEqual(result.status, "error")
+            self.assertEqual([row.example_id for row in result.results], ["slow", "fast"])
+            self.assertEqual([row.status for row in result.results], ["error", "success"])
+            self.assertIn("task timed out after 0.05s", result.results[0].error or "")
+            self.assertEqual(result.results[1].output, "fast-done")
+
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.error_count, 1)
+            self.assertEqual(summary.example_count, 2)
+
+    def test_sync_serial_timeout_raises_when_raise_on_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            release = threading.Event()
+            self.addCleanup(release.set)
+            dataset = Dataset([DatasetExample(id="slow", input={"n": 0})])
+
+            def task(n: int) -> int:
+                release.wait(timeout=5)
+                return n
+
+            with self.assertRaisesRegex(TimeoutError, "task timed out after 0.05s"):
+                run_experiment(
+                    "timeout",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    timeout=0.05,
+                )
+
+            # The error result is still persisted before re-raising, like any other failure.
+            summary = load_experiment_summary(experiment_path.with_suffix(".summary.json"))
+            self.assertEqual(summary.status, "error")
+            self.assertEqual(summary.error_count, 1)
+
+    def test_threaded_timeout_records_error_and_preserves_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            release = threading.Event()
+            self.addCleanup(release.set)
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q0", input={"slow": False}),
+                    DatasetExample(id="q1", input={"slow": True}),
+                    DatasetExample(id="q2", input={"slow": False}),
+                ]
+            )
+
+            def task(slow: bool) -> str:
+                if slow:
+                    release.wait(timeout=5)
+                    return "slow"
+                return "fast"
+
+            result = run_experiment(
+                "timeout",
+                dataset=dataset,
+                task=task,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                raise_on_error=False,
+                max_workers=3,
+                timeout=0.05,
+            )
+
+            self.assertEqual([row.example_id for row in result.results], ["q0", "q1", "q2"])
+            self.assertEqual([row.status for row in result.results], ["success", "error", "success"])
+            self.assertIn("task timed out", result.results[1].error or "")
+            records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["example_id"] for record in records], ["q0", "q1", "q2"])
+
+    def test_async_timeout_records_error_cancels_task_and_preserves_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            cancelled: list[int] = []
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q0", input={"n": 0, "slow": False}),
+                    DatasetExample(id="q1", input={"n": 1, "slow": True}),
+                    DatasetExample(id="q2", input={"n": 2, "slow": False}),
+                ]
+            )
+
+            async def task(n: int, slow: bool) -> int:
+                if slow:
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        cancelled.append(n)
+                        raise
+                await asyncio.sleep(0)
+                return n
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "timeout",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    raise_on_error=False,
+                    max_concurrency=3,
+                    timeout=0.05,
+                )
+            )
+
+            self.assertEqual([row.example_id for row in result.results], ["q0", "q1", "q2"])
+            self.assertEqual([row.status for row in result.results], ["success", "error", "success"])
+            self.assertIn("task timed out after 0.05s", result.results[1].error or "")
+            # wait_for cancelled the timed-out task and awaited it before recording.
+            self.assertEqual(cancelled, [1])
+            records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["example_id"] for record in records], ["q0", "q1", "q2"])
+
+    def test_async_timeout_raises_when_raise_on_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            dataset = Dataset([DatasetExample(id="q0", input={"n": 0})])
+
+            async def task(n: int) -> int:
+                await asyncio.sleep(10)
+                return n
+
+            with self.assertRaisesRegex(TimeoutError, "task timed out after 0.05s"):
+                asyncio.run(
+                    run_experiment_async(
+                        "timeout",
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[json_valid()],
+                        path=experiment_path,
+                        timeout=0.05,
+                    )
+                )
+
+    def test_timeout_none_matches_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "hello"}, expected="HELLO"),
+                    DatasetExample(id="q2", input={"question": "bir"}, expected="BIR"),
+                ]
+            )
+
+            def task(question: str) -> str:
+                return question.upper()
+
+            default_result = run_experiment(
+                "upper",
+                dataset=dataset,
+                task=task,
+                evaluators=[exact_match()],
+                path=Path(directory) / "default.jsonl",
+            )
+            none_result = run_experiment(
+                "upper",
+                dataset=dataset,
+                task=task,
+                evaluators=[exact_match()],
+                path=Path(directory) / "none.jsonl",
+                timeout=None,
+            )
+
+            self.assertEqual(default_result.status, none_result.status)
+            self.assertEqual(default_result.aggregate_scores, none_result.aggregate_scores)
+            self.assertEqual(
+                [row.example_id for row in default_result.results],
+                [row.example_id for row in none_result.results],
+            )
+            self.assertEqual(
+                [row.output for row in default_result.results],
+                [row.output for row in none_result.results],
+            )
+
+    def test_rejects_invalid_timeout(self) -> None:
+        dataset = Dataset([DatasetExample(id="q1", input={"n": 1})])
+
+        def task(n: int) -> int:
+            return n
+
+        async def async_task(n: int) -> int:
+            return n
+
+        for value in (0, -1, -0.5):
+            with self.assertRaisesRegex(ValueError, "timeout must be positive"):
+                run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], timeout=value)
+            with self.assertRaisesRegex(ValueError, "timeout must be positive"):
+                asyncio.run(
+                    run_experiment_async("v", dataset=dataset, task=async_task, evaluators=[json_valid()], timeout=value)
+                )
+        for value in (math.inf, math.nan):
+            with self.assertRaisesRegex(ValueError, "timeout must be finite"):
+                run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], timeout=value)
+        for bad_type in (True, "1"):
+            with self.assertRaisesRegex(ValueError, "timeout must be an int or float"):
+                run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], timeout=bad_type)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(ValueError, "timeout must be an int or float"):
+                asyncio.run(
+                    run_experiment_async(
+                        "v", dataset=dataset, task=async_task, evaluators=[json_valid()], timeout=bad_type  # type: ignore[arg-type]
+                    )
+                )
+
+
 class RenderExperimentReportTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
