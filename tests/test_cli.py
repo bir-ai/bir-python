@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import io
+import itertools
 import json
 import os
 import re
@@ -21,7 +22,7 @@ import unittest
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -70,6 +71,28 @@ class FakeHttpResponse:
         return self.body
 
 
+@contextmanager
+def deterministic_event_times() -> Iterator[None]:
+    """Stamp recorded events with strictly increasing timestamps.
+
+    The CLI fixtures record several trace roots back to back. On a coarse-
+    resolution clock (notably Windows) those roots can share an identical
+    ``start_time``, which makes start-time ordering and the inclusive ``--since`` /
+    ``--until`` / ``--keep-last`` boundaries ambiguous and the tests flaky. Pinning
+    ``_now`` to a monotonic micro-step counter gives every event a distinct,
+    recording-ordered timestamp on every platform while keeping durations tiny.
+    """
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    counter = itertools.count()
+
+    def _fake_now() -> str:
+        return (base + timedelta(microseconds=next(counter))).isoformat()
+
+    with patch("bir._sdk._now", _fake_now):
+        yield
+
+
 def write_two_traces(trace_path: Path) -> None:
     """Record two traces (each with a span and a score) into ``trace_path``."""
 
@@ -109,12 +132,13 @@ def write_filterable_traces(trace_path: Path) -> None:
     def checkout_retry(value: str) -> str:
         raise ValueError("boom")
 
-    checkout("a")
-    search("b")
-    try:
-        checkout_retry("c")
-    except ValueError:
-        pass
+    with deterministic_event_times():
+        checkout("a")
+        search("b")
+        try:
+            checkout_retry("c")
+        except ValueError:
+            pass
 
 
 def write_active_and_rotated_trace(trace_path: Path) -> None:
@@ -204,12 +228,13 @@ def write_stats_traces(trace_path: Path) -> None:
     def boom(question: str) -> str:
         raise ValueError("nope")
 
-    ok("a")
-    ok("b")
-    try:
-        boom("c")
-    except ValueError:
-        pass
+    with deterministic_event_times():
+        ok("a")
+        ok("b")
+        try:
+            boom("c")
+        except ValueError:
+            pass
 
 
 def write_multi_currency_trace(trace_path: Path) -> None:
