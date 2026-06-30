@@ -2084,5 +2084,166 @@ class PruneCommandTests(CliBaseTest):
             self.assertEqual(len(bir.load_traces(trace_path)), 2)
 
 
+@contextmanager
+def only_bir_env(**values: str) -> Iterator[None]:
+    """Run the body with exactly the given ``BIR_*`` variables set, nothing else.
+
+    Every ambient ``BIR_*`` variable is removed first so a developer's real
+    environment never leaks into a ``bir config`` env-reporting assertion; the
+    supplied names are then set to the given values for the duration of the block.
+    """
+
+    cleaned = {key: value for key, value in os.environ.items() if not key.startswith("BIR_")}
+    cleaned.update(values)
+    with patch.dict(os.environ, cleaned, clear=True):
+        yield
+
+
+class ConfigCommandTests(CliBaseTest):
+    def test_table_reports_effective_defaults(self) -> None:
+        with only_bir_env():
+            code, out, err = run_cli("config")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), ["SETTING", "VALUE"])
+        rows = dict(line.split(None, 1) for line in lines[1:])
+        self.assertEqual(rows["capture_inputs"], "false")
+        self.assertEqual(rows["capture_outputs"], "false")
+        self.assertEqual(rows["enabled"], "true")
+        self.assertEqual(rows["sample_rate"], "1.0")
+        self.assertEqual(rows["backup_count"], "3")
+        self.assertEqual(rows["sample_rules"], "-")
+        self.assertEqual(rows["service_name"], "-")
+        self.assertEqual(rows["model_prices"], "0")
+        self.assertEqual(rows["env_vars_set"], "-")
+        # The trace path is resolved to an absolute path ending in the default file.
+        self.assertTrue(os.path.isabs(rows["trace_path"]))
+        self.assertTrue(rows["trace_path"].endswith(os.path.join(".bir", "traces.jsonl")))
+
+    def test_json_is_deterministic_and_sorted(self) -> None:
+        with only_bir_env():
+            code, first, _ = run_cli("config", "--json")
+            _, second, _ = run_cli("config", "--json")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(first, second)
+        payload = json.loads(first)
+        # Keys are emitted in sorted order by the shared JSON dumper.
+        self.assertEqual(list(payload), sorted(payload))
+        self.assertEqual(
+            set(payload),
+            {
+                "trace_path",
+                "capture_inputs",
+                "capture_outputs",
+                "enabled",
+                "sample_rate",
+                "sample_rules",
+                "service_name",
+                "environment",
+                "source",
+                "max_bytes",
+                "backup_count",
+                "max_value_length",
+                "max_collection_items",
+                "additional_secret_keys",
+                "additional_redaction_patterns",
+                "model_prices",
+                "env_vars_set",
+            },
+        )
+        self.assertIs(payload["capture_inputs"], False)
+        self.assertIs(payload["enabled"], True)
+        self.assertEqual(payload["sample_rate"], 1.0)
+        self.assertEqual(payload["sample_rules"], {})
+        self.assertIsNone(payload["service_name"])
+        self.assertEqual(payload["env_vars_set"], [])
+        self.assertTrue(os.path.isabs(payload["trace_path"]))
+
+    def test_configure_changes_are_reflected(self) -> None:
+        with only_bir_env(), temporary_workdir() as workdir:
+            trace_path = workdir / "custom" / "traces.jsonl"
+            bir.configure(
+                trace_path=trace_path,
+                capture_inputs=True,
+                capture_outputs=True,
+                enabled=False,
+                sample_rate=0.25,
+                sample_rules={"checkout": 0.5},
+                service_name="rag-api",
+                environment="staging",
+                source="checkout-api",
+                max_bytes=1024,
+                backup_count=5,
+                max_value_length=2048,
+                max_collection_items=64,
+            )
+
+            code, out, _ = run_cli("config", "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertIs(payload["capture_inputs"], True)
+        self.assertIs(payload["capture_outputs"], True)
+        self.assertIs(payload["enabled"], False)
+        self.assertEqual(payload["sample_rate"], 0.25)
+        self.assertEqual(payload["sample_rules"], {"checkout": 0.5})
+        self.assertEqual(payload["service_name"], "rag-api")
+        self.assertEqual(payload["environment"], "staging")
+        self.assertEqual(payload["source"], "checkout-api")
+        self.assertEqual(payload["max_bytes"], 1024)
+        self.assertEqual(payload["backup_count"], 5)
+        self.assertEqual(payload["max_value_length"], 2048)
+        self.assertEqual(payload["max_collection_items"], 64)
+        self.assertEqual(payload["trace_path"], str(trace_path.resolve()))
+
+    def test_env_var_presence_is_reported_without_values(self) -> None:
+        # A blank value is treated as unset by the SDK and so is not reported.
+        with only_bir_env(BIR_SAMPLE_RATE="0.1", BIR_CAPTURE_INPUTS="true", BIR_SOURCE="   "):
+            code, out, _ = run_cli("config", "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["env_vars_set"], ["BIR_CAPTURE_INPUTS", "BIR_SAMPLE_RATE"])
+        # Only names are reported; the values themselves never appear in output.
+        self.assertNotIn("0.1", out)
+
+    def test_secrets_are_summarized_not_dumped(self) -> None:
+        with only_bir_env():
+            bir.configure(
+                additional_secret_keys=["my_secret_field"],
+                additional_redaction_patterns=[r"topsecret-\d+"],
+                model_prices={"gpt-4o": {"input": 0.123456, "output": 7.891011}},
+            )
+
+            code, table, _ = run_cli("config")
+            _, raw_json, _ = run_cli("config", "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(raw_json)
+        # Counts only — the count is reported, the contents never are.
+        self.assertEqual(payload["additional_secret_keys"], 1)
+        self.assertEqual(payload["additional_redaction_patterns"], 1)
+        self.assertEqual(payload["model_prices"], 1)
+        for rendered in (table, raw_json):
+            self.assertNotIn("my_secret_field", rendered)
+            self.assertNotIn("topsecret", rendered)
+            self.assertNotIn("0.123456", rendered)
+            self.assertNotIn("7.891011", rendered)
+
+    def test_is_read_only_and_exits_zero(self) -> None:
+        with only_bir_env():
+            before = cli._sdk._config
+            code, _, _ = run_cli("config")
+            code_json, _, _ = run_cli("config", "--json")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(code_json, 0)
+        # The command never mutates the active configuration.
+        self.assertIs(cli._sdk._config, before)
+
+
 if __name__ == "__main__":
     unittest.main()

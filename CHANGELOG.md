@@ -10,6 +10,25 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- New **`bir config`** CLI command that prints the effective, resolved SDK
+  configuration so the most common support question — "is capture on, where is the
+  trace path, what is the sampling rate?" — can be answered without a Python REPL.
+  It reads the live configuration and reports the absolute `trace_path`, the
+  `capture_inputs`/`capture_outputs` flags, the `enabled` master switch,
+  `sample_rate` and any exact-name `sample_rules`, the
+  `service_name`/`environment`/`source` trace metadata, the
+  `max_bytes`/`backup_count` rotation settings, and the
+  `max_value_length`/`max_collection_items` capture-size limits, followed by which
+  `BIR_*` environment variables are currently set. An in-process `configure(...)`
+  call or a set environment variable is reflected. It is strictly **read-only** —
+  it never mutates configuration and always exits 0 — and **non-leaky**: the
+  additional redaction rules and the local `model_prices` table are summarized as
+  counts only (never the patterns or prices), and only the **names** of set `BIR_*`
+  variables are listed, never their values. `--json` emits the same fields as a
+  deterministic, sorted object. CLI-only and stdlib-only (`dependencies = []`); no
+  new public top-level symbol, schema (`schema_version` stays `1.0`), or fixture
+  change.
+
 - `bir.evals.similarity_above(threshold, ...)`, a deterministic fuzzy
   string-similarity evaluator that fills the gap between `exact_match()` (exact
   equality) and `contains()` (substring presence). It scores `1.0` when the

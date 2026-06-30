@@ -53,6 +53,11 @@ and p95) for a quick cost or health check (and accepts the same `--name`,
 `--keep-last N`, optionally restricted by `--status`); it is destructive but
 safe-by-default — it requires a selection filter and only previews unless you pass
 `--yes`, rewriting the store atomically under the same lock as appends.
+`bir config` prints the effective resolved configuration (trace path, capture
+flags, sampling, service metadata, rotation, and capture-size limits) plus which
+`BIR_*` variables are set, so you can answer "why isn't capture on?" without a
+Python REPL — it is read-only and reports secret-bearing rules (redaction patterns,
+the `model_prices` table) as counts only.
 Add `--json` to any of them for a structured form. The
 same commands run as `python -m bir <command>` when the `bir` console script
 isn't on `PATH` (fresh venvs, `pipx run`, CI). See

@@ -26,6 +26,8 @@ bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' extra
+bir config                    # print the effective resolved configuration
+bir config --json             # the same fields as machine-readable JSON
 ```
 
 | Command | What it does |
@@ -42,6 +44,7 @@ bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' e
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
 | `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
+| `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
 default; experiment listing uses `.bir/experiments`; send commands target
@@ -153,9 +156,23 @@ delay between attempts is `backoff * 2**attempt`. HTTP 4xx, a missing file, and
 an invalid server response fail immediately. See
 [Sending to a Server](sending.md#retry-behavior).
 
+`bir config` answers "what configuration is active right now?" without a Python
+REPL. It prints the effective, resolved settings of the live SDK configuration —
+the absolute `trace_path`, the `capture_inputs`/`capture_outputs` flags, the
+`enabled` master switch, `sample_rate` and any exact-name `sample_rules`, the
+`service_name`/`environment`/`source` trace metadata, the `max_bytes`/`backup_count`
+rotation settings, and the `max_value_length`/`max_collection_items` capture-size
+limits — followed by which `BIR_*` environment variables are currently set. It
+reflects everything an explicit `configure(...)` call changed in-process. It is
+strictly **read-only**: it never mutates configuration and always exits 0. To keep
+it non-leaky, the additional redaction rules and the local `model_prices` table are
+reported as **counts only** (never the patterns or prices themselves), and only the
+**names** of set `BIR_*` variables are listed, never their values. `--json` emits
+the same fields as a deterministic, sorted object for scripts.
+
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
-`stats`, `experiments`, and `experiment-show` is suitable for scripts.
+`stats`, `experiments`, `experiment-show`, and `config` is suitable for scripts.
 
 ## Environment configuration
 

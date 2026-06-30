@@ -44,6 +44,23 @@ _DEFAULT_SERVER = "http://127.0.0.1:8000"
 _DEFAULT_EXPERIMENT_DIR = ".bir/experiments"
 _TAIL_POLL_INTERVAL = 0.5
 
+# The ``BIR_*`` environment variables the SDK reads at import time (see
+# ``_sdk._config_from_env``). ``bir config`` reports which of these are currently
+# set so a deployment can confirm what is influencing configuration, without ever
+# echoing their values.
+_BIR_ENV_VARS = (
+    "BIR_TRACE_PATH",
+    "BIR_CAPTURE_INPUTS",
+    "BIR_CAPTURE_OUTPUTS",
+    "BIR_DISABLED",
+    "BIR_SAMPLE_RATE",
+    "BIR_SERVICE_NAME",
+    "BIR_ENVIRONMENT",
+    "BIR_SOURCE",
+    "BIR_MAX_VALUE_LENGTH",
+    "BIR_MAX_COLLECTION_ITEMS",
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``bir`` command-line interface and return a process exit code."""
@@ -401,6 +418,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Actually delete the selected traces; without it (or with --dry-run) prune only previews.",
     )
     prune.set_defaults(func=_cmd_prune)
+
+    config = subparsers.add_parser(
+        "config",
+        help="Print the effective resolved SDK configuration (read-only).",
+    )
+    config.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of a table.",
+    )
+    config.set_defaults(func=_cmd_config)
 
     return parser
 
@@ -973,6 +1001,104 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         summary += " (dry run; pass --yes to apply)"
     print(summary)
     return 0
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    summary = _config_summary(_sdk._config)
+    if args.json:
+        _dump_json(summary, sys.stdout)
+        return 0
+    _print_table(("SETTING", "VALUE"), _config_rows(summary), sys.stdout)
+    return 0
+
+
+def _config_summary(config: _sdk._Config) -> dict[str, Any]:
+    """Summarize the active config into a JSON-serializable, non-leaky mapping.
+
+    The same mapping backs both the human-readable table and ``--json`` so their
+    fields cannot drift apart. Secret-bearing configuration is reduced to counts
+    only: the additional redaction rules and the local ``model_prices`` table are
+    reported as sizes, never as patterns or prices, so a value that could leak a
+    credential or a private rate is never printed. ``trace_path`` is resolved to an
+    absolute path the way a write would, and ``env_vars_set`` lists the ``BIR_*``
+    variable names currently set (to a non-blank value) without their values.
+    """
+
+    return {
+        "trace_path": str(config.trace_path.resolve()),
+        "capture_inputs": config.capture_inputs,
+        "capture_outputs": config.capture_outputs,
+        "enabled": config.enabled,
+        "sample_rate": config.sample_rate,
+        "sample_rules": {name: rate for name, rate in config.sample_rules},
+        "service_name": config.service_name,
+        "environment": config.environment,
+        "source": config.source,
+        "max_bytes": config.max_bytes,
+        "backup_count": config.backup_count,
+        "max_value_length": config.max_value_length,
+        "max_collection_items": config.max_collection_items,
+        "additional_secret_keys": len(config.additional_secret_keys),
+        "additional_redaction_patterns": len(config.additional_redaction_patterns),
+        "model_prices": len(config.model_prices),
+        "env_vars_set": _bir_env_vars_set(),
+    }
+
+
+def _bir_env_vars_set() -> list[str]:
+    """Return the ``BIR_*`` variable names currently set to a non-blank value, sorted.
+
+    Only names are returned, never values, so a secret-bearing value (such as a
+    custom trace path) is never echoed. The SDK's own blank-is-unset rule is reused
+    so this reports exactly the variables that actually influence configuration.
+    """
+
+    return sorted(name for name in _BIR_ENV_VARS if _sdk._env_value(name) is not None)
+
+
+def _config_rows(summary: dict[str, Any]) -> list[tuple[str, str]]:
+    """Flatten the config summary into aligned ``(setting, value)`` table rows."""
+
+    env_vars = summary["env_vars_set"]
+    return [
+        ("trace_path", summary["trace_path"]),
+        ("capture_inputs", _format_config_bool(summary["capture_inputs"])),
+        ("capture_outputs", _format_config_bool(summary["capture_outputs"])),
+        ("enabled", _format_config_bool(summary["enabled"])),
+        ("sample_rate", str(summary["sample_rate"])),
+        ("sample_rules", _format_config_sample_rules(summary["sample_rules"])),
+        ("service_name", _format_config_optional(summary["service_name"])),
+        ("environment", _format_config_optional(summary["environment"])),
+        ("source", _format_config_optional(summary["source"])),
+        ("max_bytes", _format_config_optional(summary["max_bytes"])),
+        ("backup_count", str(summary["backup_count"])),
+        ("max_value_length", _format_config_optional(summary["max_value_length"])),
+        ("max_collection_items", _format_config_optional(summary["max_collection_items"])),
+        ("additional_secret_keys", str(summary["additional_secret_keys"])),
+        ("additional_redaction_patterns", str(summary["additional_redaction_patterns"])),
+        ("model_prices", str(summary["model_prices"])),
+        ("env_vars_set", ", ".join(env_vars) if env_vars else "-"),
+    ]
+
+
+def _format_config_bool(value: bool) -> str:
+    """Render a config boolean as the same ``true``/``false`` the env vars accept."""
+
+    return "true" if value else "false"
+
+
+def _format_config_optional(value: Any) -> str:
+    """Render an optional config value, showing ``-`` when it is unset (``None``)."""
+
+    return "-" if value is None else str(value)
+
+
+def _format_config_sample_rules(rules: dict[str, float]) -> str:
+    """Render the exact-name sample rules compactly, or ``-`` when none are set."""
+
+    if not rules:
+        return "-"
+    return " ".join(f"{name}={rules[name]}" for name in sorted(rules))
 
 
 def _cmd_eval_gate(args: argparse.Namespace) -> int:
