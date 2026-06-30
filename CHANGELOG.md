@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir.evals.similarity_above(threshold, ...)`, a deterministic fuzzy
+  string-similarity evaluator that fills the gap between `exact_match()` (exact
+  equality) and `contains()` (substring presence). It scores `1.0` when the
+  normalized `difflib.SequenceMatcher` ratio between the output text and the
+  expected text is at or above `threshold` (the boundary is inclusive) and `0.0`
+  otherwise, so real LLM outputs with typos, reordering, or minor wording
+  differences can be checked without an embedding model or new dependency. The
+  expected value can be configured or supplied per example (the same
+  `_USE_EXAMPLE_EXPECTED` path as `contains()`), `case_sensitive=False`
+  lowercases both sides before comparing, and the achieved `ratio` and
+  `threshold` are recorded in `EvalResult.metadata` so failures are inspectable.
+  `threshold` is validated as a finite number in `[0, 1]` and a non-string
+  expected raises `TypeError`, consistent with the other evaluators. Exported
+  from `bir.evals.__all__`. Stdlib only (`difflib`); `dependencies = []`, no
+  schema (`schema_version` stays `1.0`) or fixture change.
+
 - New **`bir prune`** CLI command to reclaim space by removing whole old or
   unwanted traces from the local store, so a long-lived `.bir/traces.jsonl` (and
   its rotated siblings) no longer grows without bound. Selection is by

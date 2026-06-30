@@ -45,6 +45,7 @@ from bir.evals import (
     run_experiment,
     run_experiment_async,
     send_experiment,
+    similarity_above,
 )
 
 
@@ -332,6 +333,8 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(exact_match("Paris").evaluate("Paris").value, 1.0)
         self.assertEqual(exact_match("Paris").evaluate("Lyon").value, 0.0)
         self.assertEqual(contains("paris", case_sensitive=False).evaluate("Paris, France").value, 1.0)
+        self.assertEqual(similarity_above(0.8, "Paris").evaluate("Pariz").value, 1.0)
+        self.assertEqual(similarity_above(0.8, "Paris").evaluate("Bananas").value, 0.0)
         self.assertEqual(regex_match(r"Paris").evaluate("The answer is Paris.").value, 1.0)
         self.assertEqual(json_valid().evaluate('{"answer":"Paris"}').value, 1.0)
         self.assertEqual(json_valid().evaluate("{not-json").value, 0.0)
@@ -346,6 +349,63 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(field_contains("answer", "capital").evaluate(structured_output).value, 1.0)
         self.assertEqual(numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0)
         self.assertEqual(custom_evaluator("has_paris", lambda output, expected: "Paris" in str(output)).evaluate("Paris").value, 1.0)
+
+    def test_similarity_above_scores_near_and_far_strings(self) -> None:
+        evaluator = similarity_above(0.8, "Paris")
+
+        identical = evaluator.evaluate("Paris")
+        self.assertEqual(identical.value, 1.0)
+        self.assertEqual(identical.metadata["ratio"], 1.0)
+        self.assertEqual(identical.metadata["threshold"], 0.8)
+        self.assertEqual(identical.metadata["expected"], "Paris")
+
+        # A single-character typo stays above the 0.8 threshold.
+        self.assertEqual(evaluator.evaluate("Pariz").value, 1.0)
+
+        # Clearly different text falls well below the threshold.
+        far = evaluator.evaluate("Bananas are yellow.")
+        self.assertEqual(far.value, 0.0)
+        self.assertLess(far.metadata["ratio"], 0.8)
+
+    def test_similarity_above_boundary_is_inclusive(self) -> None:
+        # "abcde" vs "abcdz" has a SequenceMatcher ratio of exactly 0.8.
+        result = similarity_above(0.8, "abcdz").evaluate("abcde")
+        self.assertEqual(result.metadata["ratio"], 0.8)
+        self.assertEqual(result.value, 1.0)
+
+        # The same ratio is below a stricter threshold.
+        self.assertEqual(similarity_above(0.81, "abcdz").evaluate("abcde").value, 0.0)
+
+    def test_similarity_above_case_insensitive_lowercases_both_sides(self) -> None:
+        self.assertEqual(similarity_above(0.8, "paris").evaluate("PARIS").value, 0.0)
+        self.assertEqual(
+            similarity_above(0.8, "paris", case_sensitive=False).evaluate("PARIS").value,
+            1.0,
+        )
+
+    def test_similarity_above_uses_example_expected_value(self) -> None:
+        self.assertEqual(similarity_above(0.8).evaluate("Pariz", expected="Paris").value, 1.0)
+        with self.assertRaisesRegex(ValueError, "similarity_above requires an expected value"):
+            similarity_above(0.8).evaluate("Paris")
+
+    def test_similarity_above_treats_none_output_as_empty_string(self) -> None:
+        result = similarity_above(0.8, "Paris").evaluate(None)
+        self.assertEqual(result.value, 0.0)
+        self.assertEqual(result.metadata["ratio"], 0.0)
+
+    def test_similarity_above_rejects_invalid_configuration_and_expected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "threshold must be between 0 and 1"):
+            similarity_above(1.5)
+        with self.assertRaisesRegex(ValueError, "threshold must be between 0 and 1"):
+            similarity_above(-0.1)
+        with self.assertRaisesRegex(ValueError, "threshold must be finite"):
+            similarity_above(math.inf)
+        with self.assertRaisesRegex(ValueError, "threshold must be an int or float"):
+            similarity_above(True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "evaluator name"):
+            similarity_above(0.8, "Paris", name="")
+        with self.assertRaisesRegex(TypeError, "expected value must be a string"):
+            similarity_above(0.8, 123).evaluate("Paris")  # type: ignore[arg-type]
 
     def test_answer_context_overlap_scores_supported_answers(self) -> None:
         supported = answer_context_overlap(0.8).evaluate(
@@ -1238,6 +1298,32 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(result.aggregate_scores["answer_contains_citation"], 0.5)
             self.assertEqual(result.results[0].scores[0].metadata["citation"], "[1]")
             self.assertEqual(result.results[1].scores[0].metadata["answer_preview"], "France is in Europe.")
+
+    def test_run_experiment_supports_similarity_above(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "experiment.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="q1", input={"question": "capital"}, expected="Paris"),
+                    DatasetExample(id="q2", input={"question": "country"}, expected="France"),
+                ]
+            )
+
+            def answer(question: str) -> str:
+                return "Pariz" if question == "capital" else "Germany"
+
+            result = run_experiment(
+                "fuzzy",
+                dataset=dataset,
+                task=answer,
+                evaluators=[similarity_above(0.8)],
+                path=experiment_path,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.aggregate_scores["similarity_above"], 0.5)
+            self.assertEqual(result.results[0].scores[0].value, 1.0)
+            self.assertEqual(result.results[1].scores[0].value, 0.0)
 
     def test_run_experiment_supports_custom_evaluators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

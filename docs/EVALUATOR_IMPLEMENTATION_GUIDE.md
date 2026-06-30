@@ -15,6 +15,7 @@ Implemented SDK pieces:
 - `DeterministicEvaluator`
 - `exact_match()`
 - `contains()`
+- `similarity_above()`
 - `regex_match()`
 - `json_valid()`
 - `Dataset`
@@ -596,6 +597,7 @@ Naming rules:
 - Evaluator factories should read as predicates or metrics:
   - `exact_match`
   - `contains`
+  - `similarity_above`
   - `latency_under`
   - `json_valid`
 - Result names should default to the factory name.

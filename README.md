@@ -528,8 +528,12 @@ result = asyncio.run(
 `run_experiment_async()` runs up to `max_concurrency` examples concurrently while
 keeping results, JSONL rows, and summary aggregates in dataset order. It accepts
 async tasks, plain sync callables, and sync callables that return an awaitable,
-and otherwise matches `run_experiment()`. See
-[local evals and experiments](docs/site/evals-experiments.md).
+and otherwise matches `run_experiment()`.
+
+Evaluators range from exact and substring string checks to `similarity_above()`,
+a stdlib-only fuzzy match that scores by `difflib` similarity ratio, plus
+structured-field, numeric, latency/cost, and RAG heuristics. See
+[local evals and experiments](docs/site/evals-experiments.md) for the full list.
 
 Inspect persisted experiments from the command line without a server:
 `bir experiments` lists every experiment under `.bir/experiments/`, and

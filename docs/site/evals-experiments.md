@@ -136,6 +136,7 @@ Available deterministic evaluators are:
 | --- | --- |
 | `exact_match()` | Output equals an expected value. |
 | `contains()` | Text contains the expected value. |
+| `similarity_above()` | Fuzzy text similarity ratio to the expected value meets a threshold. |
 | `regex_match()` | Text matches a regular expression. |
 | `json_valid()` | Output is valid JSON or JSON-like data. |
 | `field_equals()` | A dot/index path equals the expected value. |
@@ -147,6 +148,25 @@ Available deterministic evaluators are:
 | `answer_context_overlap()` | Answer/context token overlap reaches a ratio. |
 | `answer_contains_citation()` | An answer contains a citation marker. |
 | `custom_evaluator()` | A local callable implements a task-specific check. |
+
+### Fuzzy text matching
+
+```python
+from bir.evals import similarity_above
+
+evaluators = [similarity_above(0.8, "Bir is an observability SDK.")]
+```
+
+`similarity_above()` sits between `exact_match()` and `contains()`: it scores
+`1.0` when the normalized `difflib.SequenceMatcher` ratio between the output text
+and the expected text is at or above `threshold` (inclusive), and `0.0`
+otherwise. This is a deterministic, standard-library-only check that tolerates
+typos, reordering, and minor wording differences without an embedding model or
+new dependency. Like `contains()`, it accepts a per-example expected value when
+the `expected` argument is omitted, and `case_sensitive=False` lowercases both
+sides before comparing. The achieved `ratio` and `threshold` are recorded in the
+score metadata so failures are inspectable. It is a surface-form heuristic, not
+semantic similarity: paraphrases that share few characters can still score `0.0`.
 
 ### Structured output
 

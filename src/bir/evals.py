@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import difflib
 import inspect
 import json
 import math
@@ -85,6 +86,7 @@ __all__ = [
     "run_experiment",
     "run_experiment_async",
     "send_experiment",
+    "similarity_above",
 ]
 
 
@@ -512,6 +514,47 @@ def contains(
         haystack = output_text if case_sensitive else output_text.lower()
         needle = target if case_sensitive else target.lower()
         return EvalResult(name=name, value=1.0 if needle in haystack else 0.0, metadata={"expected": target})
+
+    return DeterministicEvaluator(name=name, _evaluate=evaluate)
+
+
+def similarity_above(
+    threshold: float,
+    expected: str | object = _USE_EXAMPLE_EXPECTED,
+    *,
+    case_sensitive: bool = True,
+    name: str = "similarity_above",
+) -> DeterministicEvaluator:
+    """Create an evaluator that scores 1.0 when output text is similar enough to expected.
+
+    Similarity is the normalized :class:`difflib.SequenceMatcher` ratio between
+    the output text and the expected text, a deterministic, dependency-free fuzzy
+    check that sits between exact equality (:func:`exact_match`) and substring
+    presence (:func:`contains`). It tolerates typos, reordering, and minor
+    wording differences without an embedding model or any new dependency. The
+    score is 1.0 when the achieved ratio is at or above ``threshold`` (the
+    boundary is inclusive) and 0.0 otherwise. Pass ``case_sensitive=False`` to
+    lowercase both sides before comparing. The achieved ratio and threshold are
+    recorded in ``EvalResult.metadata`` so failures are inspectable.
+    """
+
+    threshold_value = _validate_finite_number(threshold, "threshold")
+    if threshold_value < 0 or threshold_value > 1:
+        raise ValueError("threshold must be between 0 and 1")
+
+    def evaluate(output: Any, example_expected: Any) -> EvalResult:
+        target = _expected_value(expected, example_expected, name)
+        if not isinstance(target, str):
+            raise TypeError("similarity_above expected value must be a string")
+        output_text = "" if output is None else str(output)
+        left = output_text if case_sensitive else output_text.lower()
+        right = target if case_sensitive else target.lower()
+        ratio = difflib.SequenceMatcher(None, left, right).ratio()
+        return EvalResult(
+            name=name,
+            value=1.0 if ratio >= threshold_value else 0.0,
+            metadata={"expected": target, "ratio": ratio, "threshold": threshold_value},
+        )
 
     return DeterministicEvaluator(name=name, _evaluate=evaluate)
 
