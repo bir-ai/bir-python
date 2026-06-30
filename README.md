@@ -467,12 +467,26 @@ becomes one OpenTelemetry trace: the trace root maps to a root span and every
 other event maps to a child span linked by `parent_id`, carrying over start/end
 times and `success`/`error` status. Attributes follow the GenAI semantic
 conventions where they exist (`gen_ai.request.model`,
-`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`) with `bir.*`
-attributes for the rest (event type, score value, token totals, cost, and the
-originating Bir ids). Pass `headers=` for backend auth, or inject your own
-configured `span_exporter=` for a different transport. Calling the exporter
-without the extra installed raises a clear error pointing you to
+`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`, and `gen_ai.system`
+on a generation whose provider was recorded — e.g. by the LiteLLM or Pydantic AI
+integrations; it is never guessed from the model string) with `bir.*` attributes
+for the rest (event type, score value, token totals, cost, and the originating
+Bir ids). Pass `headers=` for backend auth, or inject your own configured
+`span_exporter=` for a different transport. Calling the exporter without the
+extra installed raises a clear error pointing you to
 `pip install 'bir-sdk[otel]'`.
+
+The OpenTelemetry `Resource` records `service.name` (from `service_name`) and, when
+the traces recorded them, the deployment environment and trace source set via
+`configure(environment=..., source=...)` (see
+[Sampling & service metadata](docs/site/sampling-service-metadata.md)):
+`deployment.environment` and `bir.source`. Each is added only when a single value
+applies to the whole export. Pass `environment="prod"` to set
+`deployment.environment` explicitly (it overrides whatever the traces recorded). If
+one call mixes traces from different environments (or sources) and no explicit
+`environment` is given, the conflicting attribute is left off the `Resource` and the
+per-trace value is recorded on each span instead (`bir.environment` / `bir.source`)
+so a mixed export never loses it. When nothing was recorded, nothing is added.
 
 The same export runs from the terminal without writing Python:
 
@@ -485,8 +499,9 @@ bir export-otel --endpoint http://localhost:4318/v1/traces \
 `bir export-otel` loads local traces (honoring `--path` and `--include-rotated`
 like `bir traces`) and forwards them through the same exporter, printing how many
 traces and spans were sent. `--endpoint` is required; `--header KEY=VALUE` is
-repeatable for backend auth, and `--service-name` and `--timeout` are passed
-through. Without the `otel` extra it exits non-zero with the same install hint.
+repeatable for backend auth, and `--service-name`, `--environment` (sets
+`deployment.environment`, overriding what the traces recorded), and `--timeout` are
+passed through. Without the `otel` extra it exits non-zero with the same install hint.
 
 ## Evaluations and experiments
 

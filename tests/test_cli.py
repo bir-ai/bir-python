@@ -1612,10 +1612,19 @@ class SendExperimentCommandTests(CliBaseTest):
 def _recording_exporter(captured: dict[str, Any], *, spans: int = 0):
     """Return a fake ``export_traces_to_otlp`` that records its call and returns ``spans``."""
 
-    def fake(traces: Any, *, endpoint: Any, service_name: Any, headers: Any, timeout: Any) -> int:
+    def fake(
+        traces: Any,
+        *,
+        endpoint: Any,
+        service_name: Any,
+        environment: Any,
+        headers: Any,
+        timeout: Any,
+    ) -> int:
         captured["traces"] = list(traces)
         captured["endpoint"] = endpoint
         captured["service_name"] = service_name
+        captured["environment"] = environment
         captured["headers"] = headers
         captured["timeout"] = timeout
         return spans
@@ -1646,9 +1655,10 @@ class ExportOtelCommandTests(CliBaseTest):
             # Both local traces are loaded and forwarded to the exporter.
             self.assertEqual(len(captured["traces"]), 2)
             self.assertTrue(all(isinstance(trace, LoadedTrace) for trace in captured["traces"]))
-            # Defaults: service.name "bir", no headers, no timeout override.
+            # Defaults: service.name "bir", no environment, no headers, no timeout override.
             self.assertEqual(captured["endpoint"], "http://collector.test:4318/v1/traces")
             self.assertEqual(captured["service_name"], "bir")
+            self.assertIsNone(captured["environment"])
             self.assertIsNone(captured["headers"])
             self.assertIsNone(captured["timeout"])
             # The summary reports both the trace count and the exporter's span count.
@@ -1675,6 +1685,8 @@ class ExportOtelCommandTests(CliBaseTest):
                     "x-team=ml=ops",
                     "--service-name",
                     "rag-api",
+                    "--environment",
+                    "prod",
                     "--timeout",
                     "5",
                 )
@@ -1685,6 +1697,7 @@ class ExportOtelCommandTests(CliBaseTest):
             # value may itself contain '='.
             self.assertEqual(captured["headers"], {"x-api-key": "secret", "x-team": "ml=ops"})
             self.assertEqual(captured["service_name"], "rag-api")
+            self.assertEqual(captured["environment"], "prod")
             self.assertEqual(captured["timeout"], 5.0)
 
     def test_include_rotated_selects_rotated_traces(self) -> None:

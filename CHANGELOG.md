@@ -10,6 +10,21 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- **Richer OpenTelemetry export.** `export_traces_to_otlp(...)` (and `bir export-otel`)
+  now carry over the environment, source, and provider the SDK already records.
+  The OpenTelemetry `Resource` gains `deployment.environment` (from a trace's
+  `configure(environment=...)`) and `bir.source` (from `configure(source=...)`), and
+  generation spans gain `gen_ai.system` when an integration recorded the provider
+  (LiteLLM's `metadata.provider` or Pydantic AI's `metadata.gen_ai_system`) — never
+  guessed from the model string. A new `environment=` argument (and `--environment`
+  CLI flag) sets `deployment.environment` explicitly, overriding what the traces
+  recorded. When one export mixes environments or sources and none is forced, the
+  conflicting attribute moves from the `Resource` onto each span (`bir.environment` /
+  `bir.source`) instead of being dropped. With no environment/source/provider
+  recorded the export is byte-for-byte unchanged. `opentelemetry` stays in the
+  optional `[otel]` extra (`dependencies` remain empty), the local JSONL stays
+  read-only, and `schema_version` is unchanged (`1.0`).
+
 - **`SECURITY.md`** at the repo root documenting Bir's privacy and security posture:
   that input/output capture is opt-in and disabled by default, the built-in
   (non-disableable, best-effort) redaction categories actually implemented today and how

@@ -369,6 +369,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="service.name recorded on exported spans (default: bir).",
     )
     export_otel.add_argument(
+        "--environment",
+        help=(
+            "deployment.environment recorded on the exported Resource; overrides any "
+            "environment recorded in the traces (default: derived from the traces)."
+        ),
+    )
+    export_otel.add_argument(
         "--timeout",
         type=_non_negative_float,
         metavar="SECONDS",
@@ -960,6 +967,7 @@ def _cmd_export_otel(args: argparse.Namespace) -> int:
             traces,
             endpoint=args.endpoint,
             service_name=args.service_name,
+            environment=args.environment,
             headers=headers,
             timeout=args.timeout,
         )

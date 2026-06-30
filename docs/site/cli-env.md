@@ -43,7 +43,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
-| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
+| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 | `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
@@ -107,10 +107,18 @@ experiments, only traces.
 the optional `otel` extra (`pip install 'bir-sdk[otel]'`), reading the same files
 as `bir traces` (with `--path` and `--include-rotated`). `--endpoint` is required;
 `--header KEY=VALUE` is repeatable for backend auth (only the first `=` splits the
-key from the value), and `--service-name` and `--timeout` are forwarded to the
-exporter. It prints how many traces and spans were exported and exits non-zero
-with an install hint when the extra is missing. The export only reads the local
-JSONL; it never writes to or alters it.
+key from the value), and `--service-name`, `--environment`, and `--timeout` are
+forwarded to the exporter. The exported OpenTelemetry `Resource` records
+`service.name` plus, when the traces recorded them, `deployment.environment` (from
+`configure(environment=...)`) and `bir.source` (from `configure(source=...)`), and
+generation spans gain `gen_ai.system` when an integration recorded the provider.
+`--environment` sets `deployment.environment` explicitly and overrides whatever the
+traces recorded; without it, the value is derived from the traces and, when one run
+mixes environments or sources, the conflicting attribute moves from the `Resource`
+onto each span (`bir.environment` / `bir.source`) instead of being dropped. It
+prints how many traces and spans were exported and exits non-zero with an install
+hint when the extra is missing. The export only reads the local JSONL; it never
+writes to or alters it.
 
 `--include-rotated` on `bir traces`, `bir show`, `bir stats`, `bir send`, and
 `bir export-otel` also reads
