@@ -105,8 +105,9 @@ def write_two_traces(trace_path: Path) -> None:
         bir.score("helpfulness", 0.9)
         return "ok"
 
-    answer("first")
-    answer("second")
+    with deterministic_event_times():
+        answer("first")
+        answer("second")
 
 
 def write_filterable_traces(trace_path: Path) -> None:
@@ -155,9 +156,10 @@ def write_active_and_rotated_trace(trace_path: Path) -> None:
     def answer(value: str) -> str:
         return value
 
-    answer("first")
-    trace_path.rename(trace_path.with_name(trace_path.name + ".1"))
-    answer("second")
+    with deterministic_event_times():
+        answer("first")
+        trace_path.rename(trace_path.with_name(trace_path.name + ".1"))
+        answer("second")
 
 
 def write_rich_trace(trace_path: Path) -> str:
