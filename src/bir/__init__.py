@@ -29,7 +29,7 @@ try:
 except PackageNotFoundError:
     # Fallback only applies when running from source (PYTHONPATH=src) without an
     # install, where no distribution metadata exists.
-    __version__ = "0.2.0"
+    __version__ = "0.3.0"
 
 __all__ = [
     "__version__",

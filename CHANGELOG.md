@@ -8,6 +8,8 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-03
+
 ### Added
 
 - Opt-in per-example **`timeout`** (seconds) on `run_experiment()` and
