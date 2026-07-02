@@ -476,6 +476,19 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `run_experiment_async` with `record_traces=True` and a `timeout` now closes a
+  timed-out example's trace instead of leaking it. Previously the
+  `asyncio.wait_for` cancellation unwound the traced runner past its
+  `except Exception`, so the trace root event was never written: the example's
+  already-recorded child events became orphans — invisible to `load_traces`,
+  `bir traces`, and `bir show` (which require a root) yet still uploaded by
+  `send_events` — and the timeout error result carried `trace_id=None` even
+  though a trace had been opened. The traced runner now catches the
+  cancellation, writes the trace root with `"error"` status (child events stay
+  attached and loadable) and re-raises so `wait_for` still reports the timeout;
+  the trace id is surfaced to the timeout error result, whose `trace_id` now
+  links the closed trace. `timeout=None` and non-traced runs are byte-for-byte
+  unchanged, and `schema_version` stays `1.0`.
 - Prompt rendering during capture can no longer raise out of a generation.
   With `capture_rendered=True`, a template that fails to render — literal
   braces in the template (e.g. `'Return JSON like {"a": 1} for {q}'`), a

@@ -2672,6 +2672,46 @@ class RunExperimentTimeoutTests(unittest.TestCase):
             records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([record["example_id"] for record in records], ["q0", "q1", "q2"])
 
+    def test_async_timeout_closes_trace_root_and_links_trace_id(self) -> None:
+        # Regression test: a timed-out traced example must still write its trace
+        # root (keeping child events loadable instead of orphaned) and link the
+        # trace from the error result.
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            trace_path = Path(directory) / "traces.jsonl"
+            configure(trace_path=trace_path)
+            dataset = Dataset([DatasetExample(id="slow", input={"n": 0})])
+
+            async def task(n: int) -> int:
+                with span("child"):
+                    await asyncio.sleep(10)
+                return n
+
+            result = asyncio.run(
+                run_experiment_async(
+                    "timeout",
+                    dataset=dataset,
+                    task=task,
+                    evaluators=[json_valid()],
+                    path=experiment_path,
+                    raise_on_error=False,
+                    record_traces=True,
+                    timeout=0.05,
+                )
+            )
+
+            self.assertEqual(result.results[0].status, "error")
+            self.assertIn("task timed out after 0.05s", result.results[0].error or "")
+            traces = load_traces(trace_path)
+            self.assertEqual(len(traces), 1)
+            trace = traces[0]
+            self.assertEqual(trace.name, "experiment.timeout.slow")
+            self.assertEqual(trace.status, "error")
+            self.assertEqual(result.results[0].trace_id, trace.id)
+            child = next(event for event in trace.events if event.type == "span")
+            self.assertEqual(child.name, "child")
+            self.assertEqual(child.trace_id, trace.id)
+
     def test_async_timeout_raises_when_raise_on_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "timeout.jsonl"

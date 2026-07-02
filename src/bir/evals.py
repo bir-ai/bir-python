@@ -1094,8 +1094,12 @@ async def run_experiment_async(
     ``timeout`` has its task cancelled and awaited (so no pending-task warning
     leaks) and is recorded as an ``"error"``-status result with a ``"task timed
     out after Ns"`` message — the same shape as any other failed example, so
-    ``raise_on_error`` is honored and dataset order is preserved.
-    ``timeout=None`` is byte-for-byte identical to the previous behavior.
+    ``raise_on_error`` is honored and dataset order is preserved. With
+    ``record_traces=True``, a timed-out example's trace root is written with
+    error status before the cancellation unwinds — its already-recorded child
+    events stay attached and loadable — and the error result's ``trace_id``
+    links that trace. ``timeout=None`` is byte-for-byte identical to the
+    previous behavior.
     """
 
     if not name:
@@ -1125,6 +1129,12 @@ async def run_experiment_async(
                     record_traces=record_traces,
                 )
             else:
+                # The holder lets the traced runner publish its trace id before a
+                # timeout cancellation unwinds it, so the error result below can
+                # link the closed trace. wait_for awaits the cancelled inner task
+                # before raising TimeoutError, so by then the holder is final and
+                # the trace root (if any) has been written.
+                trace_id_holder: list[str | None] = [None]
                 try:
                     result, error = await asyncio.wait_for(
                         _capture_example_async(
@@ -1134,12 +1144,15 @@ async def run_experiment_async(
                             task=task,
                             evaluators=evaluator_list,
                             record_traces=record_traces,
+                            trace_id_holder=trace_id_holder,
                         ),
                         timeout,
                     )
                 except asyncio.TimeoutError:
                     exc = _timeout_exc(timeout)
                     result, error = _error_example_result(example, exc), exc
+                    if trace_id_holder[0] is not None:
+                        result = replace(result, trace_id=trace_id_holder[0])
             results_by_index[index] = result
             if error is not None:
                 errors_by_index[index] = error
@@ -1512,13 +1525,17 @@ async def _capture_example_async(
     task: Callable[..., Any],
     evaluators: list[DeterministicEvaluator],
     record_traces: bool,
+    trace_id_holder: list[str | None] | None = None,
 ) -> tuple[ExperimentExampleResult, Exception | None]:
     """Async counterpart to :func:`_capture_example`.
 
     Returns the example result paired with any failure. A cancellation (including
     the one :func:`asyncio.wait_for` raises on timeout) is a ``BaseException`` and
     is intentionally not caught here, so it propagates to ``wait_for`` and surfaces
-    as a recorded timeout in the caller.
+    as a recorded timeout in the caller. ``trace_id_holder`` is a one-element
+    mutable cell the caller's timeout path supplies so the traced runner can
+    publish its trace id (and close the trace root on cancellation) before that
+    cancellation unwinds; the non-traced path never touches it.
     """
 
     if record_traces:
@@ -1528,6 +1545,7 @@ async def _capture_example_async(
             example=example,
             task=task,
             evaluators=evaluators,
+            trace_id_holder=trace_id_holder,
         )
     try:
         return await _run_example_async(example, task, evaluators), None
@@ -1617,6 +1635,7 @@ async def _run_traced_example_async(
     example: DatasetExample,
     task: Callable[..., Any],
     evaluators: list[DeterministicEvaluator],
+    trace_id_holder: list[str | None] | None = None,
 ) -> tuple[ExperimentExampleResult, Exception | None]:
     # ``asyncio.create_task`` copies the current context for each example, so the
     # trace contextvars set here stay isolated from concurrently running examples
@@ -1625,10 +1644,25 @@ async def _run_traced_example_async(
     trace.__enter__()
     if trace.id is None:
         raise RuntimeError("bir experiment trace context did not provide a trace id")
+    if trace_id_holder is not None:
+        trace_id_holder[0] = trace.id
 
     try:
         result = await _run_example_async(example, task, evaluators)
         _record_experiment_scores(trace.id, result)
+    except asyncio.CancelledError as exc:
+        # A ``trace_id_holder`` marks the caller's ``asyncio.wait_for`` timeout
+        # boundary, whose expiry cancels this coroutine. Cancellation is a
+        # BaseException, so the ``except Exception`` below never sees it — without
+        # this handler the trace root event would never be written and the
+        # already-written child events would be orphaned (invisible to
+        # ``load_traces``). Close the root with error status, then re-raise so
+        # ``wait_for`` still observes the cancellation and raises TimeoutError.
+        # Without a holder (``timeout=None``) cancellation propagates untouched,
+        # exactly as before.
+        if trace_id_holder is not None:
+            trace.__exit__(type(exc), exc, exc.__traceback__)
+        raise
     except Exception as exc:
         trace.__exit__(type(exc), exc, exc.__traceback__)
         return replace(_error_example_result(example, exc), trace_id=trace.id), exc
