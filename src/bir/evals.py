@@ -16,22 +16,24 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from html import escape as _html_escape
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
 from ._sdk import (
     _TransientSendError,
+    _duration_ms,
     _is_retryable_status,
+    _now,
     _record_score_event,
     _safe_capture,
     _safe_error,
     _send_with_retry,
     _trace_context,
     _validate_non_negative_int,
+    _validate_non_negative_number,
 )
-from ._sdk import _validate_non_negative_number as _validate_non_negative_send_number
 
 _USE_EXAMPLE_EXPECTED = object()
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
@@ -679,7 +681,7 @@ def field_contains(
 def latency_under(max_ms: float, *, name: str = "latency_under") -> DeterministicEvaluator:
     """Create an evaluator that scores 1.0 when task latency is under a threshold."""
 
-    max_duration = _validate_non_negative_number(max_ms, "max_ms")
+    max_duration = _validate_non_negative_float(max_ms, "max_ms")
 
     def evaluate(context: EvaluationContext) -> EvalResult:
         return EvalResult(
@@ -702,7 +704,7 @@ def cost_under(
 ) -> DeterministicEvaluator:
     """Create an evaluator that scores 1.0 when a reported cost is under a threshold."""
 
-    max_cost_value = _validate_non_negative_number(max_cost, "max_cost")
+    max_cost_value = _validate_non_negative_float(max_cost, "max_cost")
     if not field:
         raise ValueError("cost field must not be empty")
 
@@ -1316,7 +1318,7 @@ def compare_experiments(
     default) ``example_deltas`` is empty and the diff is identical to before.
     """
 
-    validated_tolerance = _validate_non_negative_number(tolerance, "tolerance")
+    validated_tolerance = _validate_non_negative_float(tolerance, "tolerance")
     validated_missing_score = _validate_missing_score(missing_score)
 
     baseline_result = baseline if isinstance(baseline, ExperimentResult) else load_experiment(baseline)
@@ -1460,9 +1462,9 @@ def send_experiment(
     a single attempt with no sleep, so the default behavior is unchanged.
     """
 
-    timeout = float(_validate_non_negative_send_number(timeout, "timeout"))
+    timeout = float(_validate_non_negative_number(timeout, "timeout"))
     retries = _validate_non_negative_int(retries, "retries")
-    backoff = float(_validate_non_negative_send_number(backoff, "backoff"))
+    backoff = float(_validate_non_negative_number(backoff, "backoff"))
 
     experiment_path = Path(path)
     if not experiment_path.exists():
@@ -2293,7 +2295,7 @@ def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
     return captured
 
 
-def _validate_non_negative_number(value: Any, field: str) -> float:
+def _validate_non_negative_float(value: Any, field: str) -> float:
     numeric_value = _validate_finite_number(value, field)
     if numeric_value < 0:
         raise ValueError(f"{field} must be non-negative")
@@ -2329,7 +2331,7 @@ def _validate_score_tolerances(
     for name, value in score_tolerances.items():
         if not isinstance(name, str) or not name:
             raise ValueError("score_tolerances names must be non-empty strings")
-        resolved[name] = _validate_non_negative_number(value, f"score_tolerances[{name!r}]")
+        resolved[name] = _validate_non_negative_float(value, f"score_tolerances[{name!r}]")
         if name not in shared_names:
             unknown.append(name)
     if unknown:
@@ -2532,13 +2534,3 @@ def _markdown_cell(text: str) -> str:
 
 def _json_line(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
-
-
-def _duration_ms(start_time: str, end_time: str) -> float:
-    start = datetime.fromisoformat(start_time)
-    end = datetime.fromisoformat(end_time)
-    return (end - start).total_seconds() * 1000
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
