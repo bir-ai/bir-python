@@ -669,6 +669,7 @@ def send_events(
     are skipped across the whole selected file set.
     """
 
+    timeout = float(_validate_non_negative_number(timeout, "timeout"))
     retries = _validate_non_negative_int(retries, "retries")
     backoff = float(_validate_non_negative_number(backoff, "backoff"))
 

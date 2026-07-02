@@ -1784,15 +1784,25 @@ class EvalTests(unittest.TestCase):
 
             self.assertEqual(sleeps, [])
 
-    def test_send_experiment_validates_retries_and_backoff(self) -> None:
+    def test_send_experiment_validates_timeout_retries_and_backoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "experiment.jsonl"
             build_sendable_experiment(experiment_path)
 
             def must_not_send(*_args: Any, **_kwargs: Any) -> None:
-                raise AssertionError("invalid retry/backoff must fail before any request")
+                raise AssertionError("invalid timeout/retry/backoff must fail before any request")
 
             with patch("urllib.request.urlopen", side_effect=must_not_send):
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    send_experiment(experiment_path, timeout=-1)
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, timeout=float("nan"))
+                with self.assertRaises(ValueError):
+                    send_experiment(experiment_path, timeout=float("inf"))
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, timeout=True)
+                with self.assertRaises(TypeError):
+                    send_experiment(experiment_path, timeout="fast")  # type: ignore[arg-type]
                 with self.assertRaises(ValueError):
                     send_experiment(experiment_path, retries=-1)
                 with self.assertRaises(TypeError):

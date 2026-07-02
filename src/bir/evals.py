@@ -1460,6 +1460,7 @@ def send_experiment(
     a single attempt with no sleep, so the default behavior is unchanged.
     """
 
+    timeout = float(_validate_non_negative_send_number(timeout, "timeout"))
     retries = _validate_non_negative_int(retries, "retries")
     backoff = float(_validate_non_negative_send_number(backoff, "backoff"))
 

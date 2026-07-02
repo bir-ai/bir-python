@@ -476,6 +476,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `send_events` and `send_experiment` now validate their `timeout` argument the
+  same way they already validate `retries` and `backoff`: a negative, NaN, or
+  infinite value raises `ValueError` naming `timeout`, and a boolean or other
+  non-numeric value raises `TypeError`, before any file or network access.
+  Previously an invalid timeout flowed into `urllib.request.urlopen` and failed
+  with an opaque downstream error (the CLI's own `--timeout` validation was
+  unaffected). Valid calls are unchanged; no public API, event schema, or
+  fixture change.
 - `run_experiment_async` with `record_traces=True` and a `timeout` now closes a
   timed-out example's trace instead of leaking it. Previously the
   `asyncio.wait_for` cancellation unwound the traced runner past its

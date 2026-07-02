@@ -2778,6 +2778,24 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(len(batch_attempts), 3)
             self.assertEqual(sleeps, [0.5, 1.0])
 
+    def test_send_events_validates_timeout(self) -> None:
+        with temporary_workdir():
+
+            def must_not_send(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid timeout must fail before any request")
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=must_not_send):
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    send_events("http://server.test", timeout=-1)
+                with self.assertRaises(ValueError):
+                    send_events("http://server.test", timeout=float("nan"))
+                with self.assertRaises(ValueError):
+                    send_events("http://server.test", timeout=float("inf"))
+                with self.assertRaises(TypeError):
+                    send_events("http://server.test", timeout=True)
+                with self.assertRaises(TypeError):
+                    send_events("http://server.test", timeout="fast")  # type: ignore[arg-type]
+
     def test_send_events_does_not_retry_client_error(self) -> None:
         with temporary_workdir():
 
