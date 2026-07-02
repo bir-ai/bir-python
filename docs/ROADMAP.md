@@ -59,7 +59,7 @@ are done and intentionally not re-proposed:
   `bir.logging` filter, `set_metadata()`/`set_model()` on context managers,
   `@observe(metadata=)`.
 - **Docs / CI** — strict MkDocs build + GitHub Pages deploy; generated
-  mkdocstrings API reference; CI matrix of `{ubuntu, windows, macos} × {3.10–3.13}`;
+  mkdocstrings API reference; CI matrix of `{ubuntu, windows, macos} × {3.10–3.14}`;
   shared-fixture drift guard (`scripts/fixtures.py check`).
 
 ### Conventions / idioms the code follows

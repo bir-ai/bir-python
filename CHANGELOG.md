@@ -444,6 +444,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- **Python 3.14 is now tested and declared supported.** The CI matrix runs the
+  full suite on 3.14 across ubuntu/windows/macos, and the
+  `Programming Language :: Python :: 3.14` trove classifier is added to
+  `pyproject.toml`. `requires-python` stays `>=3.10` — no code, dependency,
+  public API, event schema (`schema_version` stays `1.0`), or fixture change.
+
 - The release gate (`scripts/verify_release.py`) now verifies the **source
   distribution (sdist) in addition to the wheel**. After building and checking
   the wheel, it builds the sdist (`python -m build --sdist --no-isolation`, with

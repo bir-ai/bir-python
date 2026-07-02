@@ -41,7 +41,7 @@ class DocumentationCIContractTests(unittest.TestCase):
 
     def test_sdk_python_matrix_remains_unchanged(self) -> None:
         sdk_job = self._job("sdk")
-        self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13"]', sdk_job)
+        self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', sdk_job)
         self.assertNotIn(".[docs]", sdk_job)
         self.assertNotIn("mkdocs", sdk_job)
 
