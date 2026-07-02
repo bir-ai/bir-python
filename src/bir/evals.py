@@ -9,6 +9,8 @@ import inspect
 import json
 import math
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -968,12 +970,16 @@ def run_experiment(
     runs longer than ``timeout`` is recorded as an ``"error"``-status result with
     a ``"task timed out after Ns"`` message — the same shape as any other failed
     example, so ``raise_on_error`` is honored — and the run continues with the
-    remaining examples. The timeout is enforced by running each example on a
-    worker thread and waiting at most ``timeout`` seconds for it (the serial
-    ``max_workers=1`` path uses a dedicated single-worker executor per example).
-    Python cannot force a thread to stop, so a timed-out task keeps running in
-    the background until it returns on its own; its result is discarded.
-    ``timeout=None`` is byte-for-byte identical to the previous behavior.
+    remaining examples. The limit applies to each example's own runtime, measured
+    from the moment its task starts executing: with ``max_workers`` greater than
+    1, an example queued behind others waiting for a free worker thread accrues
+    no timeout while it waits (the serial ``max_workers=1`` path uses a dedicated
+    single-worker executor per example, so its task starts immediately). Python
+    cannot force a thread to stop, so a timed-out task keeps running in the
+    background until it returns on its own; its result is discarded, and it
+    occupies its worker slot until then, which can delay — but never time out —
+    examples still waiting in the queue. ``timeout=None`` is byte-for-byte
+    identical to the previous behavior.
     """
 
     if not name:
@@ -1559,8 +1565,13 @@ def _evaluate_example_output(
     )
 
 
-def _error_example_result(example: DatasetExample, exc: Exception) -> ExperimentExampleResult:
-    timestamp = _now()
+def _error_example_result(
+    example: DatasetExample,
+    exc: Exception,
+    *,
+    start_time: str | None = None,
+) -> ExperimentExampleResult:
+    end_time = _now()
     return ExperimentExampleResult(
         id=str(uuid4()),
         example_id=example.id,
@@ -1568,8 +1579,8 @@ def _error_example_result(example: DatasetExample, exc: Exception) -> Experiment
         expected=_safe_capture(example.expected),
         output=None,
         scores=[],
-        start_time=timestamp,
-        end_time=timestamp,
+        start_time=start_time if start_time is not None else end_time,
+        end_time=end_time,
         status="error",
         error=_safe_error(exc),
     )
@@ -1786,25 +1797,50 @@ def _collect_threaded_results_with_timeout(
 ) -> None:
     """Run examples on a thread pool, recording a timeout error per example.
 
-    Every example is submitted up front, then awaited in dataset order with
-    :meth:`concurrent.futures.Future.result(timeout=...)`. An example that does
-    not finish within ``timeout`` seconds is recorded as a failed example via the
-    same :func:`_error_example_result` shape, with the timeout exception stored so
-    ``raise_on_error`` can re-raise it. The executor is shut down without waiting,
-    so a timed-out worker that is still running (Python cannot force a thread to
-    stop) never blocks the run from finishing; it keeps running in the background
-    until its task returns.
+    Every example is submitted up front, but each example's timeout clock starts
+    only when its task actually begins running on a worker thread, so time spent
+    queued behind other examples never counts against it. The worker records its
+    start (a monotonic deadline anchor plus the wall-clock timestamp) and sets a
+    started event as its first action; the collector, walking futures in dataset
+    order, waits untimed for that event and then allows the task ``timeout``
+    seconds measured from the recorded start. An example whose own runtime
+    exceeds ``timeout`` is recorded as a failed example via the same
+    :func:`_error_example_result` shape — stamped with the task's real start
+    time so ``duration_ms`` reflects the wait — with the timeout exception
+    stored so ``raise_on_error`` can re-raise it. Python cannot force a thread
+    to stop, so a timed-out task keeps running and occupies its pool slot until
+    it returns; a queued example may therefore wait for a free worker, but its
+    own clock is not running while it waits. The executor is shut down without
+    waiting so the run finishes as soon as every example is resolved.
     """
+
+    started_events = [threading.Event() for _ in examples]
+    started_monotonic = [0.0] * len(examples)
+    started_wall = [""] * len(examples)
+
+    def run_one_recording_start(
+        index: int, example: DatasetExample
+    ) -> tuple[int, ExperimentExampleResult, Exception | None]:
+        started_monotonic[index] = time.monotonic()
+        started_wall[index] = _now()
+        started_events[index].set()
+        return run_one(index, example)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
-        futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
+        futures = [
+            executor.submit(run_one_recording_start, index, example)
+            for index, example in enumerate(examples)
+        ]
         for index, (future, example) in enumerate(zip(futures, examples)):
+            started_events[index].wait()
+            remaining = timeout - (time.monotonic() - started_monotonic[index])
             try:
-                result_index, result, error = future.result(timeout=timeout)
+                result_index, result, error = future.result(timeout=max(remaining, 0.0))
             except concurrent.futures.TimeoutError:
                 exc = _timeout_exc(timeout)
-                result_index, result, error = index, _error_example_result(example, exc), exc
+                result = _error_example_result(example, exc, start_time=started_wall[index])
+                result_index, error = index, exc
             results_by_index[result_index] = result
             if error is not None:
                 errors_by_index[result_index] = error

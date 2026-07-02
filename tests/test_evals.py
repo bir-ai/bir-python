@@ -5,6 +5,7 @@ import json
 import math
 import tempfile
 import threading
+import time
 import urllib.error
 import unittest
 from collections.abc import Awaitable, Callable
@@ -2587,6 +2588,46 @@ class RunExperimentTimeoutTests(unittest.TestCase):
             self.assertIn("task timed out", result.results[1].error or "")
             records = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([record["example_id"] for record in records], ["q0", "q1", "q2"])
+
+    def test_threaded_timeout_excludes_worker_queue_time(self) -> None:
+        # Regression test: with more examples than workers, an example's timeout
+        # clock must start when its task starts, not while it sits queued behind
+        # slow examples waiting for a free worker thread.
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "timeout.jsonl"
+            dataset = Dataset(
+                [
+                    DatasetExample(id="slow0", input={"slow": True}),
+                    DatasetExample(id="slow1", input={"slow": True}),
+                    DatasetExample(id="fast", input={"slow": False}),
+                ]
+            )
+
+            def task(slow: bool) -> str:
+                if slow:
+                    time.sleep(0.25)  # outlives the timeout, then frees its worker
+                    return "slow-done"
+                return "fast-done"
+
+            result = run_experiment(
+                "timeout",
+                dataset=dataset,
+                task=task,
+                evaluators=[json_valid()],
+                path=experiment_path,
+                raise_on_error=False,
+                max_workers=2,
+                timeout=0.05,
+            )
+
+            self.assertEqual([row.example_id for row in result.results], ["slow0", "slow1", "fast"])
+            self.assertEqual([row.status for row in result.results], ["error", "error", "success"])
+            self.assertEqual(result.results[2].output, "fast-done")
+            for row in result.results[:2]:
+                self.assertIn("task timed out after 0.05s", row.error or "")
+                # The error row carries the task's real start time, so the
+                # recorded duration covers the timed-out wait instead of 0.
+                self.assertGreater(row.duration_ms, 0)
 
     def test_async_timeout_records_error_cancels_task_and_preserves_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,19 +16,26 @@ Before publishing, verify the release with the SDK release checklist in
   limit is recorded as an `"error"`-status result with a `"task timed out after
   Ns"` message (the same shape as any other failure, so `raise_on_error` is
   honored and dataset order is preserved) and the run continues with the
-  remaining examples. The sync runner enforces it with
-  `concurrent.futures.Future.result(timeout=...)` on a worker thread (the serial
-  `max_workers=1` path uses a dedicated single-worker executor per example so a
-  timed-out worker never blocks the next one); the async runner wraps each
-  example coroutine in `asyncio.wait_for(...)`, cancelling and awaiting the
-  timed-out task so no pending-task warning leaks. Python cannot force a thread to
-  stop, so a timed-out sync task keeps running in the background until it returns
-  on its own; its result is discarded. `timeout` must be a positive, finite
+  remaining examples. The limit applies to each example's own runtime, measured
+  from the moment its task starts: in the threaded runner (`max_workers > 1`) an
+  example queued waiting for a free worker accrues no timeout while it waits —
+  the worker records the task's start and the collector allows `timeout` seconds
+  from that recorded start, and a timed-out example's error row is stamped with
+  the task's real start time so its `duration_ms` reflects the timed-out wait.
+  The serial `max_workers=1` path uses a dedicated single-worker executor per
+  example (its task starts immediately, and a timed-out worker never blocks the
+  next one); the async runner wraps each example coroutine in
+  `asyncio.wait_for(...)`, cancelling and awaiting the timed-out task so no
+  pending-task warning leaks. Python cannot force a thread to stop, so a
+  timed-out sync task keeps running in the background until it returns on its
+  own; its result is discarded, and it holds its worker slot until then, which
+  can delay — but never time out — still-queued examples. `timeout` must be a
+  positive, finite
   number and is validated at call time. It is an additive keyword — no new
   exported symbol — and `timeout=None` (the default) is byte-for-byte identical
   to the previous behavior, including the persisted JSONL/summary files
   (`schema_version` stays `1.0`; a timeout reuses the existing error fields).
-  Stdlib only (`concurrent.futures`, `asyncio`); `dependencies = []`.
+  Stdlib only (`concurrent.futures`, `threading`, `asyncio`); `dependencies = []`.
 
 - **Richer OpenTelemetry export.** `export_traces_to_otlp(...)` (and `bir export-otel`)
   now carry over the environment, source, and provider the SDK already records.
