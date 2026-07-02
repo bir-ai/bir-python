@@ -469,6 +469,19 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Prompt rendering during capture can no longer raise out of a generation.
+  With `capture_rendered=True`, a template that fails to render — literal
+  braces in the template (e.g. `'Return JSON like {"a": 1} for {q}'`), a
+  missing variable, or any other `str.format` failure — previously raised
+  `KeyError` from the generation's `__exit__`: a successful body escaped the
+  `with` block with the render error, and a body exception was masked by it.
+  Rendering failures are now recorded on the prompt metadata as a
+  `rendered_error` marker (redacted like any error text) instead of a
+  `rendered` value; the generation event is still written and a body exception
+  propagates unmasked. Rendering stays lazy (`prompt()` still never renders
+  eagerly), a direct `PromptRecord.render()` call is unchanged, and
+  `schema_version` stays `1.0` (`rendered_error` lives inside the free-form
+  prompt metadata payload).
 - `load_traces` (and the `send_events` ordering that builds on it) now sorts an
   enclosing parent before a nested child even when they share an identical
   `start_time`. Previously the `start_time` tie fell through to an `end_time`

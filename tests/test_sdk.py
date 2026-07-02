@@ -1652,6 +1652,85 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(prompt_metadata["rendered"], "Answer hello with token=[redacted]")
             self.assertEqual(prompt_metadata["metadata"], {"owner": "evals", "secret": "[redacted]"})
 
+    def test_prompt_capture_rendered_tolerates_literal_braces_in_template(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                prompt_record = prompt(
+                    "answer_question",
+                    template='Return JSON like {"a": 1} for {q}',
+                    variables={"q": "hello"},
+                    capture_template=True,
+                    capture_variables=True,
+                    capture_rendered=True,
+                )
+                with generation("local.llm", prompt=prompt_record):
+                    pass
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["status"], "success")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            prompt_metadata = cast(dict[str, Any], metadata["prompt"])
+            self.assertEqual(prompt_metadata["template"], 'Return JSON like {"a": 1} for {q}')
+            self.assertEqual(prompt_metadata["variables"], {"q": "hello"})
+            self.assertNotIn("rendered", prompt_metadata)
+            self.assertIn("rendered_error", prompt_metadata)
+
+    def test_prompt_capture_rendered_tolerates_missing_variable(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> str:
+                prompt_record = prompt(
+                    "answer_question",
+                    template="Answer {question} using {style}",
+                    variables={"question": "hello"},
+                    capture_rendered=True,
+                )
+                with generation("local.llm", prompt=prompt_record):
+                    pass
+                return "ok"
+
+            answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["status"], "success")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            prompt_metadata = cast(dict[str, Any], metadata["prompt"])
+            self.assertNotIn("rendered", prompt_metadata)
+            self.assertIn("style", cast(str, prompt_metadata["rendered_error"]))
+
+    def test_prompt_render_failure_does_not_mask_generation_body_exception(self) -> None:
+        with temporary_workdir() as workdir:
+
+            @observe()
+            def answer() -> None:
+                prompt_record = prompt(
+                    "answer_question",
+                    template='Return JSON like {"a": 1} for {q}',
+                    variables={"q": "hello"},
+                    capture_rendered=True,
+                )
+                with generation("local.llm", prompt=prompt_record):
+                    raise RuntimeError("model failed")
+
+            with self.assertRaisesRegex(RuntimeError, "model failed"):
+                answer()
+
+            events = read_events(workdir / ".bir" / "traces.jsonl")
+            generation_event = next(event for event in events if event["type"] == "generation")
+            self.assertEqual(generation_event["status"], "error")
+            self.assertEqual(generation_event["error"], "model failed")
+            metadata = cast(dict[str, Any], generation_event["metadata"])
+            prompt_metadata = cast(dict[str, Any], metadata["prompt"])
+            self.assertIn("rendered_error", prompt_metadata)
+
     def test_prompt_rejects_empty_name(self) -> None:
         with self.assertRaisesRegex(ValueError, "prompt name"):
             prompt("")

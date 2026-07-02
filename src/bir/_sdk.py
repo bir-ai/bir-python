@@ -265,7 +265,15 @@ class PromptRecord:
         if self.capture_variables:
             payload["variables"] = _safe_capture(self.variables)
         if self.capture_rendered:
-            payload["rendered"] = _safe_capture(self.render())
+            # Rendering can fail on a template/variables mismatch (e.g. literal
+            # braces in the template). Tracing must never break the traced call,
+            # so record why rendering failed instead of raising out of __exit__.
+            try:
+                rendered = self.render()
+            except Exception as exc:
+                payload["rendered_error"] = _safe_error(exc)
+            else:
+                payload["rendered"] = _safe_capture(rendered)
         if self.metadata:
             payload["metadata"] = _safe_capture(self.metadata)
         return payload
