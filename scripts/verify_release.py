@@ -120,10 +120,22 @@ def run_sdk_tests() -> None:
     )
 
 
+def venv_bin(env_dir: Path, name: str) -> Path:
+    """Return the path of a named executable inside a virtual environment.
+
+    Windows venvs keep executables in ``Scripts\\`` with an ``.exe`` suffix;
+    POSIX venvs use ``bin/`` with the bare name.
+    """
+
+    if os.name == "nt":
+        return env_dir / "Scripts" / f"{name}.exe"
+    return env_dir / "bin" / name
+
+
 def run_pyright() -> None:
     """Run pyright from the repo virtual environment or PATH."""
 
-    pyright = REPO_ROOT / ".venv" / "bin" / "pyright"
+    pyright = venv_bin(REPO_ROOT / ".venv", "pyright")
     if not pyright.exists():
         resolved = shutil.which("pyright")
         if resolved is None:
@@ -282,7 +294,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
     """Install the wheel into a fresh venv and run a basic SDK smoke test."""
 
     venv.EnvBuilder(with_pip=True).create(smoke_env)
-    smoke_python = smoke_env / "bin" / "python"
+    smoke_python = venv_bin(smoke_env, "python")
     install_env = os.environ.copy()
     install_env["PIP_NO_CACHE_DIR"] = "1"
     run(
@@ -318,7 +330,7 @@ def run_console_scripts(env_dir: Path, work_dir: Path) -> None:
     # ``traces``/``stats`` exercise subcommands (no local traces exist, so they
     # exit 0).
     if console_scripts():
-        bir_script = env_dir / "bin" / "bir"
+        bir_script = venv_bin(env_dir, "bir")
         run([str(bir_script), "--version"], cwd=work_dir, label="installed bir --version")
         run([str(bir_script), "traces"], cwd=work_dir, label="installed bir traces")
         run([str(bir_script), "stats"], cwd=work_dir, label="installed bir stats")
@@ -583,7 +595,7 @@ def run_sdist_install_smoke_test(
     backend = _stage_build_backend(backend_dir)
 
     venv.EnvBuilder(with_pip=True).create(sdist_env)
-    sdist_python = sdist_env / "bin" / "python"
+    sdist_python = venv_bin(sdist_env, "python")
     install_env = os.environ.copy()
     install_env["PIP_NO_CACHE_DIR"] = "1"
     # Building the sdist into a wheel needs a PEP 517 backend. ``--no-index``
