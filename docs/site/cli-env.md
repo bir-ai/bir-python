@@ -25,6 +25,8 @@ bir experiment-report <id> --format markdown --output report.md  # write a file
 bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
+bir eval-gate baseline.jsonl candidate.jsonl \
+  --tolerance 0.01 --score-tolerance latency_under=0.05 --missing-score regress
 bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' extra
 bir config                    # print the effective resolved configuration
 bir config --json             # the same fields as machine-readable JSON
@@ -42,7 +44,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH]` | Render one experiment to a self-contained HTML or Markdown report. |
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
-| `bir eval-gate BASELINE CANDIDATE [--tolerance N]` | Fail when a shared aggregate evaluator regresses past tolerance. |
+| `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
 | `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 | `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
