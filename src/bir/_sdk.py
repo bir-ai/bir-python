@@ -617,7 +617,13 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
     traces possibly being split across rotated files.
     """
 
-    events = load_events(path, include_rotated=include_rotated)
+    events = _iter_trace_events(path, include_rotated=include_rotated)
+    return _traces_from_events(events)
+
+
+def _traces_from_events(events: Iterable[TraceEvent]) -> list[LoadedTrace]:
+    """Group already parsed events without reading their JSONL store again."""
+
     events_by_trace_id: dict[str, list[TraceEvent]] = {}
     for event in events:
         events_by_trace_id.setdefault(event.trace_id, []).append(event)
@@ -773,7 +779,7 @@ def _events_for_sending(path: str | Path | None = None, *, include_rotated: bool
     """
 
     events = load_events(path, include_rotated=include_rotated)
-    traces = load_traces(path, include_rotated=include_rotated)
+    traces = _traces_from_events(events)
     ordered_events: list[TraceEvent] = []
     ordered_event_ids: set[str] = set()
 

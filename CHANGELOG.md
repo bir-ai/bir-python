@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- Upload preparation now parses the selected active/rotated JSONL store once
+  instead of independently loading events and grouped traces. Trace grouping
+  reuses the same parsed event objects while preserving root-first ordering, ID
+  deduplication, orphan handling, sent-ID semantics, and the existing single
+  HTTP batch contract.
+
 - Local trace loading now builds on an internal, lazy JSONL event iterator that
   validates one line at a time and preserves active/rotated file ordering and
   existing file-and-line error context. Public `load_events()` and

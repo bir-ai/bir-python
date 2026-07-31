@@ -3060,6 +3060,29 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(result.attempted, 2)
             self.assertEqual(result.accepted, 2)
 
+    def test_send_events_parses_the_selected_store_once(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> str:
+                score("helpfulness", 0.9)
+                return "ok"
+
+            answer()
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                return batch_response_accepting(posted_request_batch(request))
+
+            with (
+                patch("bir._sdk._iter_trace_events", wraps=_iter_trace_events) as iter_trace_events,
+                patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
+                result = send_events("http://server.test")
+
+            iter_trace_events.assert_called_once_with(None, include_rotated=False)
+            self.assertEqual(result.attempted, 2)
+            self.assertEqual(result.accepted, 2)
+
     def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
         with temporary_workdir() as workdir:
             with trace("complete"):
