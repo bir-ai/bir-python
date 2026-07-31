@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ from bir._sdk import (
     _Config,
     _config_from_env,
     _InterProcessFileLock,
+    _iter_trace_events,
     _parse_env_bool,
     _parse_env_int,
     _parse_env_sample_rate,
@@ -3153,6 +3155,43 @@ class SdkTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Invalid JSON"):
                 load_events(trace_path)
+
+    def test_internal_event_iterator_reads_rotated_files_oldest_first(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            for name in ("oldest", "middle", "newest"):
+                with trace(name):
+                    pass
+
+            lines = trace_path.read_text(encoding="utf-8").splitlines()
+            (workdir / ".bir" / "traces.jsonl.2").write_text(lines[0] + "\n", encoding="utf-8")
+            (workdir / ".bir" / "traces.jsonl.1").write_text(lines[1] + "\n", encoding="utf-8")
+            trace_path.write_text(lines[2] + "\n", encoding="utf-8")
+
+            events = _iter_trace_events(trace_path, include_rotated=True)
+
+            self.assertIs(iter(events), events)
+            self.assertEqual([event.name for event in events], ["oldest", "middle", "newest"])
+
+    def test_internal_event_iterator_validates_lazily_with_file_and_line_context(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            with trace("oldest"):
+                pass
+            valid_line = trace_path.read_text(encoding="utf-8")
+            oldest_path = workdir / ".bir" / "traces.jsonl.2"
+            invalid_path = workdir / ".bir" / "traces.jsonl.1"
+            oldest_path.write_text(valid_line, encoding="utf-8")
+            invalid_path.write_text("\nnot-json\n", encoding="utf-8")
+
+            events = _iter_trace_events(trace_path, include_rotated=True)
+
+            self.assertEqual(next(events).name, "oldest")
+            with self.assertRaisesRegex(
+                ValueError,
+                rf"Invalid JSON in trace file {re.escape(str(invalid_path))} at line 2",
+            ):
+                next(events)
 
     def test_concurrent_trace_writes_produce_valid_jsonl(self) -> None:
         with temporary_workdir() as workdir:

@@ -13,6 +13,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -544,21 +545,33 @@ def load_events(path: str | Path | None = None, *, include_rotated: bool = False
     occur mid-trace, a single logical trace may be split across files.
     """
 
+    return list(_iter_trace_events(path, include_rotated=include_rotated))
+
+
+def _iter_trace_events(
+    path: str | Path | None = None,
+    *,
+    include_rotated: bool = False,
+) -> Iterator[TraceEvent]:
+    """Yield validated local events in their original write order.
+
+    The iterator keeps only one JSONL line and parsed event live at a time. It is
+    the internal streaming primitive for store operations; public loaders still
+    materialize their documented list return types.
+    """
+
     trace_path = Path(path) if path is not None else _config.trace_path
-    if not include_rotated:
-        return _load_events_from_file(trace_path)
-
-    events: list[TraceEvent] = []
-    for file_path in _trace_files_oldest_first(trace_path):
-        events.extend(_load_events_from_file(file_path))
-    return events
+    trace_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
+    for file_path in trace_files:
+        yield from _iter_trace_events_from_file(file_path)
 
 
-def _load_events_from_file(trace_path: Path) -> list[TraceEvent]:
+def _iter_trace_events_from_file(trace_path: Path) -> Iterator[TraceEvent]:
+    """Yield validated events from one JSONL file."""
+
     if not trace_path.exists():
-        return []
+        return
 
-    events: list[TraceEvent] = []
     with trace_path.open("r", encoding="utf-8") as trace_file:
         for line_number, line in enumerate(trace_file, start=1):
             stripped = line.strip()
@@ -570,8 +583,7 @@ def _load_events_from_file(trace_path: Path) -> list[TraceEvent]:
                 raise ValueError(f"Invalid JSON in trace file {trace_path} at line {line_number}") from exc
             if not isinstance(payload, dict):
                 raise ValueError(f"Trace file {trace_path} line {line_number} must contain a JSON object")
-            events.append(_trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number))
-    return events
+            yield _trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number)
 
 
 def _trace_files_oldest_first(trace_path: Path) -> list[Path]:

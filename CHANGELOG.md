@@ -10,6 +10,13 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- Local trace loading now builds on an internal, lazy JSONL event iterator that
+  validates one line at a time and preserves active/rotated file ordering and
+  existing file-and-line error context. Public `load_events()` and
+  `load_traces()` return types and behavior are unchanged; this establishes the
+  bounded-memory primitive for later prune and upload work without changing the
+  wire schema or runtime dependencies.
+
 - Ruff is now a dev-only quality gate over Python sources: the repository uses
   correctness/import checks (`E4`, `E7`, `E9`, `F`, `I`) and a 120-column,
   Python 3.10-compatible formatter baseline. Release verification and canonical
