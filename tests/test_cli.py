@@ -287,9 +287,7 @@ def make_trace(trace_id: str, duration_ms: float, *, status: str = "success") ->
     start = "2024-01-01T00:00:00"
     end = (datetime.fromisoformat(start) + timedelta(milliseconds=duration_ms)).isoformat()
     root = make_event(id=trace_id, trace_id=trace_id, type="trace", status=status, start_time=start, end_time=end)
-    return LoadedTrace(
-        id=trace_id, name="n", start_time=start, end_time=end, status=status, events=[root], root=root
-    )
+    return LoadedTrace(id=trace_id, name="n", start_time=start, end_time=end, status=status, events=[root], root=root)
 
 
 def stats_table_map(out: str) -> dict[str, str]:
@@ -469,9 +467,7 @@ class TracesCommandTests(CliBaseTest):
 
             # --since and --until together form an inclusive window.
             low, high = loaded[0].start_time, loaded[1].start_time
-            code, out, _ = run_cli(
-                "traces", "--path", str(trace_path), "--since", low, "--until", high, "--json"
-            )
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--since", low, "--until", high, "--json")
             ids = [entry["id"] for entry in json.loads(out)]
             expected = [
                 trace.id
@@ -500,9 +496,7 @@ class TracesCommandTests(CliBaseTest):
             # "search" is the middle (not newest) trace; a limit-first implementation
             # would keep only the newest "checkout_retry" and then filter it away,
             # yielding nothing. Filtering before limiting must still surface "search".
-            code, out, _ = run_cli(
-                "traces", "--path", str(trace_path), "--name", "search", "--limit", "1", "--json"
-            )
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--name", "search", "--limit", "1", "--json")
             self.assertEqual(code, 0)
             self.assertEqual([entry["name"] for entry in json.loads(out)], ["search"])
 
@@ -1038,9 +1032,7 @@ class ExperimentShowCommandTests(CliBaseTest):
             self.assertIsNone(first["error"])
 
             # Re-rendering the same experiment yields byte-identical JSON.
-            _code, out_again, _err = run_cli(
-                "experiment-show", experiment_id, "--dir", str(workdir), "--json"
-            )
+            _code, out_again, _err = run_cli("experiment-show", experiment_id, "--dir", str(workdir), "--json")
             self.assertEqual(out, out_again)
 
     def test_unknown_id_exits_nonzero_with_clean_stdout(self) -> None:
@@ -1096,9 +1088,7 @@ class ExperimentReportCommandTests(CliBaseTest):
         with temporary_workdir() as workdir:
             experiment_id = run_faq_experiment(workdir)
 
-            code, out, err = run_cli(
-                "experiment-report", experiment_id, "--dir", str(workdir), "--format", "markdown"
-            )
+            code, out, err = run_cli("experiment-report", experiment_id, "--dir", str(workdir), "--format", "markdown")
 
             self.assertEqual(code, 0)
             self.assertEqual(err, "")
@@ -1187,10 +1177,7 @@ class EvalGateCommandTests(CliBaseTest):
             path.stem,
             dataset=Dataset([DatasetExample(id="row", input={"scores": scores})]),
             task=lambda scores: scores,
-            evaluators=[
-                custom_evaluator(name, lambda output, _expected, key=name: output[key])
-                for name in scores
-            ],
+            evaluators=[custom_evaluator(name, lambda output, _expected, key=name: output[key]) for name in scores],
             path=path,
         )
 
@@ -1203,9 +1190,7 @@ class EvalGateCommandTests(CliBaseTest):
 
             # The 0.2 drop regresses at the default tolerance, but a per-evaluator
             # override of 0.3 absorbs it and the gate passes.
-            code, out, err = run_cli(
-                "eval-gate", str(baseline), str(candidate), "--score-tolerance", "quality=0.3"
-            )
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--score-tolerance", "quality=0.3")
 
             self.assertEqual(code, 0)
             self.assertEqual(err, "")
@@ -1248,9 +1233,7 @@ class EvalGateCommandTests(CliBaseTest):
             self.assertFalse(json.loads(out)["has_regressions"])
 
             # Strict regress policy treats the baseline-only evaluator as lost coverage.
-            code, out, err = run_cli(
-                "eval-gate", str(baseline), str(candidate), "--missing-score", "regress"
-            )
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--missing-score", "regress")
             self.assertEqual(code, 1)
             self.assertEqual(err, "")
             payload = json.loads(out)
@@ -1299,9 +1282,7 @@ class EvalGateCommandTests(CliBaseTest):
             self._run_experiment(baseline, 0.9)
             self._run_experiment(candidate, 0.7)
 
-            code, out, err = run_cli(
-                "eval-gate", str(baseline), str(candidate), "--score-tolerance", "qualtiy=0.3"
-            )
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--score-tolerance", "qualtiy=0.3")
 
             self.assertEqual(code, 1)
             self.assertEqual(out, "")
@@ -1317,8 +1298,7 @@ class EvalGateCommandTests(CliBaseTest):
             ),
             task=lambda scores: scores,
             evaluators=[
-                custom_evaluator(name, lambda output, _expected, key=name: output[key])
-                for name in evaluator_names
+                custom_evaluator(name, lambda output, _expected, key=name: output[key]) for name in evaluator_names
             ],
             path=path,
         )
@@ -1513,9 +1493,7 @@ class SendCommandTests(CliBaseTest):
                 # Omitting --timeout leaves the library default (10.0) in force.
                 run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
                 # An explicit --timeout reaches the HTTP layer for the batch send.
-                run_cli(
-                    "send", "--path", str(trace_path), "--server", "http://server.test", "--timeout", "2.5"
-                )
+                run_cli("send", "--path", str(trace_path), "--server", "http://server.test", "--timeout", "2.5")
 
             self.assertEqual(timeouts, [10.0, 2.5])
 
@@ -1823,7 +1801,9 @@ class TailCommandTests(CliBaseTest):
                 if not appended["done"]:
                     with trace_path.open("a", encoding="utf-8") as trace_file:
                         trace_file.write(
-                            json.dumps({"type": "score", "name": "live", "status": "success", "start_time": "T1", "value": 0.5})
+                            json.dumps(
+                                {"type": "score", "name": "live", "status": "success", "start_time": "T1", "value": 0.5}
+                            )
                             + "\n"
                         )
                     appended["done"] = True
@@ -1848,7 +1828,8 @@ class TailCommandTests(CliBaseTest):
                 if calls["n"] == 1:
                     with trace_path.open("a", encoding="utf-8") as trace_file:
                         trace_file.write(
-                            json.dumps({"type": "trace", "name": "live", "status": "success", "start_time": "T1"}) + "\n"
+                            json.dumps({"type": "trace", "name": "live", "status": "success", "start_time": "T1"})
+                            + "\n"
                         )
                     return
                 raise KeyboardInterrupt
@@ -1994,9 +1975,7 @@ class PruneCommandTests(CliBaseTest):
             write_two_traces(trace_path)
             original = trace_path.read_bytes()
 
-            code, out, _ = run_cli(
-                "prune", "--path", str(trace_path), "--before", "2999-01-01", "--dry-run"
-            )
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--dry-run")
 
             self.assertEqual(code, 0)
             self.assertIn("removed=2", out)
@@ -2023,9 +2002,7 @@ class PruneCommandTests(CliBaseTest):
             write_two_traces(trace_path)
             original = trace_path.read_bytes()
 
-            code, out, _ = run_cli(
-                "prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes", "--dry-run"
-            )
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes", "--dry-run")
 
             self.assertEqual(code, 0)
             self.assertIn("(dry run; pass --yes to apply)", out)
@@ -2089,9 +2066,7 @@ class PruneCommandTests(CliBaseTest):
             rotated_path = trace_path.with_name(trace_path.name + ".1")
             active_before = trace_path.read_bytes()
 
-            code, out, _ = run_cli(
-                "prune", "--path", str(trace_path), "--include-rotated", "--keep-last", "1", "--yes"
-            )
+            code, out, _ = run_cli("prune", "--path", str(trace_path), "--include-rotated", "--keep-last", "1", "--yes")
 
             self.assertEqual(code, 0)
             self.assertIn("removed=1", out)
@@ -2113,9 +2088,7 @@ class PruneCommandTests(CliBaseTest):
             # The temp file is written via Path.write_text; making it fail mid-prune
             # must leave the original file untouched (atomic replace never happens).
             with patch.object(cli._sdk.Path, "write_text", side_effect=OSError("disk full")):
-                code, out, err = run_cli(
-                    "prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes"
-                )
+                code, out, err = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes")
 
             self.assertEqual(code, 1)
             self.assertEqual(out, "")

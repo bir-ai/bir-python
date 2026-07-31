@@ -14,15 +14,14 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from html import escape as _html_escape
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
 from ._sdk import (
-    _TransientSendError,
     _duration_ms,
     _is_retryable_status,
     _now,
@@ -32,6 +31,7 @@ from ._sdk import (
     _safe_error,
     _send_with_retry,
     _trace_context,
+    _TransientSendError,
     _validate_non_negative_int,
     _validate_non_negative_number,
 )
@@ -623,7 +623,9 @@ def custom_evaluator(
     return DeterministicEvaluator(name=name, _evaluate=evaluate_output)
 
 
-def field_equals(path: str, expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "field_equals") -> DeterministicEvaluator:
+def field_equals(
+    path: str, expected: Any = _USE_EXAMPLE_EXPECTED, *, name: str = "field_equals"
+) -> DeterministicEvaluator:
     """Create an evaluator that compares a nested output field to an expected value."""
 
     field_path = _parse_field_path(path)
@@ -1338,14 +1340,10 @@ def compare_experiments(
     for name in sorted(shared):
         delta = deltas[name]
         evaluator_tolerance = effective_tolerances[name]
-        if delta < -evaluator_tolerance and not math.isclose(
-            delta, -evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12
-        ):
+        if delta < -evaluator_tolerance and not math.isclose(delta, -evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12):
             regressed_names.append(name)
             regression_reasons[name] = _REGRESSION_REASON_DELTA
-        elif delta > evaluator_tolerance and not math.isclose(
-            delta, evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12
-        ):
+        elif delta > evaluator_tolerance and not math.isclose(delta, evaluator_tolerance, rel_tol=1e-12, abs_tol=1e-12):
             improved_names.append(name)
 
     baseline_only = frozenset(baseline_scores.keys() - candidate_scores.keys())
@@ -1866,10 +1864,7 @@ def _collect_threaded_results_with_timeout(
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
-        futures = [
-            executor.submit(run_one_recording_start, index, example)
-            for index, example in enumerate(examples)
-        ]
+        futures = [executor.submit(run_one_recording_start, index, example) for index, example in enumerate(examples)]
         for index, (future, example) in enumerate(zip(futures, examples)):
             started_events[index].wait()
             remaining = timeout - (time.monotonic() - started_monotonic[index])
@@ -2038,7 +2033,9 @@ def _summary_from_result(result: ExperimentResult) -> ExperimentSummary:
 
 def _write_experiment_summary(path: Path, summary: ExperimentSummary) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8"
+    )
 
 
 def _summary_path(result_path: Path) -> Path:
@@ -2061,10 +2058,14 @@ def _experiment_example_result_from_payload(
         raise ValueError(f"Experiment {experiment_path} line {line_number} field 'error' must be a string or null")
     trace_id = payload.get("trace_id")
     if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):
-        raise ValueError(f"Experiment {experiment_path} line {line_number} field 'trace_id' must be a non-empty string or null")
+        raise ValueError(
+            f"Experiment {experiment_path} line {line_number} field 'trace_id' must be a non-empty string or null"
+        )
     for field_name in ("input", "expected", "output"):
         if field_name not in payload:
-            raise ValueError(f"Experiment {experiment_path} line {line_number} is missing required field '{field_name}'")
+            raise ValueError(
+                f"Experiment {experiment_path} line {line_number} is missing required field '{field_name}'"
+            )
     return ExperimentExampleResult(
         id=_required_string(payload, "id", experiment_path, line_number),
         example_id=_required_string(payload, "example_id", experiment_path, line_number),
@@ -2089,7 +2090,9 @@ def _eval_result_from_payload(
         raise ValueError(f"Experiment {experiment_path} line {line_number} score entries must be objects")
     name = payload.get("name")
     if not isinstance(name, str) or not name:
-        raise ValueError(f"Experiment {experiment_path} line {line_number} score field 'name' must be a non-empty string")
+        raise ValueError(
+            f"Experiment {experiment_path} line {line_number} score field 'name' must be a non-empty string"
+        )
     if "value" not in payload:
         raise ValueError(f"Experiment {experiment_path} line {line_number} score is missing required field 'value'")
     metadata = payload.get("metadata", {})
@@ -2337,9 +2340,7 @@ def _validate_score_tolerances(
             unknown.append(name)
     if unknown:
         formatted = ", ".join(sorted(unknown))
-        raise ValueError(
-            f"score_tolerances names must be shared evaluators present in both experiments: {formatted}"
-        )
+        raise ValueError(f"score_tolerances names must be shared evaluators present in both experiments: {formatted}")
     return resolved
 
 

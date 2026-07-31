@@ -179,6 +179,7 @@ class CohereIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_nested_mapping_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> FakeChatResponse:
                 return FakeChatResponse(
                     usage={"tokens": {"input_tokens": 7, "output_tokens": 3}},
@@ -192,6 +193,7 @@ class CohereIntegrationTests(unittest.TestCase):
 
     def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> FakeChatResponse:
                 return FakeChatResponse(usage=None, payload={"message": None})
 
@@ -232,6 +234,7 @@ class CohereIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_chat_raises(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> FakeChatResponse:
                 raise RuntimeError("request failed api_key=sk-secret123")
 
@@ -429,6 +432,7 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_chat_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_chat(**kwargs: object) -> FakeChatResponse:
                 raise RuntimeError("request failed api_key=sk-secret123")
 
@@ -495,9 +499,7 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="command-a-03-2025", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="command-a-03-2025", messages=[], stream=True)
                     async for _event in stream:
                         pass
 
@@ -521,9 +523,7 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
             async def driver() -> list[object]:
                 collected: list[object] = []
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_chat, model="command-a-03-2025", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_chat, model="command-a-03-2025", messages=[], stream=True)
                     collected = [event async for event in stream]
                 return collected
 
@@ -546,9 +546,7 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="command-a-03-2025", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="command-a-03-2025", messages=[], stream=True)
                     iterator = stream.__aiter__()
                     await iterator.__anext__()
                     # Closing after one event finalizes the accumulated output.
@@ -571,9 +569,7 @@ class CohereAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="command-a-03-2025", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="command-a-03-2025", messages=[], stream=True)
                     async for _event in stream:
                         pass
 

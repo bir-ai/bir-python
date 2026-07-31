@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
-import hashlib
 import os
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+import urllib.error
 from collections.abc import AsyncGenerator, Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.client import HTTPMessage
 from io import BytesIO
@@ -22,12 +22,27 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import bir
-from bir import configure, generation, get_current_span_id, get_current_trace_id, load_events, load_traces, observe, prompt, retrieval, score, send_events, span, tool_call, trace
+from bir import (
+    configure,
+    generation,
+    get_current_span_id,
+    get_current_trace_id,
+    load_events,
+    load_traces,
+    observe,
+    prompt,
+    retrieval,
+    score,
+    send_events,
+    span,
+    tool_call,
+    trace,
+)
 from bir._sdk import (
-    _Config,
-    _InterProcessFileLock,
     _MAX_SAMPLE_RULES,
+    _Config,
     _config_from_env,
+    _InterProcessFileLock,
     _parse_env_bool,
     _parse_env_int,
     _parse_env_sample_rate,
@@ -348,7 +363,11 @@ class SdkTests(unittest.TestCase):
         schema_version = properties["schema_version"]
         if not isinstance(required_fields, list):
             raise TypeError("expected schema required fields to be a list")
-        if not isinstance(event_type, dict) or not isinstance(event_status, dict) or not isinstance(schema_version, dict):
+        if (
+            not isinstance(event_type, dict)
+            or not isinstance(event_status, dict)
+            or not isinstance(schema_version, dict)
+        ):
             raise TypeError("expected schema property definitions to be objects")
 
         with temporary_workdir() as workdir:
@@ -2112,9 +2131,7 @@ class SdkTests(unittest.TestCase):
                 "prompt": {
                     "name": "answer_question",
                     "version": "v1",
-                    "template_sha256": hashlib.sha256(
-                        "Answer the question: {question}".encode("utf-8")
-                    ).hexdigest(),
+                    "template_sha256": hashlib.sha256("Answer the question: {question}".encode("utf-8")).hexdigest(),
                 },
             },
         )
@@ -3237,7 +3254,7 @@ for index in range(int(count)):
             # The default read sees only the active file: a strict, newest suffix.
             active_names = [event.name for event in load_events()]
             self.assertLess(len(active_names), len(names))
-            self.assertEqual(active_names, names[len(names) - len(active_names):])
+            self.assertEqual(active_names, names[len(names) - len(active_names) :])
             self.assertEqual(load_traces(include_rotated=True)[0].name, "trace-000")
 
     def test_rotation_respects_backup_count_and_drops_oldest(self) -> None:
@@ -3261,7 +3278,7 @@ for index in range(int(count)):
             self.assertLess(len(names), len(all_names))
             self.assertEqual(names, sorted(names))
             self.assertEqual(names[-1], "trace-014")
-            self.assertEqual(names, all_names[len(all_names) - len(names):])
+            self.assertEqual(names, all_names[len(all_names) - len(names) :])
 
     def test_each_rotated_file_is_valid_jsonl_on_its_own(self) -> None:
         with temporary_workdir() as workdir:
@@ -3372,7 +3389,9 @@ for index in range(int(count)):
             self.assertGreater(len(numeric_backups), 0)
             self.assertLessEqual(len(numeric_backups), backup_count)
             all_paths = numeric_backups + [trace_path]
-            payloads = [json.loads(line) for path in all_paths for line in path.read_text(encoding="utf-8").splitlines()]
+            payloads = [
+                json.loads(line) for path in all_paths for line in path.read_text(encoding="utf-8").splitlines()
+            ]
             expected_names = {f"rotated-{worker}-{index}" for worker in range(workers) for index in range(count)}
             self.assertEqual(len(payloads), workers * count)
             self.assertEqual({payload["name"] for payload in payloads}, expected_names)
@@ -4347,9 +4366,7 @@ for batch in range(int(batches)):
         with self.assertRaisesRegex(TypeError, "sample_rules.*int or float"):
             configure(sample_rules={"chatty": cast(Any, True)})
         with self.assertRaisesRegex(ValueError, "sample_rules.*not exceed"):
-            configure(
-                sample_rules={f"trace-{index}": 1.0 for index in range(_MAX_SAMPLE_RULES + 1)}
-            )
+            configure(sample_rules={f"trace-{index}": 1.0 for index in range(_MAX_SAMPLE_RULES + 1)})
 
     def test_enabled_defaults_to_true(self) -> None:
         self.assertTrue(_Config().enabled)
@@ -4641,9 +4658,7 @@ for batch in range(int(batches)):
     def test_env_capture_size_limit_bounds_persisted_capture(self) -> None:
         import bir._sdk as sdk
 
-        with temporary_workdir() as workdir, env_vars(
-            BIR_CAPTURE_OUTPUTS="true", BIR_MAX_VALUE_LENGTH="5"
-        ):
+        with temporary_workdir() as workdir, env_vars(BIR_CAPTURE_OUTPUTS="true", BIR_MAX_VALUE_LENGTH="5"):
             sdk._config = _config_from_env()
 
             @observe()
@@ -4670,9 +4685,7 @@ for batch in range(int(batches)):
     def test_env_service_metadata_appears_on_trace_root(self) -> None:
         import bir._sdk as sdk
 
-        with temporary_workdir() as workdir, env_vars(
-            BIR_SERVICE_NAME="env-svc", BIR_ENVIRONMENT="production"
-        ):
+        with temporary_workdir() as workdir, env_vars(BIR_SERVICE_NAME="env-svc", BIR_ENVIRONMENT="production"):
             sdk._config = _config_from_env()
 
             @observe()
@@ -4691,9 +4704,7 @@ for batch in range(int(batches)):
     def test_env_capture_flags_enable_capture(self) -> None:
         import bir._sdk as sdk
 
-        with temporary_workdir() as workdir, env_vars(
-            BIR_CAPTURE_INPUTS="true", BIR_CAPTURE_OUTPUTS="yes"
-        ):
+        with temporary_workdir() as workdir, env_vars(BIR_CAPTURE_INPUTS="true", BIR_CAPTURE_OUTPUTS="yes"):
             sdk._config = _config_from_env()
 
             @observe()
@@ -4710,9 +4721,7 @@ for batch in range(int(batches)):
     def test_explicit_configure_capture_overrides_env_capture(self) -> None:
         import bir._sdk as sdk
 
-        with temporary_workdir() as workdir, env_vars(
-            BIR_CAPTURE_OUTPUTS="true", BIR_SERVICE_NAME="env-svc"
-        ):
+        with temporary_workdir() as workdir, env_vars(BIR_CAPTURE_OUTPUTS="true", BIR_SERVICE_NAME="env-svc"):
             sdk._config = _config_from_env()
             configure(capture_outputs=False)
 

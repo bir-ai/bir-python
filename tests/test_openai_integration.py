@@ -164,6 +164,7 @@ class OpenAIIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeChatCompletion:
                 return FakeChatCompletion(
                     model="gpt-4o-mini",
@@ -178,6 +179,7 @@ class OpenAIIntegrationTests(unittest.TestCase):
 
     def test_falls_back_to_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeChatCompletion:
                 return FakeChatCompletion(model=None, usage=None, payload={"choices": []})
 
@@ -218,6 +220,7 @@ class OpenAIIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeChatCompletion:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -388,6 +391,7 @@ class OpenAIAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_create(**kwargs: object) -> FakeChatCompletion:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -540,9 +544,7 @@ class OpenAIAsyncIntegrationTests(unittest.TestCase):
             @observe()
             async def run() -> list[object]:
                 collected: list[object] = []
-                stream = await trace_chat_completion_async(
-                    fake_create, model="gpt-4o-mini", messages=[], stream=True
-                )
+                stream = await trace_chat_completion_async(fake_create, model="gpt-4o-mini", messages=[], stream=True)
                 collected = [chunk async for chunk in stream]
                 return collected
 
@@ -586,9 +588,7 @@ class OpenAIAsyncIntegrationTests(unittest.TestCase):
             async def driver() -> None:
                 # Awaiting the wrapper returns the lazy async iterator without a trace;
                 # draining it must raise and never call create.
-                stream = await trace_chat_completion_async(
-                    fake_create, model="gpt-4o-mini", messages=[], stream=True
-                )
+                stream = await trace_chat_completion_async(fake_create, model="gpt-4o-mini", messages=[], stream=True)
                 async for _chunk in stream:
                     pass
 
@@ -767,6 +767,7 @@ class OpenAIResponsesIntegrationTests(unittest.TestCase):
 
     def test_capture_disabled_by_default_still_records_model_and_usage(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeResponse:
                 return FakeResponse(
                     model="gpt-4o",
@@ -799,6 +800,7 @@ class OpenAIResponsesIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeResponse:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -985,6 +987,7 @@ class OpenAIResponsesAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_create(**kwargs: object) -> FakeResponse:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -1025,9 +1028,7 @@ class OpenAIResponsesAsyncIntegrationTests(unittest.TestCase):
             async def driver() -> list[object]:
                 collected: list[object] = []
                 async with trace("resp"):
-                    stream = await trace_response_async(
-                        fake_create, model="gpt-4o", input="Stream it", stream=True
-                    )
+                    stream = await trace_response_async(fake_create, model="gpt-4o", input="Stream it", stream=True)
                     collected = [event async for event in stream]
                 return collected
 

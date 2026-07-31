@@ -38,8 +38,9 @@ The repository currently also has:
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, plus strict docs and
   shared-fixture drift checks;
 - 900+ unit tests, measured statement/branch coverage with a CI floor, strict
-  resource-warning handling, strict Pyright, strict MkDocs, example smoke tests,
-  and hermetic wheel/sdist release verification passing at this audit.
+  resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
+  smoke tests, and hermetic wheel/sdist release verification passing at this
+  audit.
 
 ## Product and engineering guardrails
 
@@ -63,34 +64,16 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Add a lightweight Ruff lint/format gate | P1 | S | Consistent code quality across the growing integration surface | — |
-| 2 | Bound memory use for large trace stores and uploads | P1 | M-L | Multi-GB JSONL stores can be inspected and sent without loading the full store twice | — |
-| 3 | Split core implementation into internal modules | P1 | L | Smaller ownership boundaries without changing the public API | 1 |
-| 4 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
-| 5 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
-| 6 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 3, 4 |
-| 7 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | 2, 3 |
+| 1 | Bound memory use for large trace stores and uploads | P1 | M-L | Multi-GB JSONL stores can be inspected and sent without loading the full store twice | — |
+| 2 | Split core implementation into internal modules | P1 | L | Smaller ownership boundaries without changing the public API | — |
+| 3 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
+| 4 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
+| 5 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 2, 3 |
+| 6 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | 1, 2 |
 
 ## Work item details
 
-### 1. Add a lightweight Ruff lint/format gate
-
-**Why:** Pyright checks types but not unused imports, common correctness mistakes,
-or formatting drift. Twenty-one integrations make manual consistency increasingly
-expensive.
-
-**Scope:**
-
-- Add Ruff to the `dev` extra, never to runtime dependencies.
-- Start with correctness/import rules and repository-wide formatting.
-- Apply one mechanical baseline change, then enforce `ruff check` and
-  `ruff format --check` in CI.
-- Avoid rules that fight the public docstring style or add noisy suppressions.
-
-**Done when:** both checks run locally and in CI with no source-specific blanket
-ignores.
-
-### 2. Bound memory use for large trace stores and uploads
+### 1. Bound memory use for large trace stores and uploads
 
 **Why:** `load_events()` materializes the full store, and the send path currently
 loads and groups the same data before posting one full batch. Rotation limits file
@@ -108,7 +91,7 @@ size but does not bound total memory when rotated files are included.
 **Done when:** peak client memory is bounded by the configured batch/window size,
 wire ordering remains deterministic, and existing public loaders are compatible.
 
-### 3. Split core implementation into internal modules
+### 2. Split core implementation into internal modules
 
 **Why:** `_sdk.py`, `evals.py`, and `cli.py` are approximately 3.4k, 2.5k, and
 1.4k lines. They are tested, but persistence, redaction, execution, reporting,
@@ -129,7 +112,7 @@ merge conflicts.
 serialized output are unchanged, and no replacement module becomes another
 catch-all.
 
-### 4. Introduce shared integration conformance tests
+### 3. Introduce shared integration conformance tests
 
 **Why:** provider wrappers independently implement the same difficult lifecycle:
 argument forwarding, `bir_` option stripping, sync/async calls, lazy streams,
@@ -147,7 +130,7 @@ are thorough but can still drift in which guarantees they assert.
 **Done when:** adding an integration requires passing the common contract matrix
 plus its provider-specific cases.
 
-### 5. Decide distributed trace-context propagation
+### 4. Decide distributed trace-context propagation
 
 **Why:** trace/span IDs are intentionally read-only and cannot currently be
 injected across process or service boundaries. That is safe and simple for local
@@ -165,7 +148,7 @@ tracing, but prevents a single trace from following queue workers or HTTP calls.
 **Done when:** the repository records an explicit decision; implementation ships
 only if the security and cross-repository contract are approved.
 
-### 6. Define beta API and compatibility policy
+### 5. Define beta API and compatibility policy
 
 **Why:** package metadata still marks the SDK Alpha while the public surface and
 integration count are substantial. Consumers need to know which names, event
@@ -182,7 +165,7 @@ fields, Python versions, and provider versions are stable.
 **Done when:** a Beta release can be evaluated against a finite checklist instead
 of a subjective readiness call.
 
-### 7. Add performance regression benchmarks
+### 6. Add performance regression benchmarks
 
 **Why:** local-first usefulness depends on low tracing overhead, while large-store
 operations and concurrent eval runners have no tracked performance baseline.
@@ -200,9 +183,8 @@ are comparable across commits.
 
 ## Sequencing
 
-1. Add item 1 before moving modules so mechanical changes stay reviewable.
-2. Implement items 2–4 independently in small, behavior-preserving changes.
-3. Use the evidence from those changes to decide items 5–7 and Beta readiness.
+1. Implement items 1–3 independently in small, behavior-preserving changes.
+2. Use the evidence from those changes to decide items 4–6 and Beta readiness.
 
 ## Explicitly not on the backlog
 

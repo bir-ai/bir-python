@@ -166,6 +166,7 @@ class LiteLLMIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_completion(**kwargs: object) -> FakeModelResponse:
                 return FakeModelResponse(
                     model="claude-3-5-sonnet-20241022",
@@ -180,6 +181,7 @@ class LiteLLMIntegrationTests(unittest.TestCase):
 
     def test_falls_back_to_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_completion(**kwargs: object) -> FakeModelResponse:
                 return FakeModelResponse(model=None, usage=None, payload={"choices": []})
 
@@ -221,6 +223,7 @@ class LiteLLMIntegrationTests(unittest.TestCase):
 
     def test_derives_provider_from_prefix_and_omits_it_for_bare_model_id(self) -> None:
         with temporary_workdir():
+
             def fake_completion(**kwargs: object) -> FakeModelResponse:
                 return FakeModelResponse(model="claude-3-5-sonnet-20241022")
 
@@ -242,6 +245,7 @@ class LiteLLMIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_completion_raises(self) -> None:
         with temporary_workdir():
+
             def fake_completion(**kwargs: object) -> FakeModelResponse:
                 raise RuntimeError("request failed api_key=sk-ant-secret123")
 
@@ -407,6 +411,7 @@ class LiteLLMAsyncIntegrationTests(unittest.TestCase):
 
     def test_derives_provider_from_prefix_and_omits_it_for_bare_model_id(self) -> None:
         with temporary_workdir():
+
             async def fake_prefixed(**kwargs: object) -> FakeModelResponse:
                 return FakeModelResponse(model="claude-3-5-sonnet-20241022")
 
@@ -460,6 +465,7 @@ class LiteLLMAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_completion_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_completion(**kwargs: object) -> FakeModelResponse:
                 raise RuntimeError("request failed api_key=sk-ant-secret123")
 

@@ -63,8 +63,8 @@ jobs:
 
       # Run Pyright and the release-package check once on the canonical ubuntu /
       # 3.12 leg to avoid redundant work and keep one stable coverage baseline.
-      # verify_release runs the suite under the branch-coverage floor, then builds
-      # and installs both distributions.
+      # verify_release runs the suite under the branch-coverage floor, enforces
+      # Ruff lint/format and Pyright, then builds and installs both distributions.
       - name: Run pyright
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: pyright

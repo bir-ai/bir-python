@@ -6,8 +6,8 @@ import math
 import tempfile
 import threading
 import time
-import urllib.error
 import unittest
+import urllib.error
 from collections.abc import Awaitable, Callable
 from http.client import HTTPMessage
 from io import BytesIO
@@ -21,14 +21,14 @@ from bir.evals import (
     Dataset,
     DatasetExample,
     DeterministicEvaluator,
-    EvaluationContext,
     EvalResult,
+    EvaluationContext,
     ExperimentDiff,
     ExperimentResult,
     answer_contains_citation,
     answer_context_overlap,
-    contains,
     compare_experiments,
+    contains,
     cost_under,
     custom_evaluator,
     exact_match,
@@ -109,18 +109,12 @@ class EvalTests(unittest.TestCase):
 
     def test_compare_experiments_score_tolerance_overrides_global(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            baseline = self._run_score_experiment(
-                Path(directory) / "baseline.jsonl", {"quality": 0.9, "speed": 0.9}
-            )
-            candidate = self._run_score_experiment(
-                Path(directory) / "candidate.jsonl", {"quality": 0.7, "speed": 0.7}
-            )
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.9, "speed": 0.9})
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.7, "speed": 0.7})
 
             # quality gets a roomy override and stays unchanged; speed keeps the
             # strict global tolerance and regresses on the same 0.2 drop.
-            diff = compare_experiments(
-                baseline, candidate, tolerance=0.0, score_tolerances={"quality": 0.3}
-            )
+            diff = compare_experiments(baseline, candidate, tolerance=0.0, score_tolerances={"quality": 0.3})
 
             self.assertEqual(diff.regressed, {"speed"})
             self.assertEqual(diff.unchanged, {"quality"})
@@ -143,12 +137,8 @@ class EvalTests(unittest.TestCase):
 
     def test_compare_experiments_rejects_unknown_score_tolerance_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            baseline = self._run_score_experiment(
-                Path(directory) / "baseline.jsonl", {"quality": 0.9, "removed": 0.5}
-            )
-            candidate = self._run_score_experiment(
-                Path(directory) / "candidate.jsonl", {"quality": 0.9, "added": 0.5}
-            )
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.9, "removed": 0.5})
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.9, "added": 0.5})
 
             # A typo and a baseline-only evaluator are both rejected: a tolerance
             # only has meaning for an evaluator shared by both runs.
@@ -172,9 +162,7 @@ class EvalTests(unittest.TestCase):
 
     def test_compare_experiments_missing_score_regress_flags_baseline_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            baseline = self._run_score_experiment(
-                Path(directory) / "baseline.jsonl", {"quality": 0.9, "coverage": 1.0}
-            )
+            baseline = self._run_score_experiment(Path(directory) / "baseline.jsonl", {"quality": 0.9, "coverage": 1.0})
             candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.9})
 
             ignored = compare_experiments(baseline, candidate)
@@ -203,9 +191,7 @@ class EvalTests(unittest.TestCase):
             baseline = self._run_score_experiment(
                 Path(directory) / "baseline.jsonl", {"quality": 0.9, "speed": 0.9, "coverage": 1.0}
             )
-            candidate = self._run_score_experiment(
-                Path(directory) / "candidate.jsonl", {"quality": 0.6, "speed": 0.6}
-            )
+            candidate = self._run_score_experiment(Path(directory) / "candidate.jsonl", {"quality": 0.6, "speed": 0.6})
 
             diff = compare_experiments(
                 baseline,
@@ -287,12 +273,8 @@ class EvalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             # The evaluator is shared in aggregate, but the two runs scored entirely
             # disjoint example ids, so there is no per-example delta to report.
-            baseline = self._run_per_example_experiment(
-                Path(directory) / "baseline.jsonl", {"a": {"quality": 1.0}}
-            )
-            candidate = self._run_per_example_experiment(
-                Path(directory) / "candidate.jsonl", {"b": {"quality": 1.0}}
-            )
+            baseline = self._run_per_example_experiment(Path(directory) / "baseline.jsonl", {"a": {"quality": 1.0}})
+            candidate = self._run_per_example_experiment(Path(directory) / "candidate.jsonl", {"b": {"quality": 1.0}})
 
             diff = compare_experiments(baseline, candidate, per_example=True)
 
@@ -305,17 +287,12 @@ class EvalTests(unittest.TestCase):
             path.stem,
             dataset=Dataset([DatasetExample(id="row", input={"scores": scores})]),
             task=lambda scores: scores,
-            evaluators=[
-                custom_evaluator(name, lambda output, _expected, key=name: output[key])
-                for name in scores
-            ],
+            evaluators=[custom_evaluator(name, lambda output, _expected, key=name: output[key]) for name in scores],
             path=path,
         )
 
     @staticmethod
-    def _run_per_example_experiment(
-        path: Path, rows: dict[str, dict[str, float]]
-    ) -> ExperimentResult:
+    def _run_per_example_experiment(path: Path, rows: dict[str, dict[str, float]]) -> ExperimentResult:
         evaluator_names = sorted({name for scores in rows.values() for name in scores})
         return run_experiment(
             path.stem,
@@ -324,8 +301,7 @@ class EvalTests(unittest.TestCase):
             ),
             task=lambda scores: scores,
             evaluators=[
-                custom_evaluator(name, lambda output, _expected, key=name: output[key])
-                for name in evaluator_names
+                custom_evaluator(name, lambda output, _expected, key=name: output[key]) for name in evaluator_names
             ],
             path=path,
         )
@@ -348,8 +324,12 @@ class EvalTests(unittest.TestCase):
         }
         self.assertEqual(field_equals("items[0].name", "Paris").evaluate(structured_output).value, 1.0)
         self.assertEqual(field_contains("answer", "capital").evaluate(structured_output).value, 1.0)
-        self.assertEqual(numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0)
-        self.assertEqual(custom_evaluator("has_paris", lambda output, expected: "Paris" in str(output)).evaluate("Paris").value, 1.0)
+        self.assertEqual(
+            numeric_between(min_value=0.8, max_value=1.0, field="confidence").evaluate(structured_output).value, 1.0
+        )
+        self.assertEqual(
+            custom_evaluator("has_paris", lambda output, expected: "Paris" in str(output)).evaluate("Paris").value, 1.0
+        )
 
     def test_similarity_above_scores_near_and_far_strings(self) -> None:
         evaluator = similarity_above(0.8, "Paris")
@@ -791,7 +771,9 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(field_equals("items[0].name", "Paris").evaluate(output).value, 1.0)
         self.assertEqual(field_equals("items[0].name", "Lyon").evaluate(output).value, 0.0)
         self.assertEqual(field_contains("answer", "paris", case_sensitive=False).evaluate(output).value, 1.0)
-        self.assertEqual(numeric_between(min_value=0.7, max_value=0.8, field="scores[0].value").evaluate(output).value, 1.0)
+        self.assertEqual(
+            numeric_between(min_value=0.7, max_value=0.8, field="scores[0].value").evaluate(output).value, 1.0
+        )
 
         missing_result = field_equals("items[1].name", "Paris").evaluate(output)
         self.assertEqual(missing_result.value, 0.0)
@@ -1091,10 +1073,13 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(trace.id, trace_id)
             self.assertEqual(trace.status, "error")
             self.assertEqual(trace.root.error, "provider failed token=[redacted]")
-            self.assertEqual([(event.type, event.name, event.status) for event in trace.events], [
-                ("trace", "experiment.failure.q1", "error"),
-                ("span", "failing_step", "error"),
-            ])
+            self.assertEqual(
+                [(event.type, event.name, event.status) for event in trace.events],
+                [
+                    ("trace", "experiment.failure.q1", "error"),
+                    ("span", "failing_step", "error"),
+                ],
+            )
             self.assertEqual(trace.events[1].parent_id, trace_id)
             self.assertNotIn("raw-token", experiment_path.read_text(encoding="utf-8"))
             self.assertNotIn("raw-token", trace_path.read_text(encoding="utf-8"))
@@ -1545,7 +1530,9 @@ class EvalTests(unittest.TestCase):
                 path=experiment_path,
             )
 
-            with patch("urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')) as urlopen:
+            with patch(
+                "urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+            ) as urlopen:
                 send_result = send_experiment(experiment_path, "http://127.0.0.1:8000/")
 
             self.assertEqual(send_result.accepted, 1)
@@ -1908,7 +1895,9 @@ class RunExperimentAsyncTests(unittest.TestCase):
     def test_preserves_dataset_order_under_out_of_order_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ordered.jsonl"
-            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}, expected=index) for index in range(8)])
+            dataset = Dataset(
+                [DatasetExample(id=f"q{index}", input={"n": index}, expected=index) for index in range(8)]
+            )
 
             async def task(n: int) -> int:
                 # Later examples finish first, so completion order reverses dataset order.
@@ -1993,7 +1982,9 @@ class RunExperimentAsyncTests(unittest.TestCase):
         for value in (0, -1):
             with self.assertRaisesRegex(ValueError, "max_concurrency must be a positive integer"):
                 asyncio.run(
-                    run_experiment_async("v", dataset=dataset, task=task, evaluators=[json_valid()], max_concurrency=value)
+                    run_experiment_async(
+                        "v", dataset=dataset, task=task, evaluators=[json_valid()], max_concurrency=value
+                    )
                 )
         with self.assertRaisesRegex(TypeError, "max_concurrency must be an int"):
             asyncio.run(
@@ -2017,7 +2008,10 @@ class RunExperimentAsyncTests(unittest.TestCase):
             trace_path = Path(directory) / "traces.jsonl"
             configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
             dataset = Dataset(
-                [DatasetExample(id=f"q{index}", input={"question": str(index)}, expected=str(index)) for index in range(6)]
+                [
+                    DatasetExample(id=f"q{index}", input={"question": str(index)}, expected=str(index))
+                    for index in range(6)
+                ]
             )
 
             async def answer(question: str) -> str:
@@ -2347,9 +2341,7 @@ class RunExperimentMaxWorkersTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "failure.jsonl"
             n_examples = 6
-            dataset = Dataset(
-                [DatasetExample(id=f"q{i}", input={"n": i, "fail": i == 2}) for i in range(n_examples)]
-            )
+            dataset = Dataset([DatasetExample(id=f"q{i}", input={"n": i, "fail": i == 2}) for i in range(n_examples)])
             barrier = threading.Barrier(n_examples)
 
             def task(n: int, fail: bool) -> int:
@@ -2457,9 +2449,7 @@ class RunExperimentMaxWorkersTests(unittest.TestCase):
     def test_redaction_preserved_under_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "redact.jsonl"
-            dataset = Dataset(
-                [DatasetExample(id=f"q{i}", input={"api_key": f"sk-secret-{i}"}) for i in range(4)]
-            )
+            dataset = Dataset([DatasetExample(id=f"q{i}", input={"api_key": f"sk-secret-{i}"}) for i in range(4)])
 
             def answer(api_key: str) -> dict[str, str]:
                 return {"result": "ok", "api_key": api_key}
@@ -2796,7 +2786,9 @@ class RunExperimentTimeoutTests(unittest.TestCase):
                 run_experiment("v", dataset=dataset, task=task, evaluators=[json_valid()], timeout=value)
             with self.assertRaisesRegex(ValueError, "timeout must be positive"):
                 asyncio.run(
-                    run_experiment_async("v", dataset=dataset, task=async_task, evaluators=[json_valid()], timeout=value)
+                    run_experiment_async(
+                        "v", dataset=dataset, task=async_task, evaluators=[json_valid()], timeout=value
+                    )
                 )
         for value in (math.inf, math.nan):
             with self.assertRaisesRegex(ValueError, "timeout must be finite"):
@@ -2807,7 +2799,11 @@ class RunExperimentTimeoutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "timeout must be an int or float"):
                 asyncio.run(
                     run_experiment_async(
-                        "v", dataset=dataset, task=async_task, evaluators=[json_valid()], timeout=bad_type  # type: ignore[arg-type]
+                        "v",
+                        dataset=dataset,
+                        task=async_task,
+                        evaluators=[json_valid()],
+                        timeout=bad_type,  # type: ignore[arg-type]
                     )
                 )
 

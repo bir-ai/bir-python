@@ -231,9 +231,7 @@ class DSPyIntegrationTest(unittest.TestCase):
 
         async def run() -> object:
             async with trace("t"):  # type: ignore[attr-defined]
-                return await trace_lm_async(
-                    lm.aforward, messages=[{"role": "user", "content": "hi"}]
-                )
+                return await trace_lm_async(lm.aforward, messages=[{"role": "user", "content": "hi"}])
 
         with temporary_workdir():
             configure(capture_inputs=True, capture_outputs=True)

@@ -31,6 +31,7 @@ from bir.integrations.otel import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "valid-events.jsonl"
 
+
 def _module_available(name: str) -> bool:
     # ``find_spec`` raises ``ModuleNotFoundError`` (rather than returning ``None``)
     # when an intermediate parent package is missing, so the lookup is guarded to
@@ -307,9 +308,7 @@ class PureMappingTests(unittest.TestCase):
         self.assertNotIn("bir.parent_id", attributes)
         self.assertNotIn("gen_ai.request.model", attributes)
         self.assertNotIn("bir.score.value", attributes)
-        self.assertEqual(
-            set(attributes), {"bir.event_type", "bir.event_id", "bir.trace_id"}
-        )
+        self.assertEqual(set(attributes), {"bir.event_type", "bir.event_id", "bir.trace_id"})
 
     def test_resolve_traces_accepts_single_iterable_and_path(self) -> None:
         loaded = load_traces(str(FIXTURE))
@@ -350,26 +349,14 @@ class SpanTreeTests(unittest.TestCase):
 
         # Parent/child links follow Bir ``parent_id``.
         self.assertIsNone(by_name["answer_question"].parent)
-        self.assertEqual(
-            by_name["retrieve_context"].parent.span_id, by_name["answer_question"].context.span_id
-        )
-        self.assertEqual(
-            by_name["search_docs"].parent.span_id, by_name["retrieve_context"].context.span_id
-        )
-        self.assertEqual(
-            by_name["local.llm"].parent.span_id, by_name["answer_question"].context.span_id
-        )
-        self.assertEqual(
-            by_name["helpfulness"].parent.span_id, by_name["local.llm"].context.span_id
-        )
+        self.assertEqual(by_name["retrieve_context"].parent.span_id, by_name["answer_question"].context.span_id)
+        self.assertEqual(by_name["search_docs"].parent.span_id, by_name["retrieve_context"].context.span_id)
+        self.assertEqual(by_name["local.llm"].parent.span_id, by_name["answer_question"].context.span_id)
+        self.assertEqual(by_name["helpfulness"].parent.span_id, by_name["local.llm"].context.span_id)
 
         # Timestamps come straight from the ISO event times.
-        self.assertEqual(
-            by_name["answer_question"].start_time, _iso_to_unix_nano("2026-01-01T00:00:00+00:00")
-        )
-        self.assertEqual(
-            by_name["answer_question"].end_time, _iso_to_unix_nano("2026-01-01T00:00:01+00:00")
-        )
+        self.assertEqual(by_name["answer_question"].start_time, _iso_to_unix_nano("2026-01-01T00:00:00+00:00"))
+        self.assertEqual(by_name["answer_question"].end_time, _iso_to_unix_nano("2026-01-01T00:00:01+00:00"))
 
         # Calls out to external systems are CLIENT spans; structure is INTERNAL.
         self.assertEqual(by_name["local.llm"].kind, SpanKind.CLIENT)
@@ -481,9 +468,7 @@ class SpanTreeTests(unittest.TestCase):
         )
         exporter = _in_memory_exporter()
 
-        exported = export_traces_to_otlp(
-            [_loaded_trace(first), _loaded_trace(second)], span_exporter=exporter
-        )
+        exported = export_traces_to_otlp([_loaded_trace(first), _loaded_trace(second)], span_exporter=exporter)
 
         spans = exporter.get_finished_spans()
         self.assertEqual(exported, 2)

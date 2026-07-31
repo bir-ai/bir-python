@@ -171,9 +171,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
     # 2. tests/fixtures/ must contain exactly the known shared fixtures, so a
     #    newly-added shared fixture cannot silently escape the guard.
     on_disk = {
-        p.name
-        for p in fdir.iterdir()
-        if p.is_file() and p.name not in NON_FIXTURE_FILES and not p.name.startswith(".")
+        p.name for p in fdir.iterdir() if p.is_file() and p.name not in NON_FIXTURE_FILES and not p.name.startswith(".")
     }
     for name in sorted(on_disk - expected):
         errors.append(
@@ -192,11 +190,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
             continue  # already reported in step 1
         actual = sha256_hex(path.read_bytes())
         if actual != recorded[name]:
-            errors.append(
-                f"{name}: checksum mismatch\n"
-                f"      manifest: {recorded[name]}\n"
-                f"      on disk:  {actual}"
-            )
+            errors.append(f"{name}: checksum mismatch\n      manifest: {recorded[name]}\n      on disk:  {actual}")
 
     if errors:
         print("Fixture drift detected:\n", file=sys.stderr)
@@ -222,9 +216,7 @@ def resolve_sibling(this_root: Path, this_kind: str, override: "str | None") -> 
         candidates = [Path(explicit).expanduser()]
     else:
         candidates = [
-            p
-            for p in sorted(this_root.parent.iterdir())
-            if p.is_dir() and p.resolve() != this_root.resolve()
+            p for p in sorted(this_root.parent.iterdir()) if p.is_dir() and p.resolve() != this_root.resolve()
         ]
     for cand in candidates:
         if fixtures_dir(cand).is_dir() and repo_kind(cand) == want:
@@ -239,8 +231,7 @@ def resolve_sibling(this_root: Path, this_kind: str, override: "str | None") -> 
         )
     else:
         print(
-            "       check out both repos side by side, or pass "
-            "--sibling /path/to/repo (or set $BIR_SIBLING).",
+            "       check out both repos side by side, or pass --sibling /path/to/repo (or set $BIR_SIBLING).",
             file=sys.stderr,
         )
     return None

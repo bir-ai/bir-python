@@ -304,7 +304,13 @@ class HaystackIntegrationTests(unittest.TestCase):
             for suffix in ("a", "b"):
                 run_pipeline(
                     tracer,
-                    [{"name": f"llm-{suffix}", "type": "OpenAIGenerator", "output": {"meta": [{"model": f"model-{suffix}"}]}}],
+                    [
+                        {
+                            "name": f"llm-{suffix}",
+                            "type": "OpenAIGenerator",
+                            "output": {"meta": [{"model": f"model-{suffix}"}]},
+                        }
+                    ],
                 )
 
             traces = load_traces()

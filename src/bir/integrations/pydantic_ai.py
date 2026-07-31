@@ -332,7 +332,7 @@ def _tool_name(span: Any, attributes: Any) -> str:
     span_name = _string_or_none(_value(span, "name")) or ""
     for prefix in _TOOL_NAME_PREFIXES:
         if span_name.startswith(prefix):
-            stripped = span_name[len(prefix):].strip()
+            stripped = span_name[len(prefix) :].strip()
             if stripped:
                 return stripped
     return span_name or "pydantic_ai.tool"

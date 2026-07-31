@@ -111,9 +111,7 @@ class ExperimentUploadContractTest(unittest.TestCase):
         self.assertEqual(self.payload["summary"], self.fixture["summary"])
 
     def test_result_rows_conform_to_fixture_shape(self) -> None:
-        for index, (uploaded, expected_row) in enumerate(
-            zip(self.payload["results"], self.fixture["results"])
-        ):
+        for index, (uploaded, expected_row) in enumerate(zip(self.payload["results"], self.fixture["results"])):
             with self.subTest(result=index):
                 # No on-disk echo fields leak into the upload ...
                 for echo_field in ECHO_FIELDS:
@@ -126,9 +124,7 @@ class ExperimentUploadContractTest(unittest.TestCase):
                 self.assertEqual(uploaded, expected)
 
     def test_score_rows_match_fixture_shape(self) -> None:
-        for index, (uploaded, expected_row) in enumerate(
-            zip(self.payload["results"], self.fixture["results"])
-        ):
+        for index, (uploaded, expected_row) in enumerate(zip(self.payload["results"], self.fixture["results"])):
             with self.subTest(result=index):
                 self.assertEqual(len(uploaded["scores"]), len(expected_row["scores"]))
                 for score in uploaded["scores"]:

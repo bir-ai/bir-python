@@ -52,6 +52,7 @@ dev = [
   "build>=1.0",
   "coverage[toml]>=7.0",
   "pytest>=8.0",
+  "ruff>=0.9",
   "setuptools>=77",
   "wheel>=0.40",
 ]
@@ -80,3 +81,12 @@ fail_under = 89.0
 precision = 2
 show_missing = true
 skip_covered = true
+
+[tool.ruff]
+extend-exclude = ["build", "site"]
+include = ["*.py", "*.pyi"]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

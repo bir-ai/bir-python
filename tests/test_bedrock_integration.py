@@ -188,6 +188,7 @@ class BedrockIntegrationTests(unittest.TestCase):
 
     def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_converse(**kwargs: object) -> dict[str, object]:
                 return _converse_dict(usage=None)
 
@@ -228,6 +229,7 @@ class BedrockIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_converse_raises(self) -> None:
         with temporary_workdir():
+
             def fake_converse(**kwargs: object) -> dict[str, object]:
                 raise RuntimeError("request failed api_key=sk-secret123")
 
@@ -418,14 +420,13 @@ class BedrockAsyncIntegrationTests(unittest.TestCase):
 
     def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             async def fake_converse(**kwargs: object) -> dict[str, object]:
                 return _converse_dict(usage=None)
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_converse_async(
-                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
-                    )
+                    await trace_converse_async(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
 
             asyncio.run(driver())
 
@@ -475,9 +476,7 @@ class BedrockAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_converse_async(
-                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
-                    )
+                    await trace_converse_async(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
 
             asyncio.run(driver())
 
@@ -488,14 +487,13 @@ class BedrockAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_converse_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_converse(**kwargs: object) -> dict[str, object]:
                 raise RuntimeError("request failed api_key=sk-secret123")
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_converse_async(
-                        fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
-                    )
+                    await trace_converse_async(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
 
             with self.assertRaises(RuntimeError):
                 asyncio.run(driver())
@@ -638,9 +636,7 @@ class BedrockAsyncIntegrationTests(unittest.TestCase):
                 return _converse_dict(usage=None)
 
             async def driver() -> None:
-                await trace_converse_async(
-                    fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[]
-                )
+                await trace_converse_async(fake_converse, modelId="amazon.titan-text-premier-v1:0", messages=[])
 
             with self.assertRaises(RuntimeError):
                 asyncio.run(driver())

@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- Ruff is now a dev-only quality gate over Python sources: the repository uses
+  correctness/import checks (`E4`, `E7`, `E9`, `F`, `I`) and a 120-column,
+  Python 3.10-compatible formatter baseline. Release verification and canonical
+  CI both reject lint violations or formatting drift while runtime dependencies
+  remain empty.
+
 - The release gate now runs the full SDK suite under statement and branch
   coverage, promotes `ResourceWarning` to an error, and enforces an audited 89.0%
   floor through `pyproject.toml`. Coverage remains a dev-only extra and runtime

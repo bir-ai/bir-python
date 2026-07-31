@@ -205,6 +205,7 @@ class OllamaChatIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping_response_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> dict[str, object]:
                 # Ollama responses also arrive as plain mappings; the wrapper reads
                 # token counts tolerantly from either an object or a mapping.
@@ -223,6 +224,7 @@ class OllamaChatIntegrationTests(unittest.TestCase):
 
     def test_falls_back_to_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> FakeChatResponse:
                 return FakeChatResponse(model=None, content=None)
 
@@ -264,6 +266,7 @@ class OllamaChatIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_chat_raises(self) -> None:
         with temporary_workdir():
+
             def fake_chat(**kwargs: object) -> FakeChatResponse:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -440,6 +443,7 @@ class OllamaGenerateIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
         with temporary_workdir():
+
             def fake_generate(**kwargs: object) -> FakeGenerateResponse:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -542,6 +546,7 @@ class OllamaAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_chat_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_chat(**kwargs: object) -> FakeChatResponse:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -628,15 +633,11 @@ class OllamaAsyncIntegrationTests(unittest.TestCase):
             configure(capture_outputs=True)
 
             async def fake_stream(**kwargs: object) -> FakeAsyncStream:
-                return FakeAsyncStream(
-                    [FakeChatChunk(content="Bir "), FakeChatChunk(content="streams")]
-                )
+                return FakeAsyncStream([FakeChatChunk(content="Bir "), FakeChatChunk(content="streams")])
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="llama3.2:1b", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="llama3.2:1b", messages=[], stream=True)
                     iterator = stream.__aiter__()
                     await iterator.__anext__()
                     # Closing after one chunk finalizes the accumulated output.
@@ -659,9 +660,7 @@ class OllamaAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="llama3.2:1b", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="llama3.2:1b", messages=[], stream=True)
                     async for _chunk in stream:
                         pass
 

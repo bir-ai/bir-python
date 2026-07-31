@@ -104,10 +104,7 @@ class ExampleSmokeTests(unittest.TestCase):
 
         # The retriever callback specifically records a retrieval-kind tool_call.
         self.assertTrue(
-            any(
-                event.type == "tool_call" and event.metadata.get("kind") == "retrieval"
-                for event in recorded.events
-            )
+            any(event.type == "tool_call" and event.metadata.get("kind") == "retrieval" for event in recorded.events)
         )
 
     def test_eval_demo_runs_offline_experiment(self) -> None:

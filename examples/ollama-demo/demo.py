@@ -34,11 +34,7 @@ def retrieve_context(question: str) -> list[dict[str, str]]:
 
     with retrieval("search_docs", query=question, metadata={"provider": "local"}) as result:
         words = {word.strip(".,?!").lower() for word in question.split()}
-        matches = [
-            document
-            for document in DOCUMENTS
-            if words.intersection(document["text"].lower().split())
-        ]
+        matches = [document for document in DOCUMENTS if words.intersection(document["text"].lower().split())]
         if not matches:
             matches = DOCUMENTS[:1]
         result.set_documents(matches)

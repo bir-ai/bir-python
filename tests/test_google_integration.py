@@ -111,9 +111,7 @@ class GoogleIntegrationTests(unittest.TestCase):
                         total_token_count=18,
                     ),
                     payload={
-                        "candidates": [
-                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
-                        ],
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}],
                     },
                 )
                 created.append(response)
@@ -150,6 +148,7 @@ class GoogleIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping(self) -> None:
         with temporary_workdir():
+
             def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
                 return FakeGenerateContentResponse(
                     usage_metadata={
@@ -167,6 +166,7 @@ class GoogleIntegrationTests(unittest.TestCase):
 
     def test_uses_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
                 return FakeGenerateContentResponse(usage_metadata=None, payload={"candidates": []})
 
@@ -207,6 +207,7 @@ class GoogleIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
         with temporary_workdir():
+
             def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
                 raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
 
@@ -266,7 +267,10 @@ class GoogleIntegrationTests(unittest.TestCase):
             chunks = [
                 {"text": "Bir "},
                 {"text": "streams"},
-                {"text": None, "usage_metadata": {"prompt_token_count": 7, "candidates_token_count": 3, "total_token_count": 10}},
+                {
+                    "text": None,
+                    "usage_metadata": {"prompt_token_count": 7, "candidates_token_count": 3, "total_token_count": 10},
+                },
             ]
 
             def fake_generate(**kwargs: object) -> list[dict[str, object]]:
@@ -343,9 +347,7 @@ class GoogleAsyncIntegrationTests(unittest.TestCase):
                         total_token_count=18,
                     ),
                     payload={
-                        "candidates": [
-                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
-                        ],
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}],
                     },
                 )
                 created.append(response)
@@ -403,6 +405,7 @@ class GoogleAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_generate(**kwargs: object) -> FakeGenerateContentResponse:
                 raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
 

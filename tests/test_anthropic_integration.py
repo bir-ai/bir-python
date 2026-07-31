@@ -172,6 +172,7 @@ class AnthropicIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeMessage:
                 return FakeMessage(
                     model="claude-haiku-4-5",
@@ -186,6 +187,7 @@ class AnthropicIntegrationTests(unittest.TestCase):
 
     def test_falls_back_to_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeMessage:
                 return FakeMessage(model=None, usage=None, payload={"content": []})
 
@@ -226,6 +228,7 @@ class AnthropicIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             def fake_create(**kwargs: object) -> FakeMessage:
                 raise RuntimeError("request failed token=sk-ant-secret123")
 
@@ -283,7 +286,10 @@ class AnthropicIntegrationTests(unittest.TestCase):
         with temporary_workdir():
             configure(capture_outputs=True)
             chunks = [
-                {"type": "message_start", "message": {"model": "claude-haiku-4-5-20251001", "usage": {"input_tokens": 7, "output_tokens": 1}}},
+                {
+                    "type": "message_start",
+                    "message": {"model": "claude-haiku-4-5-20251001", "usage": {"input_tokens": 7, "output_tokens": 1}},
+                },
                 {"type": "content_block_delta", "delta": {"text": "Bir "}},
                 {"type": "content_block_delta", "delta": {"text": "streams"}},
                 {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
@@ -418,6 +424,7 @@ class AnthropicAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_create_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_create(**kwargs: object) -> FakeMessage:
                 raise RuntimeError("request failed token=sk-ant-secret123")
 
@@ -481,9 +488,7 @@ class AnthropicAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_messages_async(
-                        fake_create, model="claude-haiku-4-5", messages=[], stream=True
-                    )
+                    stream = await trace_messages_async(fake_create, model="claude-haiku-4-5", messages=[], stream=True)
                     async for _chunk in stream:
                         pass
 
@@ -500,15 +505,11 @@ class AnthropicAsyncIntegrationTests(unittest.TestCase):
             configure(capture_outputs=True)
 
             async def fake_create(**kwargs: object) -> FakeAsyncStream:
-                return FakeAsyncStream(
-                    [FakeContentBlockDeltaEvent("Bir "), FakeContentBlockDeltaEvent("streams")]
-                )
+                return FakeAsyncStream([FakeContentBlockDeltaEvent("Bir "), FakeContentBlockDeltaEvent("streams")])
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_messages_async(
-                        fake_create, model="claude-haiku-4-5", messages=[], stream=True
-                    )
+                    stream = await trace_messages_async(fake_create, model="claude-haiku-4-5", messages=[], stream=True)
                     iterator = stream.__aiter__()
                     await iterator.__anext__()
                     await stream.aclose()
@@ -544,9 +545,7 @@ class AnthropicAsyncIntegrationTests(unittest.TestCase):
                 return FakeAsyncStream([FakeContentBlockDeltaEvent("hi")])
 
             async def driver() -> None:
-                stream = await trace_messages_async(
-                    fake_create, model="claude-haiku-4-5", messages=[], stream=True
-                )
+                stream = await trace_messages_async(fake_create, model="claude-haiku-4-5", messages=[], stream=True)
                 async for _chunk in stream:
                     pass
 

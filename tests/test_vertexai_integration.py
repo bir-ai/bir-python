@@ -148,9 +148,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
                         total_token_count=18,
                     ),
                     payload={
-                        "candidates": [
-                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
-                        ],
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}],
                     },
                 )
                 created.append(response)
@@ -200,6 +198,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
 
     def test_uses_bir_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
                 return FakeGenerationResponse(usage_metadata=None, payload={"candidates": []})
 
@@ -242,6 +241,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
         with temporary_workdir():
+
             def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
                 raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
 
@@ -317,9 +317,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
                 return chunks
 
             with trace("chat"):
-                stream = trace_generate_content(
-                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
-                )
+                stream = trace_generate_content(fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True)
                 self.assertEqual(list(stream), chunks)
 
             generation_event = next(event for event in load_events() if event.type == "generation")
@@ -342,9 +340,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
 
             consumed: list[object] = []
             with trace("chat"):
-                stream = trace_generate_content(
-                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
-                )
+                stream = trace_generate_content(fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True)
                 consumed = list(stream)
 
             # The non-streamed response is recorded in one piece; nothing is yielded.
@@ -370,9 +366,7 @@ class VertexAIIntegrationTests(unittest.TestCase):
                 return failing_stream()
 
             with trace("chat"):
-                stream = trace_generate_content(
-                    fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True
-                )
+                stream = trace_generate_content(fake_generate, contents=[], bir_model="gemini-1.5-flash", stream=True)
                 with self.assertRaises(RuntimeError):
                     list(stream)
 
@@ -418,9 +412,7 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
                         total_token_count=18,
                     ),
                     payload={
-                        "candidates": [
-                            {"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}
-                        ],
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": "Bir traces locally."}]}}],
                     },
                 )
                 created.append(response)
@@ -459,14 +451,13 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
 
     def test_uses_bir_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
                 return FakeGenerationResponse(usage_metadata=None, payload={"candidates": []})
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_generate_content_async(
-                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
-                    )
+                    await trace_generate_content_async(fake_generate, contents=[], bir_model="gemini-1.5-flash")
 
             asyncio.run(driver())
 
@@ -522,9 +513,7 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_generate_content_async(
-                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
-                    )
+                    await trace_generate_content_async(fake_generate, contents=[], bir_model="gemini-1.5-flash")
 
             asyncio.run(driver())
 
@@ -535,14 +524,13 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_generate_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_generate(*args: object, **kwargs: object) -> FakeGenerationResponse:
                 raise RuntimeError("request failed api_key=AIzaSyExampleSecret123")
 
             async def driver() -> None:
                 async with trace("chat"):
-                    await trace_generate_content_async(
-                        fake_generate, contents=[], bir_model="gemini-1.5-flash"
-                    )
+                    await trace_generate_content_async(fake_generate, contents=[], bir_model="gemini-1.5-flash")
 
             with self.assertRaises(RuntimeError):
                 asyncio.run(driver())
@@ -638,9 +626,7 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
             configure(capture_outputs=True)
 
             async def fake_generate(*args: object, **kwargs: object) -> FakeAsyncStream:
-                return FakeAsyncStream(
-                    [FakeStreamChunk(text="Bir "), FakeStreamChunk(text="streams")]
-                )
+                return FakeAsyncStream([FakeStreamChunk(text="Bir "), FakeStreamChunk(text="streams")])
 
             async def driver() -> None:
                 async with trace("chat"):
@@ -693,9 +679,7 @@ class VertexAIAsyncIntegrationTests(unittest.TestCase):
                 return FakeGenerationResponse()
 
             async def driver() -> None:
-                await trace_generate_content_async(
-                    fake_generate, contents=[], bir_model="gemini-1.5-flash"
-                )
+                await trace_generate_content_async(fake_generate, contents=[], bir_model="gemini-1.5-flash")
 
             with self.assertRaises(RuntimeError):
                 asyncio.run(driver())

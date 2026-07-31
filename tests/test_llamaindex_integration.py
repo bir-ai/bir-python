@@ -111,11 +111,7 @@ class LlamaIndexIntegrationTests(unittest.TestCase):
             )
             handler.on_event_end(
                 FakeEventType("retrieve"),
-                {
-                    FakePayloadKey("nodes"): [
-                        FakeNodeWithScore(FakeNode("doc-1", "Bir records local traces."), 0.91)
-                    ]
-                },
+                {FakePayloadKey("nodes"): [FakeNodeWithScore(FakeNode("doc-1", "Bir records local traces."), 0.91)]},
                 event_id=retrieve_event_id,
             )
             handler.on_event_start("embedding", {FakePayloadKey("chunks"): ["ignored"]}, event_id="ignored-1")

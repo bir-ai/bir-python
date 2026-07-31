@@ -356,7 +356,9 @@ class PydanticAIIntegrationTests(unittest.TestCase):
     def test_nested_agent_run_becomes_a_span_not_a_second_root(self) -> None:
         with temporary_workdir():
             handler = BirPydanticAIHandler()
-            handler.on_start(FakeSpan("invoke_agent outer", span_id=0x90, attributes={"gen_ai.operation.name": "invoke_agent"}))
+            handler.on_start(
+                FakeSpan("invoke_agent outer", span_id=0x90, attributes={"gen_ai.operation.name": "invoke_agent"})
+            )
             inner = FakeSpan(
                 "invoke_agent inner",
                 span_id=0x91,
@@ -378,7 +380,11 @@ class PydanticAIIntegrationTests(unittest.TestCase):
             handler = BirPydanticAIHandler()
 
             for index, suffix in enumerate(("a", "b")):
-                handler.on_start(FakeSpan(f"run-{suffix}", span_id=0x100 + index, attributes={"gen_ai.operation.name": "invoke_agent"}))
+                handler.on_start(
+                    FakeSpan(
+                        f"run-{suffix}", span_id=0x100 + index, attributes={"gen_ai.operation.name": "invoke_agent"}
+                    )
+                )
                 chat = FakeSpan(
                     "chat",
                     span_id=0x200 + index,
@@ -404,7 +410,9 @@ class PydanticAIIntegrationTests(unittest.TestCase):
 
             def run(index: int, suffix: str) -> None:
                 handler.on_start(
-                    FakeSpan(f"run-{suffix}", span_id=0x1000 + index, attributes={"gen_ai.operation.name": "invoke_agent"})
+                    FakeSpan(
+                        f"run-{suffix}", span_id=0x1000 + index, attributes={"gen_ai.operation.name": "invoke_agent"}
+                    )
                 )
                 chat = FakeSpan(
                     "chat",
@@ -417,10 +425,7 @@ class PydanticAIIntegrationTests(unittest.TestCase):
                 handler.on_end(chat)
                 handler.on_end(FakeSpan(f"run-{suffix}", span_id=0x1000 + index))
 
-            threads = [
-                threading.Thread(target=run, args=(index, suffix))
-                for index, suffix in enumerate(("a", "b"))
-            ]
+            threads = [threading.Thread(target=run, args=(index, suffix)) for index, suffix in enumerate(("a", "b"))]
             for thread in threads:
                 thread.start()
             for thread in threads:

@@ -9,11 +9,11 @@ fails if a wheel is missing it.
 
 from __future__ import annotations
 
-import importlib.resources
-import importlib.util
 import base64
 import gzip
 import hashlib
+import importlib.resources
+import importlib.util
 import io
 import tarfile
 import tempfile
@@ -47,8 +47,8 @@ class PyTypedMarkerTests(unittest.TestCase):
         self.assertTrue(marker.is_file())
 
 
-class VerifyReleasePyrightTests(unittest.TestCase):
-    """The release gate finds Pyright even after the repository is moved."""
+class VerifyReleaseToolingTests(unittest.TestCase):
+    """The release gate runs its development tools reproducibly."""
 
     def setUp(self) -> None:
         self.verify_release = _load_verify_release()
@@ -108,6 +108,25 @@ class VerifyReleasePyrightTests(unittest.TestCase):
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["env"]["PYTHONWARNINGS"], "error::ResourceWarning")
             self.assertEqual(call.kwargs["env"]["PYTHONPATH"], "src")
+
+    def test_ruff_checks_lint_and_format_with_the_active_interpreter(self) -> None:
+        with mock.patch.object(self.verify_release, "run") as run:
+            self.verify_release.run_ruff()
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [self.verify_release.sys.executable, "-m", "ruff", "check", "."],
+                [self.verify_release.sys.executable, "-m", "ruff", "format", "--check", "."],
+            ],
+        )
+        self.assertEqual(
+            [call.kwargs for call in run.call_args_list],
+            [
+                {"cwd": self.verify_release.REPO_ROOT, "label": "ruff check"},
+                {"cwd": self.verify_release.REPO_ROOT, "label": "ruff format check"},
+            ],
+        )
 
 
 class VerifyReleaseMarkerTests(unittest.TestCase):
@@ -196,8 +215,7 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
             path.touch()
 
         discovered = {
-            path.relative_to(package).as_posix()
-            for path in self.verify_release.package_python_files(package)
+            path.relative_to(package).as_posix() for path in self.verify_release.package_python_files(package)
         }
 
         self.assertEqual(
@@ -265,6 +283,7 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
         self.assertIn("Provides-Extra: dev", lines)
         self.assertIn('Requires-Dist: coverage[toml]>=7.0; extra == "dev"', lines)
         self.assertIn('Requires-Dist: pytest>=8.0; extra == "dev"', lines)
+        self.assertIn('Requires-Dist: ruff>=0.9; extra == "dev"', lines)
         self.assertIn("Provides-Extra: docs", lines)
         self.assertIn('Requires-Dist: mkdocs>=1.5; extra == "docs"', lines)
         self.assertIn("Provides-Extra: otel", lines)
@@ -301,9 +320,7 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
             metadata = archive.read(f"bir_sdk-{version}.dist-info/METADATA").decode("utf-8")
 
         unconditional_requirements = [
-            line
-            for line in metadata.splitlines()
-            if line.startswith("Requires-Dist: ") and "; extra ==" not in line
+            line for line in metadata.splitlines() if line.startswith("Requires-Dist: ") and "; extra ==" not in line
         ]
         self.assertEqual(unconditional_requirements, [])
 

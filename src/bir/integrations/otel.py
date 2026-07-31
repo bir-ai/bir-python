@@ -45,8 +45,7 @@ from bir import LoadedTrace, TraceEvent, load_traces
 _CLIENT_SPAN_TYPES = frozenset({"generation", "tool_call", "retrieval"})
 
 _INSTALL_HINT = (
-    "OpenTelemetry export requires the optional 'otel' extra. Install it with:\n"
-    "    pip install 'bir-sdk[otel]'"
+    "OpenTelemetry export requires the optional 'otel' extra. Install it with:\n    pip install 'bir-sdk[otel]'"
 )
 
 

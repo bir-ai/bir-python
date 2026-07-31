@@ -28,6 +28,8 @@ from ._sdk import (
     send_events,
 )
 from .evals import (
+    _MISSING_SCORE_POLICIES,  # shared missing-score vocabulary
+    _REPORT_FORMATS,  # shared report-format vocabulary
     ExperimentExampleResult,
     ExperimentResult,
     ExperimentSummary,
@@ -37,8 +39,6 @@ from .evals import (
     render_experiment_report,
     send_experiment,
 )
-from .evals import _MISSING_SCORE_POLICIES  # shared missing-score vocabulary
-from .evals import _REPORT_FORMATS  # shared report-format vocabulary
 
 _DEFAULT_SERVER = "http://127.0.0.1:8000"
 _DEFAULT_EXPERIMENT_DIR = ".bir/experiments"
@@ -111,19 +111,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--since",
         type=_iso_datetime,
         metavar="ISO",
-        help=(
-            "Only list traces whose start time is at or after this ISO datetime "
-            "(naive values are treated as UTC)."
-        ),
+        help=("Only list traces whose start time is at or after this ISO datetime (naive values are treated as UTC)."),
     )
     traces.add_argument(
         "--until",
         type=_iso_datetime,
         metavar="ISO",
-        help=(
-            "Only list traces whose start time is at or before this ISO datetime "
-            "(naive values are treated as UTC)."
-        ),
+        help=("Only list traces whose start time is at or before this ISO datetime (naive values are treated as UTC)."),
     )
     traces.set_defaults(func=_cmd_traces)
 
@@ -163,19 +157,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--since",
         type=_iso_datetime,
         metavar="ISO",
-        help=(
-            "Only list traces whose start time is at or after this ISO datetime "
-            "(naive values are treated as UTC)."
-        ),
+        help=("Only list traces whose start time is at or after this ISO datetime (naive values are treated as UTC)."),
     )
     stats.add_argument(
         "--until",
         type=_iso_datetime,
         metavar="ISO",
-        help=(
-            "Only list traces whose start time is at or before this ISO datetime "
-            "(naive values are treated as UTC)."
-        ),
+        help=("Only list traces whose start time is at or before this ISO datetime (naive values are treated as UTC)."),
     )
     stats.set_defaults(func=_cmd_stats)
 
@@ -202,9 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="directory",
         help=f"Experiments directory to read (default: {_DEFAULT_EXPERIMENT_DIR}).",
     )
-    experiment_show.add_argument(
-        "--json", action="store_true", help="Emit a nested JSON object instead of a table."
-    )
+    experiment_show.add_argument("--json", action="store_true", help="Emit a nested JSON object instead of a table.")
     experiment_show.set_defaults(func=_cmd_experiment_show)
 
     experiment_report = subparsers.add_parser(
@@ -397,10 +383,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--before",
         type=_iso_datetime,
         metavar="ISO",
-        help=(
-            "Remove traces whose start time is before this ISO datetime "
-            "(naive values are treated as UTC)."
-        ),
+        help=("Remove traces whose start time is before this ISO datetime (naive values are treated as UTC)."),
     )
     prune.add_argument(
         "--keep-last",
@@ -561,9 +544,7 @@ def _children_by_parent_id(events: list[TraceEvent]) -> dict[str | None, list[Tr
     return children
 
 
-def _walk_event_tree(
-    root: TraceEvent, children: dict[str | None, list[TraceEvent]]
-) -> list[tuple[TraceEvent, int]]:
+def _walk_event_tree(root: TraceEvent, children: dict[str | None, list[TraceEvent]]) -> list[tuple[TraceEvent, int]]:
     """Flatten the tree under ``root`` into ``(event, depth)`` pairs, parents first.
 
     A ``seen`` guard keeps a malformed file whose ``parent_id`` links form a cycle
@@ -585,9 +566,7 @@ def _walk_event_tree(
     return ordered
 
 
-def _event_tree_to_dict(
-    root: TraceEvent, children: dict[str | None, list[TraceEvent]]
-) -> dict[str, Any]:
+def _event_tree_to_dict(root: TraceEvent, children: dict[str | None, list[TraceEvent]]) -> dict[str, Any]:
     """Build a nested ``{"event": ..., "children": [...]}`` mapping rooted at ``root``."""
 
     seen: set[str] = set()
@@ -799,11 +778,7 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
 def _cmd_experiment_show(args: argparse.Namespace) -> int:
     directory = args.directory or _DEFAULT_EXPERIMENT_DIR
     summary = next(
-        (
-            candidate
-            for candidate in list_experiments(directory)
-            if candidate.experiment_id == args.experiment_id
-        ),
+        (candidate for candidate in list_experiments(directory) if candidate.experiment_id == args.experiment_id),
         None,
     )
     if summary is None:
@@ -826,11 +801,7 @@ def _cmd_experiment_show(args: argparse.Namespace) -> int:
 def _cmd_experiment_report(args: argparse.Namespace) -> int:
     directory = args.directory or _DEFAULT_EXPERIMENT_DIR
     summary = next(
-        (
-            candidate
-            for candidate in list_experiments(directory)
-            if candidate.experiment_id == args.experiment_id
-        ),
+        (candidate for candidate in list_experiments(directory) if candidate.experiment_id == args.experiment_id),
         None,
     )
     if summary is None:
@@ -910,10 +881,7 @@ def _print_experiment_detail(summary: ExperimentSummary, experiment: ExperimentR
 
     print(file=out)
     if summary.aggregate_scores:
-        score_rows = [
-            (name, f"{summary.aggregate_scores[name]:.2f}")
-            for name in sorted(summary.aggregate_scores)
-        ]
+        score_rows = [(name, f"{summary.aggregate_scores[name]:.2f}") for name in sorted(summary.aggregate_scores)]
         _print_table(("EVALUATOR", "MEAN"), score_rows, out)
     else:
         print("No evaluator scores.", file=out)
@@ -985,8 +953,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     # forcing a preview), so a confirmation-free run only reports what it would do.
     if args.before is None and args.keep_last is None and args.status is None:
         print(
-            "bir: prune requires at least one selection filter "
-            "(--before, --keep-last, or --status)",
+            "bir: prune requires at least one selection filter (--before, --keep-last, or --status)",
             file=sys.stderr,
         )
         return 1
@@ -1138,9 +1105,7 @@ def _collect_score_tolerances(
     for name, value in assignments:
         existing = collected.get(name)
         if existing is not None and existing != value:
-            raise ValueError(
-                f"conflicting --score-tolerance values for {name!r}: {existing} and {value}"
-            )
+            raise ValueError(f"conflicting --score-tolerance values for {name!r}: {existing} and {value}")
         collected[name] = value
     return collected
 

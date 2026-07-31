@@ -328,9 +328,7 @@ def _trace_name(source: Any, event: Any) -> str:
 def _span_name(event: Any) -> str:
     event_type = _string_or_none(_value(event, "type")) or ""
     if event_type.startswith("agent_execution"):
-        role = _string_or_none(_value(_value(event, "agent"), "role")) or _string_or_none(
-            _value(event, "agent_role")
-        )
+        role = _string_or_none(_value(_value(event, "agent"), "role")) or _string_or_none(_value(event, "agent_role"))
         return role if role else "crewai.agent"
     task = _value(event, "task")
     name = _string_or_none(_value(task, "name")) or _string_or_none(_value(event, "task_name"))
@@ -347,9 +345,7 @@ def _base_metadata(event: Any) -> dict[str, Any]:
     event_type = _string_or_none(_value(event, "type"))
     if event_type is not None:
         metadata["crewai_event"] = event_type
-    agent_role = _string_or_none(_value(_value(event, "agent"), "role")) or _string_or_none(
-        _value(event, "agent_role")
-    )
+    agent_role = _string_or_none(_value(_value(event, "agent"), "role")) or _string_or_none(_value(event, "agent_role"))
     if agent_role is not None:
         metadata["agent_role"] = agent_role
     task_id = _identity(_value(event, "task"))

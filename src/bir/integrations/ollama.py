@@ -465,11 +465,7 @@ def _record_usage(gen: Any, source: Any) -> None:
     input_tokens = _usage_tokens(source, "prompt_eval_count")
     output_tokens = _usage_tokens(source, "eval_count")
     # Ollama omits a total, so derive it when both halves are present.
-    total_tokens = (
-        input_tokens + output_tokens
-        if input_tokens is not None and output_tokens is not None
-        else None
-    )
+    total_tokens = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     gen.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)

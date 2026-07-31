@@ -53,7 +53,8 @@ Run the repeatable release verification script from the repository root:
 
 The script runs SDK unit tests with `ResourceWarning` promoted to an error,
 measures statement and branch coverage, enforces the configured coverage floor,
-runs `pyright`, and builds a temporary pure-Python wheel under the `bir-sdk`
+runs `ruff check`, `ruff format --check`, and `pyright`, and builds a temporary
+pure-Python wheel under the `bir-sdk`
 distribution name from the SDK package files and metadata. It checks the wheel
 contents for obvious local/generated artifacts and for the complete `bir`
 package tree and PEP 561 `bir/py.typed` marker, validates RECORD hashes and
@@ -101,7 +102,9 @@ PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
   ./.venv/bin/python -m coverage run -m unittest discover -s tests
 ./.venv/bin/python -m coverage report
 PYTHONPATH=src ./.venv/bin/python -m pytest tests/test_examples.py
-./.venv/bin/pyright
+./.venv/bin/python -m ruff check .
+./.venv/bin/python -m ruff format --check .
+./.venv/bin/python -m pyright
 python scripts/fixtures.py check
 ```
 
@@ -183,7 +186,7 @@ PY
 
 Even when you intend to publish, do not publish if any of these are true:
 
-- SDK tests or pyright fail.
+- SDK tests, Ruff lint/format, or Pyright fail.
 - Input/output capture defaults changed to enabled.
 - Redaction tests are failing or were removed.
 - Retrieval tests are failing or no longer assert `output.documents`.

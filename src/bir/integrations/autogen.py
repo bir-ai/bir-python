@@ -221,9 +221,7 @@ class BirAutoGenHandler:
         # Client-wrapper construction is configuration, not run activity.
         return None
 
-    def log_new_client(
-        self, client: Any = None, wrapper: Any = None, init_args: Any = None, **_extra: Any
-    ) -> None:
+    def log_new_client(self, client: Any = None, wrapper: Any = None, init_args: Any = None, **_extra: Any) -> None:
         # Client construction is configuration, not run activity.
         return None
 
@@ -264,9 +262,7 @@ class BirAutoGenHandler:
 
         if self._peek() is not None or _current_trace_id.get() is not None:
             return None
-        context = _trace_context(
-            name="autogen.run", metadata={"integration": "autogen", "kind": "implicit_root"}
-        )
+        context = _trace_context(name="autogen.run", metadata={"integration": "autogen", "kind": "implicit_root"})
         context.__enter__()
         return context
 

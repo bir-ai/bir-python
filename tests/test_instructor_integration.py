@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bir import configure, load_events, load_traces, trace
+from bir import configure, load_traces, trace
 from bir._sdk import _reset_config_for_tests
 from bir.integrations.instructor import trace_create, trace_create_async
 
@@ -209,9 +209,7 @@ class InstructorIntegrationTest(unittest.TestCase):
 
         async def run() -> object:
             async with trace("t"):  # type: ignore[attr-defined]
-                return await trace_create_async(
-                    fake_create_async, model="gpt-4o-mini", response_model=FakeParsedModel
-                )
+                return await trace_create_async(fake_create_async, model="gpt-4o-mini", response_model=FakeParsedModel)
 
         with temporary_workdir():
             configure(capture_inputs=True, capture_outputs=True)

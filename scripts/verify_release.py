@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import os
-import re
 import base64
 import csv
 import gzip
 import hashlib
 import importlib.util
 import io
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +19,6 @@ import textwrap
 import venv
 import zipfile
 from pathlib import Path
-
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 # The SDK package now lives at the repository root, so the package root and the
@@ -93,6 +92,7 @@ def main() -> int:
         sdist_smoke_dir.mkdir()
 
         run_sdk_tests()
+        run_ruff()
         run_pyright()
 
         wheel = build_wheel(wheelhouse, version)
@@ -130,6 +130,21 @@ def run_sdk_tests() -> None:
         cwd=PACKAGE_ROOT,
         env=env,
         label="coverage gate",
+    )
+
+
+def run_ruff() -> None:
+    """Reject lint violations and unformatted Python files."""
+
+    run(
+        [sys.executable, "-m", "ruff", "check", "."],
+        cwd=REPO_ROOT,
+        label="ruff check",
+    )
+    run(
+        [sys.executable, "-m", "ruff", "format", "--check", "."],
+        cwd=REPO_ROOT,
+        label="ruff format check",
     )
 
 
@@ -272,9 +287,7 @@ def package_python_files(package_root: Path) -> list[Path]:
         package_dir = package_dirs.pop(0)
         discovered.extend(path for path in package_dir.glob("*.py") if path.is_file())
         package_dirs.extend(
-            child
-            for child in sorted(package_dir.iterdir())
-            if child.is_dir() and (child / "__init__.py").is_file()
+            child for child in sorted(package_dir.iterdir()) if child.is_dir() and (child / "__init__.py").is_file()
         )
     return sorted(discovered, key=lambda path: path.relative_to(package_root).as_posix())
 
@@ -307,10 +320,7 @@ def metadata(version: str) -> str:
     headers.extend(f"Classifier: {classifier}" for classifier in classifiers())
     for extra, requirements in optional_dependencies().items():
         headers.append(f"Provides-Extra: {extra}")
-        headers.extend(
-            f'Requires-Dist: {requirement}; extra == "{extra}"'
-            for requirement in requirements
-        )
+        headers.extend(f'Requires-Dist: {requirement}; extra == "{extra}"' for requirement in requirements)
     return "\n".join(headers) + f"\n\n{readme}\n"
 
 
@@ -335,8 +345,7 @@ def inspect_wheel(wheel: Path) -> None:
                 raise RuntimeError(f"wheel RECORD hash or size is invalid for: {name}")
 
     intended_python = {
-        (Path("bir") / source.relative_to(PACKAGE_SOURCE)).as_posix()
-        for source in package_python_files(PACKAGE_SOURCE)
+        (Path("bir") / source.relative_to(PACKAGE_SOURCE)).as_posix() for source in package_python_files(PACKAGE_SOURCE)
     }
     missing = (REQUIRED_PACKAGE_FILES | intended_python).difference(names)
     if missing:
@@ -366,9 +375,7 @@ def run_install_smoke_test(smoke_env: Path, smoke_dir: Path, wheel: Path, versio
     run_console_scripts(smoke_env, smoke_dir)
 
 
-def run_smoke_imports(
-    python_exe: Path, work_dir: Path, version: str, *, distribution_label: str
-) -> None:
+def run_smoke_imports(python_exe: Path, work_dir: Path, version: str, *, distribution_label: str) -> None:
     """Run the shared SDK import/behavior smoke test with the given interpreter.
 
     Reused by both the wheel and sdist install checks so the installed package is
@@ -692,8 +699,7 @@ def _stage_build_backend(backend_dir: Path) -> Path:
     spec = importlib.util.find_spec("setuptools")
     if spec is None or not spec.submodule_search_locations:
         raise RuntimeError(
-            "setuptools is required to verify the sdist install; install the dev extra "
-            '(``pip install -e ".[dev]"``)'
+            'setuptools is required to verify the sdist install; install the dev extra (``pip install -e ".[dev]"``)'
         )
 
     host_site = Path(spec.submodule_search_locations[0]).parent
@@ -803,14 +809,14 @@ def optional_dependencies() -> dict[str, list[str]]:
             continue
 
         if current_extra is None:
-            inline_match = re.match(r'^([A-Za-z0-9._-]+)\s*=\s*\[(.*)\]\s*$', line)
+            inline_match = re.match(r"^([A-Za-z0-9._-]+)\s*=\s*\[(.*)\]\s*$", line)
             if inline_match:
                 extra = inline_match.group(1)
                 raw_requirements = inline_match.group(2).strip()
                 extras[extra] = _quoted_list_items(raw_requirements) if raw_requirements else []
                 continue
 
-            match = re.match(r'^([A-Za-z0-9._-]+)\s*=\s*\[\s*$', line)
+            match = re.match(r"^([A-Za-z0-9._-]+)\s*=\s*\[\s*$", line)
             if match:
                 current_extra = match.group(1)
                 extras[current_extra] = []

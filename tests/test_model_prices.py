@@ -22,8 +22,8 @@ from typing import Any, cast
 
 from bir import configure, generation, load_events, observe
 from bir._sdk import (
-    _Config,
     _MAX_MODEL_PRICES,
+    _Config,
     _reset_config_for_tests,
     _validate_model_prices,
 )
@@ -320,9 +320,7 @@ class ModelPriceValidationTests(unittest.TestCase):
             configure(model_prices={"m": {"input": 1, "prompt": 2}})
 
     def test_validated_table_is_name_sorted_and_normalized(self) -> None:
-        table = _validate_model_prices(
-            {"zzz": {"output": 2e-6}, "aaa": {"input": 1e-6, "currency": "EUR"}}
-        )
+        table = _validate_model_prices({"zzz": {"output": 2e-6}, "aaa": {"input": 1e-6, "currency": "EUR"}})
         self.assertEqual([name for name, _ in table], ["aaa", "zzz"])
         self.assertEqual(table[0][1].input, 1e-6)
         self.assertEqual(table[0][1].output, None)

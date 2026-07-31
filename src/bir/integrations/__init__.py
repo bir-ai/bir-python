@@ -3,20 +3,20 @@
 from . import cohere
 from .anthropic import trace_messages, trace_messages_async
 from .autogen import BirAutoGenHandler
-from .crewai import BirCrewAIHandler
-from .dspy import trace_lm, trace_lm_async
-from .instructor import trace_create, trace_create_async
 from .bedrock import (
     trace_converse,
     trace_converse_async,
     trace_converse_stream,
     trace_converse_stream_async,
 )
+from .crewai import BirCrewAIHandler
+from .dspy import trace_lm, trace_lm_async
 from .google import trace_generate_content, trace_generate_content_async
 from .haystack import BirHaystackTracer
+from .instructor import trace_create, trace_create_async
 from .langchain import BirCallbackHandler
-from .llamaindex import BirLlamaIndexHandler
 from .litellm import trace_completion, trace_completion_async
+from .llamaindex import BirLlamaIndexHandler
 from .mistral import trace_chat, trace_chat_async
 from .ollama import trace_chat as trace_ollama_chat
 from .ollama import trace_chat_async as trace_ollama_chat_async

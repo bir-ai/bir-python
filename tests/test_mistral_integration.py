@@ -161,6 +161,7 @@ class MistralIntegrationTests(unittest.TestCase):
 
     def test_records_usage_from_mapping_and_computes_total(self) -> None:
         with temporary_workdir():
+
             def fake_complete(**kwargs: object) -> FakeChatCompletion:
                 return FakeChatCompletion(
                     model="mistral-small-2506",
@@ -175,6 +176,7 @@ class MistralIntegrationTests(unittest.TestCase):
 
     def test_falls_back_to_request_model_and_omits_usage_when_response_is_sparse(self) -> None:
         with temporary_workdir():
+
             def fake_complete(**kwargs: object) -> FakeChatCompletion:
                 return FakeChatCompletion(model=None, usage=None, payload={"choices": []})
 
@@ -215,6 +217,7 @@ class MistralIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_complete_raises(self) -> None:
         with temporary_workdir():
+
             def fake_complete(**kwargs: object) -> FakeChatCompletion:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -400,6 +403,7 @@ class MistralAsyncIntegrationTests(unittest.TestCase):
 
     def test_records_error_and_redacts_secret_when_complete_raises(self) -> None:
         with temporary_workdir():
+
             async def fake_complete(**kwargs: object) -> FakeChatCompletion:
                 raise RuntimeError("request failed token=sk-secret123")
 
@@ -499,9 +503,7 @@ class MistralAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="mistral-small-latest", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="mistral-small-latest", messages=[], stream=True)
                     iterator = stream.__aiter__()
                     await iterator.__anext__()
                     # Closing after one chunk finalizes the accumulated output.
@@ -524,9 +526,7 @@ class MistralAsyncIntegrationTests(unittest.TestCase):
 
             async def driver() -> None:
                 async with trace("chat"):
-                    stream = await trace_chat_async(
-                        fake_stream, model="mistral-small-latest", messages=[], stream=True
-                    )
+                    stream = await trace_chat_async(fake_stream, model="mistral-small-latest", messages=[], stream=True)
                     async for _chunk in stream:
                         pass
 

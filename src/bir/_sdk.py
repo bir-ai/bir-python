@@ -591,7 +591,7 @@ def _trace_files_oldest_first(trace_path: Path) -> list[Path]:
     for entry in entries:
         if not entry.name.startswith(prefix):
             continue
-        suffix = entry.name[len(prefix):]
+        suffix = entry.name[len(prefix) :]
         if suffix.isdigit() and int(suffix) >= 1:
             rotated.append((int(suffix), entry))
     rotated.sort(key=lambda item: item[0], reverse=True)
@@ -835,9 +835,7 @@ def observe(
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
                 state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
-                input_payload = (
-                    _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
-                )
+                input_payload = _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 gen_ctx = _snapshot_context()
                 yielded = 0
                 resume: tuple[str, Any] = ("asend", None)
@@ -894,9 +892,7 @@ def observe(
                 underlying = func(*args, **kwargs)
                 consumer_ctx = _snapshot_context()
                 state = _begin_observe(trace_name, capture_inputs, capture_outputs, observe_metadata)
-                input_payload = (
-                    _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
-                )
+                input_payload = _capture_call_input(signature, args, kwargs) if state.capture_inputs else None
                 gen_ctx = _snapshot_context()
                 yielded = 0
                 resume: tuple[str, Any] = ("next", None)
@@ -1806,12 +1802,8 @@ class _Generation:
             return
         input_tokens = self.usage.get("input_tokens")
         output_tokens = self.usage.get("output_tokens")
-        input_cost = (
-            price.input * input_tokens if price.input is not None and input_tokens is not None else None
-        )
-        output_cost = (
-            price.output * output_tokens if price.output is not None and output_tokens is not None else None
-        )
+        input_cost = price.input * input_tokens if price.input is not None and input_tokens is not None else None
+        output_cost = price.output * output_tokens if price.output is not None and output_tokens is not None else None
         if input_cost is None and output_cost is None:
             return
         self.set_cost(input_cost=input_cost, output_cost=output_cost, currency=price.currency)
@@ -2232,9 +2224,7 @@ def _prune_trace_store(
     with _write_lock:
         with _InterProcessFileLock(trace_path):
             traces = load_traces(trace_path, include_rotated=include_rotated)
-            removed_ids = _select_removed_trace_ids(
-                traces, before=before, keep_last=keep_last, status=status
-            )
+            removed_ids = _select_removed_trace_ids(traces, before=before, keep_last=keep_last, status=status)
             removed_traces = sum(1 for trace in traces if trace.id in removed_ids)
             kept_traces = len(traces) - removed_traces
             if not removed_ids:
@@ -2248,9 +2238,7 @@ def _prune_trace_store(
                 for file_path in files:
                     if not file_path.exists():
                         continue
-                    kept_lines, file_removed_events, original_size = _filter_trace_file(
-                        file_path, removed_ids
-                    )
+                    kept_lines, file_removed_events, original_size = _filter_trace_file(file_path, removed_ids)
                     if file_removed_events == 0:
                         continue
                     removed_events += file_removed_events
@@ -2500,7 +2488,9 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
     name = _expect_string(payload["name"], "name", trace_path, line_number)
     event_type = _expect_string(payload["type"], "type", trace_path, line_number)
     if event_type not in _EVENT_TYPES:
-        raise ValueError(f"Trace file {trace_path} line {line_number} field 'type' has unsupported value {event_type!r}")
+        raise ValueError(
+            f"Trace file {trace_path} line {line_number} field 'type' has unsupported value {event_type!r}"
+        )
     start_time = _expect_datetime_string(payload["start_time"], "start_time", trace_path, line_number)
     end_time = _expect_datetime_string(payload["end_time"], "end_time", trace_path, line_number)
     if datetime.fromisoformat(end_time) < datetime.fromisoformat(start_time):
@@ -2519,7 +2509,9 @@ def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line
     event_value = None
     if event_type == "score":
         if "value" not in payload:
-            raise ValueError(f"Trace file {trace_path} line {line_number} score event is missing required field 'value'")
+            raise ValueError(
+                f"Trace file {trace_path} line {line_number} score event is missing required field 'value'"
+            )
         event_value = _validate_number(payload["value"], "score value")
     elif payload.get("value") is not None:
         event_value = _validate_number(payload["value"], "value")
@@ -2597,9 +2589,7 @@ def _expect_datetime_string(value: Any, field: str, trace_path: Path, line_numbe
     try:
         datetime.fromisoformat(timestamp)
     except ValueError as exc:
-        raise ValueError(
-            f"Trace file {trace_path} line {line_number} field {field!r} must be an ISO datetime"
-        ) from exc
+        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be an ISO datetime") from exc
     return timestamp
 
 
@@ -2918,8 +2908,7 @@ def _validate_additional_secret_keys(value: Any) -> frozenset[str]:
             raise ValueError("bir additional_secret_keys entries must not be empty")
         if len(key) > _MAX_ADDITIONAL_SECRET_KEY_LENGTH:
             raise ValueError(
-                f"bir additional_secret_keys entries must not exceed "
-                f"{_MAX_ADDITIONAL_SECRET_KEY_LENGTH} characters"
+                f"bir additional_secret_keys entries must not exceed {_MAX_ADDITIONAL_SECRET_KEY_LENGTH} characters"
             )
         normalized.add(key.lower().replace("-", "_"))
     return frozenset(normalized)
@@ -2936,9 +2925,7 @@ def _validate_additional_redaction_patterns(value: Any) -> tuple[re.Pattern[str]
     """
 
     if isinstance(value, (str, bytes, re.Pattern)) or not isinstance(value, Iterable):
-        raise TypeError(
-            "bir additional_redaction_patterns must be an iterable of regex strings or compiled patterns"
-        )
+        raise TypeError("bir additional_redaction_patterns must be an iterable of regex strings or compiled patterns")
     raw_patterns = list(value)
     if len(raw_patterns) > _MAX_ADDITIONAL_REDACTION_PATTERNS:
         raise ValueError(
@@ -2958,9 +2945,7 @@ def _compile_additional_redaction_pattern(pattern: Any) -> re.Pattern[str]:
 
     if isinstance(pattern, re.Pattern):
         if isinstance(pattern.pattern, bytes):
-            raise TypeError(
-                "bir additional_redaction_patterns compiled patterns must be str patterns, not bytes"
-            )
+            raise TypeError("bir additional_redaction_patterns compiled patterns must be str patterns, not bytes")
         return cast("re.Pattern[str]", pattern)
     if not isinstance(pattern, str):
         raise TypeError(
@@ -3121,9 +3106,7 @@ def _validate_model_price(value: Any, model: str) -> _ModelPrice:
     if input_rate is None and output_rate is None:
         raise ValueError(f"bir model_prices[{model!r}] must set at least one of 'input' or 'output'")
     validated_input = (
-        _validate_non_negative_number(input_rate, f"model_prices[{model!r}].input")
-        if input_rate is not None
-        else None
+        _validate_non_negative_number(input_rate, f"model_prices[{model!r}].input") if input_rate is not None else None
     )
     validated_output = (
         _validate_non_negative_number(output_rate, f"model_prices[{model!r}].output")
@@ -3351,26 +3334,14 @@ def _config_from_env() -> _Config:
             else defaults.service_name
         ),
         environment=(
-            _validate_event_name(environment, "BIR_ENVIRONMENT")
-            if environment is not None
-            else defaults.environment
+            _validate_event_name(environment, "BIR_ENVIRONMENT") if environment is not None else defaults.environment
         ),
-        source=(
-            _validate_event_name(source, "BIR_SOURCE")
-            if source is not None
-            else defaults.source
-        ),
+        source=(_validate_event_name(source, "BIR_SOURCE") if source is not None else defaults.source),
         # ``BIR_DISABLED`` is the inverse of the ``enabled`` field: a truthy value
         # disables all recording. Parsed with the shared boolean parser so it
         # rejects the same ambiguous values as the other BIR_* booleans.
-        enabled=(
-            not _parse_env_bool(disabled, "BIR_DISABLED")
-            if disabled is not None
-            else defaults.enabled
-        ),
-        sample_rate=(
-            _parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate
-        ),
+        enabled=(not _parse_env_bool(disabled, "BIR_DISABLED") if disabled is not None else defaults.enabled),
+        sample_rate=(_parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate),
         max_value_length=(
             _parse_env_int(max_value_length, "BIR_MAX_VALUE_LENGTH")
             if max_value_length is not None

@@ -162,7 +162,10 @@ class CrewAIIntegrationTests(unittest.TestCase):
                 crew,
                 FakeEvent(
                     "llm_call_completed",
-                    response={"model": "gpt-4o-mini", "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}},
+                    response={
+                        "model": "gpt-4o-mini",
+                        "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+                    },
                 ),
             )
             handler.on_event(crew, FakeEvent("crew_kickoff_completed"))

@@ -6,7 +6,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docs-deploy.yml"
@@ -53,6 +52,15 @@ class DocumentationCIContractTests(unittest.TestCase):
         self.assertIn('env["PYTHONWARNINGS"] = "error::ResourceWarning"', self.verify_release)
         self.assertIn('"coverage", "run", "-m", "unittest"', self.verify_release)
         self.assertIn('"coverage", "report"', self.verify_release)
+        self.assertEqual(self.workflow.count("run: python scripts/verify_release.py"), 1)
+
+    def test_canonical_release_gate_enforces_ruff_lint_and_format(self) -> None:
+        self.assertRegex(self.pyproject, r"(?m)^dependencies = \[\]$")
+        self.assertRegex(self.pyproject, r'(?m)^  "ruff>=0\.9",$')
+        self.assertRegex(self.pyproject, r"(?ms)^\[tool\.ruff\]\n.*^line-length = 120$")
+        self.assertRegex(self.pyproject, r'(?m)^select = \["E4", "E7", "E9", "F", "I"\]$')
+        self.assertIn('"ruff", "check", "."', self.verify_release)
+        self.assertIn('"ruff", "format", "--check", "."', self.verify_release)
         self.assertEqual(self.workflow.count("run: python scripts/verify_release.py"), 1)
 
     def test_generated_site_directory_is_ignored(self) -> None:
