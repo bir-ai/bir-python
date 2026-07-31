@@ -10,6 +10,13 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- The release gate now runs the full SDK suite under statement and branch
+  coverage, promotes `ResourceWarning` to an error, and enforces an audited 89.0%
+  floor through `pyproject.toml`. Coverage remains a dev-only extra and runtime
+  dependencies stay empty. HTTP error responses from event-batch, event, and
+  experiment sends are now closed deterministically after their bodies are read,
+  removing the resource warnings that the stricter gate exposed.
+
 - Release verification now resolves Pyright through the active Python
   interpreter first and validates `.venv` / `PATH` launchers before using them.
   Moving the repository can no longer leave an executable-looking launcher with

@@ -31,6 +31,7 @@ from bir._sdk import (
     _parse_env_bool,
     _parse_env_int,
     _parse_env_sample_rate,
+    _read_http_error_body,
     _record_sent_ids,
     _redact_secret_text,
     _reset_config_for_tests,
@@ -163,6 +164,20 @@ class SdkTests(unittest.TestCase):
         # Start every test from hardcoded defaults so an ambient BIR_* variable
         # in the developer's environment never changes the import-time config.
         _reset_config_for_tests()
+
+    def test_read_http_error_body_closes_response(self) -> None:
+        error = urllib.error.HTTPError(
+            "http://server.test",
+            500,
+            "error",
+            HTTPMessage(),
+            BytesIO(b'{"detail":"failed"}'),
+        )
+
+        body = _read_http_error_body(error)
+
+        self.assertEqual(body, '{"detail":"failed"}')
+        self.assertTrue(error.fp.closed)
 
     def tearDown(self) -> None:
         _reset_config_for_tests()

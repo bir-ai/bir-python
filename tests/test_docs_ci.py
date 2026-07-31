@@ -10,6 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docs-deploy.yml"
+VERIFY_RELEASE = REPO_ROOT / "scripts" / "verify_release.py"
 
 
 class DocumentationCIContractTests(unittest.TestCase):
@@ -19,6 +20,7 @@ class DocumentationCIContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = CI_WORKFLOW.read_text(encoding="utf-8")
         cls.pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        cls.verify_release = VERIFY_RELEASE.read_text(encoding="utf-8")
 
     def test_docs_extra_is_optional_and_runtime_dependencies_stay_empty(self) -> None:
         self.assertRegex(self.pyproject, r"(?m)^dependencies = \[\]$")
@@ -44,6 +46,14 @@ class DocumentationCIContractTests(unittest.TestCase):
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', sdk_job)
         self.assertNotIn(".[docs]", sdk_job)
         self.assertNotIn("mkdocs", sdk_job)
+
+    def test_canonical_release_gate_enforces_branch_coverage_and_resource_hygiene(self) -> None:
+        self.assertRegex(self.pyproject, r"(?ms)^\[tool\.coverage\.run\]\nbranch = true$")
+        self.assertRegex(self.pyproject, r"(?ms)^\[tool\.coverage\.report\]\nfail_under = 89\.0$")
+        self.assertIn('env["PYTHONWARNINGS"] = "error::ResourceWarning"', self.verify_release)
+        self.assertIn('"coverage", "run", "-m", "unittest"', self.verify_release)
+        self.assertIn('"coverage", "report"', self.verify_release)
+        self.assertEqual(self.workflow.count("run: python scripts/verify_release.py"), 1)
 
     def test_generated_site_directory_is_ignored(self) -> None:
         gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()

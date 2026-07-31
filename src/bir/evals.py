@@ -26,6 +26,7 @@ from ._sdk import (
     _duration_ms,
     _is_retryable_status,
     _now,
+    _read_http_error_body,
     _record_score_event,
     _safe_capture,
     _safe_error,
@@ -2168,7 +2169,7 @@ def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: f
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        body = _read_http_error_body(exc)
         message = f"bir server rejected experiment with HTTP {exc.code}: {body}"
         if _is_retryable_status(exc.code):
             raise _TransientSendError(message, cause=exc) from exc

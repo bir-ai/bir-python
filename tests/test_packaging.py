@@ -82,6 +82,33 @@ class VerifyReleasePyrightTests(unittest.TestCase):
 
         self.assertEqual(command, [fallback])
 
+    def test_sdk_tests_run_under_coverage_with_strict_resource_warnings(self) -> None:
+        with mock.patch.object(self.verify_release, "run") as run:
+            self.verify_release.run_sdk_tests()
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(
+            commands,
+            [
+                [self.verify_release.sys.executable, "-m", "coverage", "erase"],
+                [
+                    self.verify_release.sys.executable,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                ],
+                [self.verify_release.sys.executable, "-m", "coverage", "report"],
+            ],
+        )
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"]["PYTHONWARNINGS"], "error::ResourceWarning")
+            self.assertEqual(call.kwargs["env"]["PYTHONPATH"], "src")
+
 
 class VerifyReleaseMarkerTests(unittest.TestCase):
     """``verify_release`` ships and enforces the ``py.typed`` marker."""
@@ -236,6 +263,7 @@ class VerifyReleaseMarkerTests(unittest.TestCase):
 
         lines = metadata.splitlines()
         self.assertIn("Provides-Extra: dev", lines)
+        self.assertIn('Requires-Dist: coverage[toml]>=7.0; extra == "dev"', lines)
         self.assertIn('Requires-Dist: pytest>=8.0; extra == "dev"', lines)
         self.assertIn("Provides-Extra: docs", lines)
         self.assertIn('Requires-Dist: mkdocs>=1.5; extra == "docs"', lines)

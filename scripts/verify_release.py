@@ -108,15 +108,28 @@ def main() -> int:
 
 
 def run_sdk_tests() -> None:
-    """Run the SDK unit test suite with src on PYTHONPATH."""
+    """Run SDK tests under branch coverage with strict resource warnings."""
 
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
+    env["PYTHONWARNINGS"] = "error::ResourceWarning"
     run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        [sys.executable, "-m", "coverage", "erase"],
         cwd=PACKAGE_ROOT,
         env=env,
-        label="SDK unit tests",
+        label="coverage reset",
+    )
+    run(
+        [sys.executable, "-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests"],
+        cwd=PACKAGE_ROOT,
+        env=env,
+        label="SDK unit tests with branch coverage",
+    )
+    run(
+        [sys.executable, "-m", "coverage", "report"],
+        cwd=PACKAGE_ROOT,
+        env=env,
+        label="coverage gate",
     )
 
 

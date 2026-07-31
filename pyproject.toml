@@ -50,6 +50,7 @@ bir = "bir.cli:main"
 # are dev-only tooling and never become runtime dependencies.
 dev = [
   "build>=1.0",
+  "coverage[toml]>=7.0",
   "pytest>=8.0",
   "setuptools>=77",
   "wheel>=0.40",
@@ -69,3 +70,13 @@ bir = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["bir"]
+
+[tool.coverage.report]
+fail_under = 89.0
+precision = 2
+show_missing = true
+skip_covered = true

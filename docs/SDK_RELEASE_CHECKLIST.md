@@ -51,11 +51,13 @@ Run the repeatable release verification script from the repository root:
 ./.venv/bin/python scripts/verify_release.py
 ```
 
-The script runs SDK unit tests, runs `pyright`, builds a temporary pure-Python
-wheel under the `bir-sdk` distribution name from the SDK package files and
-metadata, checks the wheel contents for obvious local/generated artifacts and
-for the complete `bir` package tree and PEP 561 `bir/py.typed` marker, validates
-RECORD hashes and sizes, installs the wheel into a fresh temporary
+The script runs SDK unit tests with `ResourceWarning` promoted to an error,
+measures statement and branch coverage, enforces the configured coverage floor,
+runs `pyright`, and builds a temporary pure-Python wheel under the `bir-sdk`
+distribution name from the SDK package files and metadata. It checks the wheel
+contents for obvious local/generated artifacts and for the complete `bir`
+package tree and PEP 561 `bir/py.typed` marker, validates RECORD hashes and
+sizes, installs the wheel into a fresh temporary
 virtual environment, and executes a smoke test that asserts the installed
 distribution resolves as `bir-sdk` at the project version (so distribution-name
 drift fails verification), imports every integration without provider SDKs, and
@@ -83,11 +85,21 @@ CI runs the same release verification script on pushes and pull requests to
 `main`. The server and dashboard contract tests run in the `bir-app`
 repository, against the published `bir-sdk` package.
 
+The coverage configuration lives in `pyproject.toml`, measures branches as well
+as statements, and has no source-specific exclusions. The audited dev-only
+baseline on Python 3.14 is **89.38%**; the enforced **89.0%** floor leaves a small
+allowance for supported Python/platform tracing differences while still
+rejecting meaningful regressions. Installing the optional `otel` extra can
+increase the local result because its real exporter paths become executable.
+
 To run the unit tests, example smoke tests, and type checks directly from the
 repository root:
 
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m unittest discover -s tests
+./.venv/bin/python -m coverage erase
+PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
+  ./.venv/bin/python -m coverage run -m unittest discover -s tests
+./.venv/bin/python -m coverage report
 PYTHONPATH=src ./.venv/bin/python -m pytest tests/test_examples.py
 ./.venv/bin/pyright
 python scripts/fixtures.py check

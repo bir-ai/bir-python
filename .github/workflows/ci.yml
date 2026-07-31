@@ -61,9 +61,10 @@ jobs:
         shell: bash
         run: PYTHONPATH=src python -m pytest tests/test_examples.py
 
-      # pyright and the release-package check are OS- and interpreter-independent,
-      # so we run them once on the canonical ubuntu / 3.12 leg to avoid redundant
-      # work; verify_release builds and installs a wheel and need not run per-OS.
+      # Run Pyright and the release-package check once on the canonical ubuntu /
+      # 3.12 leg to avoid redundant work and keep one stable coverage baseline.
+      # verify_release runs the suite under the branch-coverage floor, then builds
+      # and installs both distributions.
       - name: Run pyright
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: pyright

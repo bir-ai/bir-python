@@ -2303,6 +2303,15 @@ def _is_retryable_status(status: int) -> bool:
     return 500 <= status < 600
 
 
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    """Read and close an HTTP error response without leaking its file object."""
+
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    finally:
+        exc.close()
+
+
 def _post_event_batch(
     endpoint: str,
     events: list[dict[str, Any]],
@@ -2324,8 +2333,9 @@ def _post_event_batch(
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
+            exc.close()
             return None
-        body = exc.read().decode("utf-8", errors="replace")
+        body = _read_http_error_body(exc)
         message = f"bir server rejected event batch with HTTP {exc.code}: {body}"
         if _is_retryable_status(exc.code):
             raise _TransientSendError(message, cause=exc) from exc
@@ -2370,7 +2380,7 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        body = _read_http_error_body(exc)
         message = f"bir server rejected event with HTTP {exc.code}: {body}"
         if _is_retryable_status(exc.code):
             raise _TransientSendError(message, cause=exc) from exc
