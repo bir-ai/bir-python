@@ -133,15 +133,60 @@ def venv_bin(env_dir: Path, name: str) -> Path:
 
 
 def run_pyright() -> None:
-    """Run pyright from the repo virtual environment or PATH."""
+    """Run Pyright from the active interpreter, repo environment, or PATH."""
+
+    run(_pyright_command(), cwd=REPO_ROOT, label="pyright")
+
+
+def _pyright_command() -> list[str]:
+    """Resolve a working Pyright command without trusting a stale launcher.
+
+    Virtual-environment console scripts contain absolute interpreter paths on
+    POSIX. Moving a repository can therefore leave ``.venv/bin/pyright`` present
+    and executable while its shebang points to a location that no longer exists.
+    Prefer the module installed beside the interpreter running this script; when
+    that is unavailable, probe launchers before selecting one.
+    """
+
+    try:
+        active_module = importlib.util.find_spec("pyright")
+    except (ImportError, ValueError):
+        active_module = None
+    if active_module is not None:
+        return [sys.executable, "-m", "pyright"]
 
     pyright = venv_bin(REPO_ROOT / ".venv", "pyright")
-    if not pyright.exists():
-        resolved = shutil.which("pyright")
-        if resolved is None:
-            raise RuntimeError("pyright is required for release verification but was not found")
-        pyright = Path(resolved)
-    run([str(pyright)], cwd=REPO_ROOT, label="pyright")
+    attempted = [f"active interpreter module ({sys.executable} -m pyright)", str(pyright)]
+    if _command_reports_version([str(pyright)]):
+        return [str(pyright)]
+
+    resolved = shutil.which("pyright")
+    if resolved is not None:
+        attempted.append(resolved)
+        if _command_reports_version([resolved]):
+            return [resolved]
+
+    raise RuntimeError(
+        "pyright is required for release verification but no working installation "
+        f"was found; attempted: {', '.join(attempted)}"
+    )
+
+
+def _command_reports_version(command: list[str]) -> bool:
+    """Return whether a command can launch and report a successful version."""
+
+    try:
+        result = subprocess.run(
+            [*command, "--version"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def build_wheel(wheelhouse: Path, version: str) -> Path:

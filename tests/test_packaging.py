@@ -21,6 +21,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 import bir
 
@@ -44,6 +45,42 @@ class PyTypedMarkerTests(unittest.TestCase):
     def test_marker_is_locatable_from_package(self) -> None:
         marker = importlib.resources.files("bir").joinpath("py.typed")
         self.assertTrue(marker.is_file())
+
+
+class VerifyReleasePyrightTests(unittest.TestCase):
+    """The release gate finds Pyright even after the repository is moved."""
+
+    def setUp(self) -> None:
+        self.verify_release = _load_verify_release()
+        tmp = tempfile.TemporaryDirectory(prefix="bir-pyright-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+
+    def test_prefers_module_from_active_interpreter(self) -> None:
+        with (
+            mock.patch.object(self.verify_release.importlib.util, "find_spec", return_value=object()),
+            mock.patch.object(self.verify_release.shutil, "which") as which,
+        ):
+            command = self.verify_release._pyright_command()
+
+        self.assertEqual(command, [self.verify_release.sys.executable, "-m", "pyright"])
+        which.assert_not_called()
+
+    def test_skips_existing_venv_launcher_with_broken_shebang(self) -> None:
+        broken = self.verify_release.venv_bin(self.tmp_path / ".venv", "pyright")
+        broken.parent.mkdir(parents=True)
+        broken.write_text("#!/path/that/no/longer/exists/python\n", encoding="utf-8")
+        broken.chmod(0o755)
+
+        fallback = self.verify_release.sys.executable
+        with (
+            mock.patch.object(self.verify_release, "REPO_ROOT", self.tmp_path),
+            mock.patch.object(self.verify_release.importlib.util, "find_spec", return_value=None),
+            mock.patch.object(self.verify_release.shutil, "which", return_value=fallback),
+        ):
+            command = self.verify_release._pyright_command()
+
+        self.assertEqual(command, [fallback])
 
 
 class VerifyReleaseMarkerTests(unittest.TestCase):

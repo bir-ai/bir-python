@@ -37,6 +37,14 @@ you intend to cut a release.
 
 ## Local Verification
 
+Create a complete local development environment after cloning or moving the
+repository:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e ".[dev,docs,otel]" pyright==1.1.410
+```
+
 Run the repeatable release verification script from the repository root:
 
 ```bash
@@ -54,6 +62,11 @@ drift fails verification), imports every integration without provider SDKs, and
 covers trace, span, retrieval, prompt metadata,
 generation, usage, cost, score events, deterministic evaluators, and local
 experiment writing.
+
+Pyright resolution prefers the module installed in the interpreter running the
+release script. If it is absent, the script probes the repository `.venv`
+launcher and then `PATH`, skipping a launcher that still exists but cannot run
+after its virtual environment or repository was moved.
 
 The script then verifies the **source distribution (sdist)** the same way many
 downstream installs and mirrors consume it. It builds the sdist

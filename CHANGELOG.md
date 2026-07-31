@@ -8,6 +8,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Changed
+
+- Release verification now resolves Pyright through the active Python
+  interpreter first and validates `.venv` / `PATH` launchers before using them.
+  Moving the repository can no longer leave an executable-looking launcher with
+  a stale absolute shebang that prevents an otherwise valid release check. The
+  release checklist now includes the supported clean-environment bootstrap.
+
 ## 0.3.0 - 2026-07-03
 
 ### Added
