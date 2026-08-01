@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- A temporary SQLite upload spool can now stream validated events into a
+  disk-backed, first-ID-wins store and reproduce the existing root-first trace,
+  rotated-file, deduplication, and orphan ordering without retaining the full
+  event collection in Python memory. SQLite sorting is forced to disk with a
+  bounded page cache, and the temporary database is removed after both success
+  and input failure. The spool remains internal and is not yet used by
+  `send_events()`.
+
 - The internal multi-batch execution contract now sends groups sequentially,
   delegates existing retry/fallback behavior per group, aggregates partial
   acceptance results, checkpoints explicit accepted IDs after every successful

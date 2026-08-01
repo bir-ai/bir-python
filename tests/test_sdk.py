@@ -43,6 +43,7 @@ from bir._sdk import (
     _MAX_SAMPLE_RULES,
     _Config,
     _config_from_env,
+    _events_for_sending,
     _InterProcessFileLock,
     _iter_event_batches,
     _iter_trace_events,
@@ -55,6 +56,7 @@ from bir._sdk import (
     _redact_secret_text,
     _reset_config_for_tests,
     _safe_capture,
+    _UploadEventSpool,
 )
 
 _BIR_ENV_VARS = (
@@ -3196,6 +3198,71 @@ class SdkTests(unittest.TestCase):
             recorded = json.loads(sent_ids_path.read_text(encoding="utf-8"))
             self.assertEqual(set(recorded["event_ids"]), set(first_result.event_ids))
             self.assertTrue(all(event.id not in recorded["event_ids"] for event in batches[1] + batches[2]))
+
+    def test_upload_spool_matches_in_memory_ordering_and_cleans_up(self) -> None:
+        with temporary_workdir() as workdir:
+            with trace("complete-a"):
+                with span("outer"):
+                    with tool_call("search"):
+                        pass
+            with trace("complete-b"):
+                score("helpfulness", 0.9)
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            original_lines = trace_path.read_text(encoding="utf-8").splitlines()
+            child_payload = next(json.loads(line) for line in original_lines if json.loads(line)["type"] == "span")
+            orphan_payload = dict(
+                child_payload,
+                id="orphan-span",
+                trace_id="orphan-trace",
+                parent_id="orphan-trace",
+                name="orphan",
+            )
+            (workdir / ".bir" / "traces.jsonl.2").write_text(
+                "\n".join(original_lines) + "\n",
+                encoding="utf-8",
+            )
+            (workdir / ".bir" / "traces.jsonl.1").write_text(
+                json.dumps(orphan_payload) + "\n" + original_lines[0] + "\n",
+                encoding="utf-8",
+            )
+            trace_path.write_text(original_lines[-1] + "\n", encoding="utf-8")
+
+            expected = _events_for_sending(trace_path, include_rotated=True)
+            spool = _UploadEventSpool()
+            with spool:
+                database_path = spool.database_path
+                assert database_path is not None
+                spool.add_events(_iter_trace_events(trace_path, include_rotated=True))
+                actual = list(spool.iter_ordered_events())
+                self.assertTrue(database_path.is_file())
+
+            self.assertEqual([event.id for event in actual], [event.id for event in expected])
+            self.assertEqual([event.raw for event in actual], [event.raw for event in expected])
+            self.assertEqual(actual[-1].id, "orphan-span")
+            self.assertFalse(database_path.parent.exists())
+
+    def test_upload_spool_cleans_up_after_input_failure(self) -> None:
+        with temporary_workdir():
+            with trace("first"):
+                pass
+            event = load_events()[0]
+
+            def failing_events() -> Iterator[bir.TraceEvent]:
+                yield event
+                raise RuntimeError("input failed")
+
+            spool = _UploadEventSpool()
+            database_parent: Path | None = None
+            with self.assertRaisesRegex(RuntimeError, "input failed"):
+                with spool:
+                    database_path = spool.database_path
+                    assert database_path is not None
+                    database_parent = database_path.parent
+                    spool.add_events(failing_events())
+
+            assert database_parent is not None
+            self.assertFalse(database_parent.exists())
 
     def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
         with temporary_workdir() as workdir:

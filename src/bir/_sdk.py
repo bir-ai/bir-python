@@ -10,6 +10,8 @@ import math
 import os
 import random
 import re
+import sqlite3
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -854,6 +856,204 @@ def _iter_event_batches(events: Iterable[TraceEvent], batch_size: int) -> Iterat
             batch = []
     if batch:
         yield batch
+
+
+class _UploadEventSpool:
+    """Disk-backed deduplication and upload ordering for parsed events."""
+
+    def __init__(self) -> None:
+        self.database_path: Path | None = None
+        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+        self._connection: sqlite3.Connection | None = None
+
+    def __enter__(self) -> _UploadEventSpool:
+        if self._connection is not None:
+            raise RuntimeError("upload event spool is already open")
+
+        temporary_directory = tempfile.TemporaryDirectory(prefix="bir-upload-spool-")
+        database_path = Path(temporary_directory.name) / "events.sqlite3"
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(database_path)
+            connection.execute("PRAGMA journal_mode = OFF")
+            connection.execute("PRAGMA synchronous = OFF")
+            connection.execute("PRAGMA temp_store = FILE")
+            connection.execute("PRAGMA cache_size = -2048")
+            connection.executescript(
+                """
+                CREATE TABLE events (
+                    sequence INTEGER PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    trace_id TEXT NOT NULL,
+                    parent_id TEXT,
+                    event_type TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    depth INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX events_trace_id ON events(trace_id);
+                """
+            )
+        except BaseException:
+            try:
+                if connection is not None:
+                    connection.close()
+            finally:
+                temporary_directory.cleanup()
+            raise
+
+        assert connection is not None
+        self.database_path = database_path
+        self._temporary_directory = temporary_directory
+        self._connection = connection
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        connection = self._connection
+        temporary_directory = self._temporary_directory
+        self._connection = None
+        self._temporary_directory = None
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if temporary_directory is not None:
+                temporary_directory.cleanup()
+
+    def add_events(self, events: Iterable[TraceEvent]) -> None:
+        """Stream events into the spool, retaining the first occurrence of each ID."""
+
+        connection = self._require_connection()
+        for sequence, event in enumerate(events):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO events (
+                    sequence, event_id, trace_id, parent_id, event_type,
+                    start_time, end_time, priority, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sequence,
+                    event.id,
+                    event.trace_id,
+                    event.parent_id,
+                    event.type,
+                    event.start_time,
+                    event.end_time,
+                    _EVENT_SORT_PRIORITY.get(event.type, 99),
+                    json.dumps(event.raw, sort_keys=True, separators=(",", ":"), allow_nan=False),
+                ),
+            )
+            if (sequence + 1) % 1000 == 0:
+                connection.commit()
+        connection.commit()
+        self._populate_depths()
+
+    def iter_ordered_events(self) -> Iterator[TraceEvent]:
+        """Yield complete traces root-first, followed by rootless events."""
+
+        connection = self._require_connection()
+        complete_trace_rows = connection.execute(
+            """
+            SELECT event.payload, event.sequence
+            FROM events AS event
+            JOIN events AS root
+              ON root.trace_id = event.trace_id
+             AND root.event_id = event.trace_id
+             AND root.event_type = 'trace'
+            JOIN (
+                SELECT trace_id, MIN(sequence) AS first_sequence
+                FROM events
+                GROUP BY trace_id
+            ) AS first_seen ON first_seen.trace_id = event.trace_id
+            ORDER BY
+                root.start_time,
+                first_seen.first_sequence,
+                event.start_time,
+                event.priority,
+                event.depth,
+                event.end_time,
+                event.sequence
+            """
+        )
+        for payload_text, sequence in complete_trace_rows:
+            yield self._event_from_payload_text(payload_text, sequence)
+
+        orphan_rows = connection.execute(
+            """
+            SELECT event.payload, event.sequence
+            FROM events AS event
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM events AS root
+                WHERE root.trace_id = event.trace_id
+                  AND root.event_id = event.trace_id
+                  AND root.event_type = 'trace'
+            )
+            ORDER BY event.sequence
+            """
+        )
+        for payload_text, sequence in orphan_rows:
+            yield self._event_from_payload_text(payload_text, sequence)
+
+    def _populate_depths(self) -> None:
+        connection = self._require_connection()
+        last_sequence = -1
+        while True:
+            rows = connection.execute(
+                """
+                SELECT sequence, event_id, trace_id, parent_id
+                FROM events
+                WHERE sequence > ?
+                ORDER BY sequence
+                LIMIT 1000
+                """,
+                (last_sequence,),
+            ).fetchall()
+            if not rows:
+                break
+            for sequence, event_id, trace_id, parent_id in rows:
+                depth = self._event_depth(event_id, trace_id, parent_id)
+                connection.execute("UPDATE events SET depth = ? WHERE sequence = ?", (depth, sequence))
+            connection.commit()
+            last_sequence = rows[-1][0]
+
+    def _event_depth(self, event_id: str, trace_id: str, parent_id: str | None) -> int:
+        connection = self._require_connection()
+        depth = 0
+        seen = {event_id}
+        while parent_id is not None and parent_id not in seen:
+            parent = connection.execute(
+                "SELECT parent_id FROM events WHERE event_id = ? AND trace_id = ?",
+                (parent_id, trace_id),
+            ).fetchone()
+            if parent is None:
+                break
+            seen.add(parent_id)
+            depth += 1
+            parent_id = parent[0]
+        return depth
+
+    def _event_from_payload_text(self, payload_text: str, sequence: int) -> TraceEvent:
+        payload = json.loads(payload_text)
+        if not isinstance(payload, dict):
+            raise RuntimeError("upload event spool contains a non-object payload")
+        database_path = self.database_path
+        if database_path is None:
+            raise RuntimeError("upload event spool is not open")
+        return _trace_event_from_payload(payload, trace_path=database_path, line_number=sequence + 1)
+
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("upload event spool is not open")
+        return self._connection
 
 
 def observe(
