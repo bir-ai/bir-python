@@ -798,6 +798,24 @@ def _events_for_sending(path: str | Path | None = None, *, include_rotated: bool
     return ordered_events
 
 
+def _iter_event_batches(events: Iterable[TraceEvent], batch_size: int) -> Iterator[list[TraceEvent]]:
+    """Yield ordered event batches containing at most ``batch_size`` items."""
+
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        raise TypeError("batch_size must be an int")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    batch: list[TraceEvent] = []
+    for event in events:
+        batch.append(event)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def observe(
     name: str | None = None,
     *,

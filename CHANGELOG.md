@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- A deterministic internal upload-batch iterator now splits any ordered event
+  iterable into validated, fixed-size groups without copying event objects. It
+  covers exact boundaries, final remainders, and empty inputs; it is deliberately
+  not connected to `send_events()` yet, so HTTP request and partial-success
+  behavior remain unchanged until that contract is defined.
+
 - Upload preparation now parses the selected active/rotated JSONL store once
   instead of independently loading events and grouped traces. Trace grouping
   reuses the same parsed event objects while preserving root-first ordering, ID

@@ -44,6 +44,7 @@ from bir._sdk import (
     _Config,
     _config_from_env,
     _InterProcessFileLock,
+    _iter_event_batches,
     _iter_trace_events,
     _parse_env_bool,
     _parse_env_int,
@@ -3082,6 +3083,39 @@ class SdkTests(unittest.TestCase):
             iter_trace_events.assert_called_once_with(None, include_rotated=False)
             self.assertEqual(result.attempted, 2)
             self.assertEqual(result.accepted, 2)
+
+    def test_internal_event_batches_preserve_order_identity_and_boundaries(self) -> None:
+        with temporary_workdir():
+            for index in range(5):
+                with trace(f"trace-{index}"):
+                    pass
+            events = load_events()
+
+            for batch_size, expected_sizes in (
+                (1, [1, 1, 1, 1, 1]),
+                (2, [2, 2, 1]),
+                (5, [5]),
+                (6, [5]),
+            ):
+                with self.subTest(batch_size=batch_size):
+                    batches = list(_iter_event_batches(iter(events), batch_size))
+                    flattened = [event for batch in batches for event in batch]
+
+                    self.assertEqual([len(batch) for batch in batches], expected_sizes)
+                    self.assertEqual(flattened, events)
+                    for actual, expected in zip(flattened, events):
+                        self.assertIs(actual, expected)
+
+            self.assertEqual(list(_iter_event_batches(iter(()), 3)), [])
+
+    def test_internal_event_batches_reject_invalid_sizes(self) -> None:
+        for batch_size in (True, 1.5, "2"):
+            with self.subTest(batch_size=batch_size), self.assertRaisesRegex(TypeError, "batch_size"):
+                list(_iter_event_batches((), cast(Any, batch_size)))
+
+        for batch_size in (0, -1):
+            with self.subTest(batch_size=batch_size), self.assertRaisesRegex(ValueError, "batch_size"):
+                list(_iter_event_batches((), batch_size))
 
     def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
         with temporary_workdir() as workdir:
