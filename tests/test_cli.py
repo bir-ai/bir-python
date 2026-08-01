@@ -1497,6 +1497,35 @@ class SendCommandTests(CliBaseTest):
 
             self.assertEqual(timeouts, [10.0, 2.5])
 
+    def test_send_forwards_batch_size(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            batch_sizes: list[int] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                data = getattr(request, "data")
+                events = json.loads(data.decode("utf-8"))
+                batch_sizes.append(len(events))
+                body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
+                return FakeHttpResponse(body.encode("utf-8"))
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                code, out, err = run_cli(
+                    "send",
+                    "--path",
+                    str(trace_path),
+                    "--server",
+                    "http://server.test",
+                    "--batch-size",
+                    "2",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(out.strip(), "accepted=6 attempted=6 skipped=0")
+            self.assertEqual(batch_sizes, [2, 2, 2])
+
     def test_send_rejects_negative_retries(self) -> None:
         with temporary_workdir() as workdir:
             trace_path = workdir / "traces.jsonl"
@@ -1522,6 +1551,20 @@ class SendCommandTests(CliBaseTest):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send", "--path", str(trace_path), "--timeout", "-1")
             self.assertEqual(raised.exception.code, 2)
+
+    def test_send_rejects_non_positive_batch_size(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            def fail(*_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError("invalid --batch-size must be rejected before any request")
+
+            with patch("urllib.request.urlopen", side_effect=fail):
+                for batch_size in ("0", "-1"):
+                    with self.subTest(batch_size=batch_size), self.assertRaises(SystemExit) as raised:
+                        run_cli("send", "--path", str(trace_path), "--batch-size", batch_size)
+                    self.assertEqual(raised.exception.code, 2)
 
 
 class SendExperimentCommandTests(CliBaseTest):

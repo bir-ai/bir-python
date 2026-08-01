@@ -9,14 +9,47 @@ result = send_events("http://127.0.0.1:8000")
 print(result.accepted, result.attempted, result.skipped)
 ```
 
-The helper posts local JSONL events to the server, batching them when supported
-and otherwise posting to `/v1/events` one at a time. Complete traces are sent
-root-first. It uses only the Python standard library.
+By default the helper posts all selected local JSONL events to the batch
+endpoint in one request and, when that endpoint is unavailable, posts them to
+`/v1/events` one event at a time. Complete traces are sent root-first. It uses
+only the Python standard library.
 
 `SendEventsResult` reports how many events were attempted, newly accepted, and
 skipped by an idempotent server response. Local events are not removed after
 sending. Re-sending a file is safe against a Bir server because event IDs are
 idempotent.
+
+## Large stores and batch size
+
+Pass a positive `batch_size` to opt into bounded upload preparation:
+
+```python
+result = send_events(
+    "http://127.0.0.1:8000",
+    include_rotated=True,
+    batch_size=250,
+)
+```
+
+Batches are sent sequentially, so retries and fallback behavior apply to the
+current batch rather than rebuilding the whole store. The selected active and
+rotated JSONL files are parsed once into a temporary, disk-backed SQLite spool.
+The spool preserves root-first trace order, rotated-file chronology,
+first-ID-wins deduplication, and orphan order without retaining the complete
+event collection in Python memory. It is removed after both successful and
+failed sends.
+
+This bounds live event payloads by the configured batch size, not by JSONL file
+size. It does not make the entire call constant-memory:
+`SendEventsResult.event_ids` contains every ID reported by the server, and
+`mark_sent=True` loads the sent-ID sidecar as a set; those ID-only structures
+grow with the number of IDs. With `mark_sent=True`, each successful group is
+checkpointed immediately, so a later failure can resume without sending those
+accepted events again. Public `load_events()` and `load_traces()` still
+materialize their documented complete list results.
+
+Omitting `batch_size` preserves the historical single-request path and avoids
+creating the temporary spool.
 
 ## Retry behavior
 
@@ -76,6 +109,7 @@ The same operations are available without writing Python:
 bir send --server http://127.0.0.1:8000
 bir send --include-rotated --server http://127.0.0.1:8000
 bir send --mark-sent --server http://127.0.0.1:8000
+bir send --batch-size 250 --server http://127.0.0.1:8000
 bir send --retries 3 --backoff 1.0 --timeout 10 \
   --server http://127.0.0.1:8000
 bir send-experiment .bir/experiments/<name>-<id>.jsonl \
@@ -84,12 +118,13 @@ bir send-experiment .bir/experiments/<name>-<id>.jsonl \
   --retries 3 --backoff 1.0
 ```
 
-`bir send` exposes the same knobs as `send_events()`: `--mark-sent` records
-accepted IDs in the `<trace_path>.sent` sidecar and skips them on later sends,
-and `--retries` (default `2`), `--backoff` (default `0.5`), and `--timeout`
-(default `10`) tune transient-failure handling. `bir send-experiment` shares the
-same bounded retry behavior: `--retries` and `--backoff`. All of these accept
-non-negative values only. See
+`bir send` exposes the same knobs as `send_events()`: `--batch-size` opts into a
+positive per-request event bound (off by default), `--mark-sent` records
+accepted IDs in the `<trace_path>.sent` sidecar and skips them on later sends, and
+`--retries` (default `2`), `--backoff` (default `0.5`), and `--timeout` (default
+`10`) tune transient-failure handling. `bir send-experiment` shares the same
+bounded retry behavior: `--retries` and `--backoff`; these retry values are
+non-negative. See
 [CLI & Environment Config](cli-env.md) for all commands and
 [local evals and experiments](evals-experiments.md#upload-an-experiment) for the
 Python API.

@@ -42,7 +42,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
 | `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH]` | Render one experiment to a self-contained HTML or Markdown report. |
-| `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result. |
+| `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result; optionally use bounded groups. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
 | `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
@@ -150,13 +150,16 @@ string is escaped for the chosen format, so already-redacted example text cannot
 inject markup. The same rendering is available in Python as
 `bir.evals.render_experiment_report`.
 
-`bir send` exposes the same options as `send_events()`. `--mark-sent` records the
-event IDs the server accepts in a `<trace_path>.sent` sidecar and skips them on
-later sends, so re-running a send is cheap and idempotent (off by default; the
-sidecar never touches the trace JSONL). `--retries` (default `2`), `--backoff`
-seconds (default `0.5`), and `--timeout` seconds (default `10`) tune the same
-transient-failure handling described below, accept non-negative values only, and
-the delay between attempts is `backoff * 2**attempt`. See
+`bir send` exposes the same options as `send_events()`. `--batch-size N` opts
+into disk-backed upload preparation and sequential request groups containing at
+most `N` events; it accepts positive integers and is off by default, preserving
+the historical single-request path. `--mark-sent` records the event IDs the
+server accepts in a `<trace_path>.sent` sidecar and skips them on later sends, so
+re-running a send is cheap and idempotent (off by default; the sidecar never
+touches the trace JSONL). `--retries` (default `2`), `--backoff` seconds (default
+`0.5`), and `--timeout` seconds (default `10`) tune the same transient-failure
+handling described below, accept non-negative values only, and the delay between
+attempts is `backoff * 2**attempt`. See
 [Sending to a Server](sending.md).
 
 `bir send-experiment` retries transient upload failures (network errors,

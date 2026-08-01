@@ -401,11 +401,16 @@ By default `send_events()` and `bir send` upload only the active trace file. Pas
 size-rotated files oldest-first, deduplicated by event ID, so rotation does not
 strand unsent events. Pass `mark_sent=True` (or `bir send --mark-sent`) to record
 accepted event IDs in a `<trace_path>.sent` sidecar and skip them on later sends,
-so re-running a send is cheap and idempotent. Both `send_events()`/`bir send` and
-`send_experiment()`/`bir send-experiment` retry transient failures (network
-errors, timeouts, and HTTP 5xx) with bounded exponential backoff via `retries`
-and `backoff`, while HTTP 4xx and malformed inputs fail immediately; `bir send`
-exposes these as `--retries`, `--backoff`, and `--timeout`. See
+so re-running a send is cheap and idempotent. Pass a positive `batch_size` (or
+`bir send --batch-size N`) to opt into a temporary disk-backed ordering spool
+and sequential request groups containing at most that many events; omitting it
+preserves the historical single-request path. In bounded mode full event
+payloads do not accumulate with store size, although the returned event-ID list
+and opt-in sent-ID set still grow with their ID counts. Both `send_events()`/`bir
+send` and `send_experiment()`/`bir send-experiment` retry transient failures
+(network errors, timeouts, and HTTP 5xx) with bounded exponential backoff via
+`retries` and `backoff`, while HTTP 4xx and malformed inputs fail immediately;
+`bir send` exposes these as `--retries`, `--backoff`, and `--timeout`. See
 [server uploads](docs/site/sending.md).
 
 ## Testing your instrumentation

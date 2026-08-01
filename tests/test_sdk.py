@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 import urllib.error
 from collections.abc import AsyncGenerator, Generator, Iterator
@@ -2565,7 +2566,13 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with (
+                patch(
+                    "bir._sdk._UploadEventSpool",
+                    side_effect=AssertionError("the default send path must not create an upload spool"),
+                ),
+                patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 2)
@@ -3086,6 +3093,150 @@ class SdkTests(unittest.TestCase):
             iter_trace_events.assert_called_once_with(None, include_rotated=False)
             self.assertEqual(result.attempted, 2)
             self.assertEqual(result.accepted, 2)
+
+    def test_send_events_streams_large_store_in_requested_batches(self) -> None:
+        with temporary_workdir():
+            event_count = 2005
+            for index in range(event_count):
+                with trace(f"trace-{index:04d}"):
+                    pass
+
+            posted_batch_sizes: list[int] = []
+            posted_names: list[str] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batch_sizes.append(len(batch))
+                posted_names.extend(str(event["name"]) for event in batch)
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = send_events("http://server.test", batch_size=1000)
+
+            self.assertEqual(posted_batch_sizes, [1000, 1000, 5])
+            self.assertEqual(posted_names, [f"trace-{index:04d}" for index in range(event_count)])
+            self.assertEqual(result.attempted, event_count)
+            self.assertEqual(result.accepted, event_count)
+            self.assertEqual(len(result.event_ids), event_count)
+
+    def test_send_events_validates_batch_size_before_reading_or_sending(self) -> None:
+        def must_not_iter(*_args: Any, **_kwargs: Any) -> Iterator[bir.TraceEvent]:
+            raise AssertionError("invalid batch_size must fail before reading the trace store")
+
+        for batch_size in (True, 1.5, "2"):
+            with (
+                self.subTest(batch_size=batch_size),
+                patch("bir._sdk._iter_trace_events", side_effect=must_not_iter),
+                self.assertRaisesRegex(TypeError, "batch_size"),
+            ):
+                send_events("http://server.test", batch_size=cast(Any, batch_size))
+
+        for batch_size in (0, -1):
+            with (
+                self.subTest(batch_size=batch_size),
+                patch("bir._sdk._iter_trace_events", side_effect=must_not_iter),
+                self.assertRaisesRegex(ValueError, "batch_size"),
+            ):
+                send_events("http://server.test", batch_size=batch_size)
+
+    def test_send_events_checkpoints_each_batch_and_resumes_after_failure(self) -> None:
+        with temporary_workdir() as workdir:
+            for index in range(5):
+                with trace(f"trace-{index}"):
+                    pass
+
+            successful_batches: list[list[str]] = []
+            request_count = 0
+
+            def fail_second_batch(request: object, timeout: float) -> FakeHttpResponse:
+                nonlocal request_count
+                request_count += 1
+                batch = posted_request_batch(request)
+                if request_count == 2:
+                    raise urllib.error.URLError("second batch failed")
+                successful_batches.append([str(event["id"]) for event in batch])
+                return batch_response_accepting(batch)
+
+            spool = _UploadEventSpool()
+            with (
+                patch("bir._sdk._UploadEventSpool", return_value=spool),
+                patch("bir._sdk.urllib.request.urlopen", side_effect=fail_second_batch),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "second batch failed"):
+                    send_events(
+                        "http://server.test",
+                        batch_size=2,
+                        retries=0,
+                        mark_sent=True,
+                    )
+
+            database_path = spool.database_path
+            assert database_path is not None
+            self.assertFalse(database_path.parent.exists())
+
+            sidecar = workdir / ".bir" / "traces.jsonl.sent"
+            checkpointed = json.loads(sidecar.read_text(encoding="utf-8"))["event_ids"]
+            self.assertEqual(set(checkpointed), set(successful_batches[0]))
+
+            resumed_batches: list[list[str]] = []
+
+            def accept_remaining(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                resumed_batches.append([str(event["id"]) for event in batch])
+                return batch_response_accepting(batch)
+
+            with patch("bir._sdk.urllib.request.urlopen", side_effect=accept_remaining):
+                result = send_events(
+                    "http://server.test",
+                    batch_size=2,
+                    retries=0,
+                    mark_sent=True,
+                )
+
+            self.assertEqual([len(batch) for batch in resumed_batches], [2, 1])
+            self.assertTrue(set(checkpointed).isdisjoint(event_id for batch in resumed_batches for event_id in batch))
+            self.assertEqual(result.attempted, 3)
+            self.assertEqual(result.accepted, 3)
+            all_checkpointed = json.loads(sidecar.read_text(encoding="utf-8"))["event_ids"]
+            self.assertEqual(len(all_checkpointed), 5)
+
+    def test_send_events_peak_python_memory_does_not_scale_with_payload_store_size(self) -> None:
+        with temporary_workdir() as workdir:
+            event_count = 384
+            large_value = "x" * (32 * 1024)
+            for index in range(event_count):
+                with trace(f"trace-{index:04d}", metadata={"large_value": large_value}):
+                    pass
+
+            trace_path = workdir / ".bir" / "traces.jsonl"
+            store_size = trace_path.stat().st_size
+            posted_batch_sizes: list[int] = []
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                batch = posted_request_batch(request)
+                posted_batch_sizes.append(len(batch))
+                return batch_response_accepting(batch)
+
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                # Install the function directly: a Mock would retain every
+                # Request (and therefore every batch body), creating memory
+                # growth that the real urllib call path does not have.
+                with patch("bir._sdk.urllib.request.urlopen", new=fake_urlopen):
+                    result = send_events("http://server.test", batch_size=8)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
+            self.assertEqual(posted_batch_sizes, [8] * (event_count // 8))
+            self.assertEqual(result.attempted, event_count)
+            self.assertGreater(store_size, 12 * 1024 * 1024)
+            self.assertLess(
+                peak,
+                store_size // 2,
+                f"peak traced Python memory {peak} bytes should stay below half of the {store_size}-byte store",
+            )
 
     def test_internal_event_batches_preserve_order_identity_and_boundaries(self) -> None:
         with temporary_workdir():

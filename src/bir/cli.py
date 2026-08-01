@@ -234,6 +234,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     send.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        metavar="N",
+        help="Use disk-backed upload preparation and send at most N events per request group.",
+    )
+    send.add_argument(
         "--retries",
         type=_non_negative_int,
         default=2,
@@ -907,6 +913,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
         path=args.path,
         include_rotated=args.include_rotated,
         mark_sent=args.mark_sent,
+        batch_size=args.batch_size,
         retries=args.retries,
         backoff=args.backoff,
         **timeout_kwargs,

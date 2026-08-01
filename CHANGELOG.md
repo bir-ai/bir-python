@@ -10,31 +10,16 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
-- A temporary SQLite upload spool can now stream validated events into a
-  disk-backed, first-ID-wins store and reproduce the existing root-first trace,
-  rotated-file, deduplication, and orphan ordering without retaining the full
-  event collection in Python memory. SQLite sorting is forced to disk with a
-  bounded page cache, and the temporary database is removed after both success
-  and input failure. The spool remains internal and is not yet used by
-  `send_events()`.
-
-- The internal multi-batch execution contract now sends groups sequentially,
-  delegates existing retry/fallback behavior per group, aggregates partial
-  acceptance results, checkpoints explicit accepted IDs after every successful
-  group, and stops before later groups on failure. It remains disconnected from
-  the public `send_events()` path until bounded store ordering is ready.
-
-- A deterministic internal upload-batch iterator now splits any ordered event
-  iterable into validated, fixed-size groups without copying event objects. It
-  covers exact boundaries, final remainders, and empty inputs; it is deliberately
-  not connected to `send_events()` yet, so HTTP request and partial-success
-  behavior remain unchanged until that contract is defined.
-
-- Upload preparation now parses the selected active/rotated JSONL store once
-  instead of independently loading events and grouped traces. Trace grouping
-  reuses the same parsed event objects while preserving root-first ordering, ID
-  deduplication, orphan handling, sent-ID semantics, and the existing single
-  HTTP batch contract.
+- `send_events(batch_size=N)` and `bir send --batch-size N` now opt into
+  disk-backed bounded upload preparation. Selected active/rotated JSONL files
+  are parsed once into a temporary SQLite spool, preserving the globally
+  root-first, first-ID-wins order before sending sequential groups of at most
+  `N` events. Retries and the batch-endpoint fallback apply independently to
+  each group. With `mark_sent=True`, explicit accepted IDs are checkpointed
+  after every successful group, so a later failure resumes without re-sending
+  completed groups. The temporary database is removed after success and
+  failure. Omitting `batch_size` preserves the historical single-request path;
+  the returned ID list and opt-in sent-ID set still grow with their ID counts.
 
 - Local trace loading now builds on an internal, lazy JSONL event iterator that
   validates one line at a time and preserves active/rotated file ordering and

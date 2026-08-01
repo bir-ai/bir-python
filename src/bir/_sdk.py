@@ -660,6 +660,7 @@ def send_events(
     backoff: float = 0.5,
     mark_sent: bool = False,
     include_rotated: bool = False,
+    batch_size: int | None = None,
 ) -> SendEventsResult:
     """Send local JSONL trace events to a Bir ingestion server.
 
@@ -687,14 +688,42 @@ def send_events(
     deduplicated by ID when a rotated file overlaps the active file, and the
     ``mark_sent`` sidecar still anchors to the active trace path so recorded IDs
     are skipped across the whole selected file set.
+
+    ``batch_size`` opts into disk-backed bounded upload preparation. A positive
+    value preserves the same ordering while sending at most that many events per
+    request group. Successful groups are checkpointed immediately when
+    ``mark_sent=True``, so a later failure can resume without re-sending them.
+    The default ``None`` preserves the historical single-request path. The
+    returned ``event_ids`` list, and the loaded sent-ID set when
+    ``mark_sent=True``, still grow with the number of IDs by design.
     """
 
     timeout = float(_validate_non_negative_number(timeout, "timeout"))
     retries = _validate_non_negative_int(retries, "retries")
     backoff = float(_validate_non_negative_number(backoff, "backoff"))
+    if batch_size is not None:
+        batch_size = _validate_positive_int(batch_size, "batch_size")
+
+    sent_ids_path = _sent_ids_path(path) if mark_sent else None
+    if batch_size is not None:
+        already_sent = _load_sent_ids(sent_ids_path) if sent_ids_path is not None else set()
+        endpoint = _events_endpoint(server_url)
+        with _UploadEventSpool() as spool:
+            spool.add_events(_iter_trace_events(path, include_rotated=include_rotated))
+            ordered_events: Iterable[TraceEvent] = spool.iter_ordered_events()
+            if already_sent:
+                ordered_events = (event for event in ordered_events if event.id not in already_sent)
+            batches = _iter_event_batches(ordered_events, batch_size)
+            return _post_loaded_event_batches(
+                batches,
+                endpoint,
+                timeout=timeout,
+                retries=retries,
+                backoff=backoff,
+                sent_ids_path=sent_ids_path,
+            )
 
     events = _events_for_sending(path, include_rotated=include_rotated)
-    sent_ids_path = _sent_ids_path(path) if mark_sent else None
     if sent_ids_path is not None:
         already_sent = _load_sent_ids(sent_ids_path)
         if already_sent:
@@ -705,7 +734,6 @@ def send_events(
         return SendEventsResult(accepted=0, event_ids=[], attempted=0)
 
     result = _post_loaded_events(events, endpoint, timeout=timeout, retries=retries, backoff=backoff)
-
     if sent_ids_path is not None and result.event_ids:
         _record_sent_ids(sent_ids_path, result.event_ids)
     return result
@@ -843,10 +871,7 @@ def _events_for_sending(path: str | Path | None = None, *, include_rotated: bool
 def _iter_event_batches(events: Iterable[TraceEvent], batch_size: int) -> Iterator[list[TraceEvent]]:
     """Yield ordered event batches containing at most ``batch_size`` items."""
 
-    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
-        raise TypeError("batch_size must be an int")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+    batch_size = _validate_positive_int(batch_size, "batch_size")
 
     batch: list[TraceEvent] = []
     for event in events:
@@ -3317,6 +3342,13 @@ def _validate_non_negative_int(value: Any, field: str) -> int:
         raise TypeError(f"bir {field} must be an int")
     if value < 0:
         raise ValueError(f"bir {field} must be non-negative")
+    return value
+
+
+def _validate_positive_int(value: Any, field: str) -> int:
+    value = _validate_non_negative_int(value, field)
+    if value == 0:
+        raise ValueError(f"bir {field} must be positive")
     return value
 
 

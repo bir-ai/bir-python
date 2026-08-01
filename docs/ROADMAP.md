@@ -64,7 +64,7 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Bound memory use for large trace stores and uploads | P1 | M-L | Multi-GB JSONL stores can be inspected and sent without loading the full store twice | — |
+| 1 | Finish bounded memory use for large trace stores | P1 | M | Multi-GB stores can be pruned without materializing every event | — |
 | 2 | Split core implementation into internal modules | P1 | L | Smaller ownership boundaries without changing the public API | — |
 | 3 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
 | 4 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
@@ -73,23 +73,24 @@ breaking release says otherwise:
 
 ## Work item details
 
-### 1. Bound memory use for large trace stores and uploads
+### 1. Finish bounded memory use for large trace stores
 
-**Why:** `load_events()` materializes the full store, and the send path currently
-loads and groups the same data before posting one full batch. Rotation limits file
-size but does not bound total memory when rotated files are included.
+**Why:** opt-in bounded uploads now use the validated JSONL iterator and a
+disk-backed ordering spool, but pruning still calls `load_events()` and
+materializes the selected store. Public loaders intentionally retain their
+documented list return types.
 
 **Scope:**
 
-- Add an internal validated JSONL iterator shared by loading, pruning, and send.
-- Add bounded event batches for upload while preserving root-first ordering,
-  rotated-file ordering, ID deduplication, retries, and `mark_sent` semantics.
+- Rework pruning around the validated iterator without splitting traces across
+  the keep/drop boundary or weakening its atomic rewrite and locking guarantees.
+- Preserve active/rotated ordering, ID deduplication, selection semantics, and
+  exact dry-run/apply results.
 - Keep existing `load_events()` / `load_traces()` return types and behavior.
-- Define server compatibility for partial batch success before changing requests.
-- Test large synthetic stores and failures between batches.
+- Add a large synthetic-store memory test and failure/rollback coverage.
 
-**Done when:** peak client memory is bounded by the configured batch/window size,
-wire ordering remains deterministic, and existing public loaders are compatible.
+**Done when:** prune peak client memory is bounded by a documented working set,
+serialized output remains deterministic, and public loaders remain compatible.
 
 ### 2. Split core implementation into internal modules
 
