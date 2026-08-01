@@ -2433,6 +2433,14 @@ class _PruneResult:
     dry_run: bool
 
 
+@dataclass(frozen=True)
+class _PruneTraceSelection:
+    """Counts produced by disk-backed prune selection."""
+
+    removed_traces: int
+    kept_traces: int
+
+
 def _trace_starts_before(start_time: str, cutoff: datetime) -> bool:
     """Return True when ``start_time`` precedes ``cutoff``, comparing both in UTC.
 
@@ -2493,6 +2501,9 @@ class _PruneTraceIndex:
                 CREATE INDEX complete_trace_order
                     ON trace_summaries(start_time DESC, first_sequence ASC)
                     WHERE root_sequence IS NOT NULL;
+                CREATE TABLE removed_trace_ids (
+                    trace_id TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
                 """
             )
         except BaseException:
@@ -2575,46 +2586,89 @@ class _PruneTraceIndex:
         assert row is not None
         return int(row[0])
 
-    def select_removed_trace_ids(
+    def select_removed_traces(
         self,
         *,
         before: datetime | None,
         keep_last: int | None,
         status: str | None,
-    ) -> set[str]:
-        """Select trace IDs with the same rules as :func:`_select_removed_trace_ids`."""
+    ) -> _PruneTraceSelection:
+        """Persist selected trace IDs and return their counts.
 
-        rows = self._require_connection().execute(
-            """
-            SELECT trace_id, start_time, status, recency_rank
-            FROM (
-                SELECT
-                    trace_id,
-                    first_sequence,
-                    start_time,
-                    status,
-                    ROW_NUMBER() OVER (
-                        ORDER BY start_time DESC, first_sequence ASC
-                    ) AS recency_rank
-                FROM trace_summaries
-                WHERE root_sequence IS NOT NULL
+        Selection matches :func:`_select_removed_trace_ids`, but IDs stay in the
+        SQLite index instead of being materialized as a Python set. Each call
+        replaces the prior selection so the same index can evaluate multiple
+        filter combinations with a bounded working set.
+        """
+
+        connection = self._require_connection()
+        try:
+            connection.execute("DELETE FROM removed_trace_ids")
+            rows = connection.execute(
+                """
+                SELECT trace_id, start_time, status, recency_rank
+                FROM (
+                    SELECT
+                        trace_id,
+                        first_sequence,
+                        start_time,
+                        status,
+                        ROW_NUMBER() OVER (
+                            ORDER BY start_time DESC, first_sequence ASC
+                        ) AS recency_rank
+                    FROM trace_summaries
+                    WHERE root_sequence IS NOT NULL
+                )
+                ORDER BY start_time ASC, first_sequence ASC
+                """
             )
-            ORDER BY start_time ASC, first_sequence ASC
-            """
+            try:
+                has_selector = before is not None or keep_last is not None
+                for trace_id, start_time, trace_status, recency_rank in rows:
+                    if status is not None and trace_status != status:
+                        continue
+                    if (
+                        not has_selector
+                        or (before is not None and _trace_starts_before(str(start_time), before))
+                        or (keep_last is not None and int(recency_rank) > keep_last)
+                    ):
+                        connection.execute(
+                            "INSERT INTO removed_trace_ids (trace_id) VALUES (?)",
+                            (trace_id,),
+                        )
+            finally:
+                rows.close()
+
+            removed_row = connection.execute("SELECT COUNT(*) FROM removed_trace_ids").fetchone()
+            total_row = connection.execute(
+                "SELECT COUNT(*) FROM trace_summaries WHERE root_sequence IS NOT NULL"
+            ).fetchone()
+            assert removed_row is not None
+            assert total_row is not None
+            removed_traces = int(removed_row[0])
+            total_traces = int(total_row[0])
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+        return _PruneTraceSelection(
+            removed_traces=removed_traces,
+            kept_traces=total_traces - removed_traces,
         )
 
-        has_selector = before is not None or keep_last is not None
-        removed: set[str] = set()
-        for trace_id, start_time, trace_status, recency_rank in rows:
-            if status is not None and trace_status != status:
-                continue
-            if not has_selector:
-                removed.add(str(trace_id))
-            elif before is not None and _trace_starts_before(str(start_time), before):
-                removed.add(str(trace_id))
-            elif keep_last is not None and int(recency_rank) > keep_last:
-                removed.add(str(trace_id))
-        return removed
+    def is_removed(self, trace_id: str) -> bool:
+        """Return whether ``trace_id`` belongs to the current selection."""
+
+        row = (
+            self._require_connection()
+            .execute(
+                "SELECT 1 FROM removed_trace_ids WHERE trace_id = ?",
+                (trace_id,),
+            )
+            .fetchone()
+        )
+        return row is not None
 
     def _require_connection(self) -> sqlite3.Connection:
         connection = self._connection

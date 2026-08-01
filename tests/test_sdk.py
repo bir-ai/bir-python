@@ -3349,6 +3349,7 @@ class SdkTests(unittest.TestCase):
             cases = (
                 {"before": datetime(2026, 1, 2, tzinfo=timezone.utc), "keep_last": None, "status": None},
                 {"before": None, "keep_last": 1, "status": None},
+                {"before": None, "keep_last": 0, "status": None},
                 {"before": None, "keep_last": None, "status": "error"},
                 {
                     "before": datetime(2026, 1, 2, tzinfo=timezone.utc),
@@ -3368,7 +3369,28 @@ class SdkTests(unittest.TestCase):
                 for filters in cases:
                     with self.subTest(**filters):
                         expected = _select_removed_trace_ids(traces, **filters)
-                        self.assertEqual(index.select_removed_trace_ids(**filters), expected)
+                        selection = index.select_removed_traces(**filters)
+                        self.assertEqual(selection.removed_traces, len(expected))
+                        self.assertEqual(selection.kept_traces, len(traces) - len(expected))
+                        self.assertEqual(
+                            {trace.id for trace in traces if index.is_removed(trace.id)},
+                            expected,
+                        )
+                        self.assertFalse(index.is_removed("orphan-trace"))
+                        self.assertFalse(index.is_removed("unknown-trace"))
+
+                self.assertTrue(all(index.is_removed(trace.id) for trace in traces))
+                with patch(
+                    "bir._sdk._trace_starts_before",
+                    side_effect=(True, RuntimeError("selection failed")),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "selection failed"):
+                        index.select_removed_traces(
+                            before=datetime(2026, 1, 4, tzinfo=timezone.utc),
+                            keep_last=None,
+                            status=None,
+                        )
+                self.assertTrue(all(index.is_removed(trace.id) for trace in traces))
 
             self.assertFalse(database_path.parent.exists())
 

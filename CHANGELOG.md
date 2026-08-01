@@ -19,11 +19,13 @@ Before publishing, verify the release with the SDK release checklist in
 - A temporary SQLite prune trace index can now stream validated events into one
   disk-backed summary per seen trace and reproduce the existing `--before`,
   `--keep-last`, and `--status` selection rules without retaining event payloads.
-  It preserves first-seen tie ordering, selects the same root when duplicate
-  roots exist, excludes rootless event groups, forces SQLite sorting to disk
-  with a bounded page cache, and removes the temporary database after success
-  and input failure. The index remains internal and is not yet connected to
-  `bir prune`.
+  Selected IDs now remain in a reusable SQLite membership table with exact
+  removed/kept counts and point lookups instead of being returned as a growing
+  Python set. The index preserves first-seen tie ordering, selects the same root
+  when duplicate roots exist, excludes rootless event groups, forces SQLite
+  sorting to disk with a bounded page cache, rolls back failed reselection, and
+  removes the temporary database after success and input failure. It remains
+  internal and is not yet connected to `bir prune`.
 
 - `bir prune` now streams surviving JSONL lines directly into sibling staging
   files instead of collecting and joining every retained line in memory. Dry

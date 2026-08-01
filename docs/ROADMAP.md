@@ -78,17 +78,16 @@ breaking release says otherwise:
 **Why:** opt-in bounded uploads now use the validated JSONL iterator and a
 disk-backed ordering spool, and prune rewrites now stream surviving lines to
 staging files. An internal disk-backed trace index now reproduces prune selection
-semantics, but the public prune path intentionally remains on `load_traces()`
-until the integration step is tested. Public loaders intentionally retain their
-documented list return types.
+semantics and retains the selected-ID membership and counts on disk, but the
+public prune path intentionally remains on `load_traces()` until the integration
+step is tested. Public loaders intentionally retain their documented list return
+types.
 
 **Scope:**
 
-- Connect the tested disk-backed trace index to prune selection without splitting
-  traces across the keep/drop boundary or weakening its atomic rewrite and
-  locking guarantees.
-- Avoid materializing the selected trace-ID set during rewrite by using
-  index-backed membership checks or another documented bounded working set.
+- Connect the tested disk-backed trace index and its membership checks to prune
+  selection/rewrite without splitting traces across the keep/drop boundary or
+  weakening its atomic rewrite and locking guarantees.
 - Preserve active/rotated ordering, ID deduplication, selection semantics, and
   exact dry-run/apply results.
 - Keep existing `load_events()` / `load_traces()` return types and behavior.
