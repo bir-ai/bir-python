@@ -746,6 +746,46 @@ def _post_loaded_events(
     return SendEventsResult(accepted=accepted, event_ids=event_ids, attempted=len(events))
 
 
+def _post_loaded_event_batches(
+    batches: Iterable[list[TraceEvent]],
+    endpoint: str,
+    *,
+    timeout: float,
+    retries: int,
+    backoff: float,
+    sent_ids_path: Path | None = None,
+) -> SendEventsResult:
+    """Post batches sequentially and checkpoint each successful result.
+
+    ``_post_loaded_events`` retains ownership of retry and batch-endpoint fallback
+    behavior for each group. Results are aggregated only after a group returns
+    successfully. If a later group raises, iteration stops immediately; accepted
+    IDs returned by earlier groups have already been recorded when
+    ``sent_ids_path`` is set. Counts are aggregated as reported by the server,
+    while checkpoints contain only explicit ``event_ids`` and never infer IDs
+    from an accepted count.
+    """
+
+    accepted = 0
+    attempted = 0
+    event_ids: list[str] = []
+    for batch in batches:
+        result = _post_loaded_events(
+            batch,
+            endpoint,
+            timeout=timeout,
+            retries=retries,
+            backoff=backoff,
+        )
+        accepted += result.accepted
+        attempted += result.attempted
+        event_ids.extend(result.event_ids)
+        if sent_ids_path is not None and result.event_ids:
+            _record_sent_ids(sent_ids_path, result.event_ids)
+
+    return SendEventsResult(accepted=accepted, event_ids=event_ids, attempted=attempted)
+
+
 def _send_with_retry(operation: Callable[[], T], *, retries: int, backoff: float) -> T:
     """Run ``operation`` and retry transient send failures with exponential backoff.
 

@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- The internal multi-batch execution contract now sends groups sequentially,
+  delegates existing retry/fallback behavior per group, aggregates partial
+  acceptance results, checkpoints explicit accepted IDs after every successful
+  group, and stops before later groups on failure. It remains disconnected from
+  the public `send_events()` path until bounded store ordering is ready.
+
 - A deterministic internal upload-batch iterator now splits any ordered event
   iterable into validated, fixed-size groups without copying event objects. It
   covers exact boundaries, final remainders, and empty inputs; it is deliberately

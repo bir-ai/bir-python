@@ -49,6 +49,7 @@ from bir._sdk import (
     _parse_env_bool,
     _parse_env_int,
     _parse_env_sample_rate,
+    _post_loaded_event_batches,
     _read_http_error_body,
     _record_sent_ids,
     _redact_secret_text,
@@ -3116,6 +3117,85 @@ class SdkTests(unittest.TestCase):
         for batch_size in (0, -1):
             with self.subTest(batch_size=batch_size), self.assertRaisesRegex(ValueError, "batch_size"):
                 list(_iter_event_batches((), batch_size))
+
+    def test_internal_batch_sender_aggregates_partial_results_and_checkpoints_ids(self) -> None:
+        with temporary_workdir() as workdir:
+            for index in range(5):
+                with trace(f"trace-{index}"):
+                    pass
+            events = load_events()
+            batches = list(_iter_event_batches(events, 2))
+            sent_ids_path = workdir / ".bir" / "traces.jsonl.sent"
+            results = [
+                bir.SendEventsResult(
+                    accepted=2,
+                    event_ids=[event.id for event in batches[0]],
+                    attempted=2,
+                ),
+                bir.SendEventsResult(
+                    accepted=1,
+                    event_ids=[batches[1][0].id],
+                    attempted=2,
+                ),
+                bir.SendEventsResult(
+                    accepted=1,
+                    event_ids=[batches[2][0].id],
+                    attempted=1,
+                ),
+            ]
+
+            with patch("bir._sdk._post_loaded_events", side_effect=results) as post_loaded_events:
+                result = _post_loaded_event_batches(
+                    iter(batches),
+                    "http://server.test/v1/events",
+                    timeout=3.0,
+                    retries=4,
+                    backoff=0.25,
+                    sent_ids_path=sent_ids_path,
+                )
+
+            self.assertEqual([call.args[0] for call in post_loaded_events.call_args_list], batches)
+            for call in post_loaded_events.call_args_list:
+                self.assertEqual(call.args[1], "http://server.test/v1/events")
+                self.assertEqual(call.kwargs, {"timeout": 3.0, "retries": 4, "backoff": 0.25})
+            self.assertEqual(result.accepted, 4)
+            self.assertEqual(result.attempted, 5)
+            self.assertEqual(result.skipped, 1)
+            self.assertEqual(result.event_ids, [*results[0].event_ids, *results[1].event_ids, *results[2].event_ids])
+            recorded = json.loads(sent_ids_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(recorded["event_ids"]), set(result.event_ids))
+
+    def test_internal_batch_sender_stops_on_failure_after_checkpointing_successes(self) -> None:
+        with temporary_workdir() as workdir:
+            for index in range(5):
+                with trace(f"trace-{index}"):
+                    pass
+            batches = list(_iter_event_batches(load_events(), 2))
+            sent_ids_path = workdir / ".bir" / "traces.jsonl.sent"
+            first_result = bir.SendEventsResult(
+                accepted=2,
+                event_ids=[event.id for event in batches[0]],
+                attempted=2,
+            )
+
+            with patch(
+                "bir._sdk._post_loaded_events",
+                side_effect=[first_result, RuntimeError("second batch failed")],
+            ) as post_loaded_events:
+                with self.assertRaisesRegex(RuntimeError, "second batch failed"):
+                    _post_loaded_event_batches(
+                        iter(batches),
+                        "http://server.test/v1/events",
+                        timeout=3.0,
+                        retries=2,
+                        backoff=0.5,
+                        sent_ids_path=sent_ids_path,
+                    )
+
+            self.assertEqual(post_loaded_events.call_count, 2)
+            recorded = json.loads(sent_ids_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(recorded["event_ids"]), set(first_result.event_ids))
+            self.assertTrue(all(event.id not in recorded["event_ids"] for event in batches[1] + batches[2]))
 
     def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
         with temporary_workdir() as workdir:
