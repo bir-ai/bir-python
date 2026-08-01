@@ -2456,6 +2456,18 @@ def _trace_starts_before(start_time: str, cutoff: datetime) -> bool:
     return start < cutoff
 
 
+def _prune_trace_id_key(trace_id: str) -> bytes:
+    """Encode a trace ID losslessly for SQLite equality membership.
+
+    JSON strings may contain escaped lone surrogates. Public loaders preserve
+    those strings, while SQLite cannot bind them as TEXT, so prune stores IDs as
+    BLOB keys using ``surrogatepass`` to keep the historical accepted input
+    domain unchanged.
+    """
+
+    return trace_id.encode("utf-8", errors="surrogatepass")
+
+
 class _PruneTraceIndex:
     """Disk-backed trace summaries for bounded-memory prune selection.
 
@@ -2465,9 +2477,9 @@ class _PruneTraceIndex:
     roots for one trace retain the same root that the in-memory event sort would
     choose: earliest ``start_time``, then earliest ``end_time``, then input order.
 
-    This index is intentionally not connected to :func:`_prune_trace_store` yet.
-    It establishes and tests the disk-backed selection contract independently
-    before replacing the existing public-loader path.
+    The selected IDs remain in SQLite while :func:`_prune_trace_store` streams
+    every source file, so neither selection nor rewrite materializes a collection
+    proportional to the store's trace or event count in Python memory.
     """
 
     def __init__(self) -> None:
@@ -2491,7 +2503,7 @@ class _PruneTraceIndex:
             connection.executescript(
                 """
                 CREATE TABLE trace_summaries (
-                    trace_id TEXT PRIMARY KEY,
+                    trace_id BLOB PRIMARY KEY,
                     first_sequence INTEGER NOT NULL,
                     root_sequence INTEGER,
                     start_time TEXT,
@@ -2502,16 +2514,22 @@ class _PruneTraceIndex:
                     ON trace_summaries(start_time DESC, first_sequence ASC)
                     WHERE root_sequence IS NOT NULL;
                 CREATE TABLE removed_trace_ids (
-                    trace_id TEXT PRIMARY KEY
+                    trace_id BLOB PRIMARY KEY
                 ) WITHOUT ROWID;
                 """
             )
         except BaseException:
+            # Best-effort cleanup must never replace the construction failure that
+            # explains why the index could not be created.
             try:
                 if connection is not None:
                     connection.close()
-            finally:
+            except BaseException:
+                pass
+            try:
                 temporary_directory.cleanup()
+            except BaseException:
+                pass
             raise
 
         assert connection is not None
@@ -2530,24 +2548,37 @@ class _PruneTraceIndex:
         temporary_directory = self._temporary_directory
         self._connection = None
         self._temporary_directory = None
+        cleanup_error: BaseException | None = None
         try:
             if connection is not None:
                 connection.close()
-        finally:
+        except BaseException as error:
+            cleanup_error = error
+        try:
             if temporary_directory is not None:
                 temporary_directory.cleanup()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+
+        # If selection, parsing, or staging is already failing, keep that original
+        # exception visible. With a successful body, a cleanup error still
+        # surfaces so callers do not silently leak the temporary index.
+        if exc_type is None and cleanup_error is not None:
+            raise cleanup_error
 
     def add_events(self, events: Iterable[TraceEvent]) -> None:
         """Stream events into one summary row per seen trace ID."""
 
         connection = self._require_connection()
         for sequence, event in enumerate(events):
+            trace_id_key = _prune_trace_id_key(event.trace_id)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO trace_summaries (trace_id, first_sequence)
                 VALUES (?, ?)
                 """,
-                (event.trace_id, sequence),
+                (trace_id_key, sequence),
             )
             if event.type == "trace" and event.id == event.trace_id:
                 connection.execute(
@@ -2565,7 +2596,7 @@ class _PruneTraceIndex:
                         event.start_time,
                         event.end_time,
                         event.status,
-                        event.trace_id,
+                        trace_id_key,
                         event.start_time,
                         event.start_time,
                         event.end_time,
@@ -2636,7 +2667,13 @@ class _PruneTraceIndex:
                             "INSERT INTO removed_trace_ids (trace_id) VALUES (?)",
                             (trace_id,),
                         )
-            finally:
+            except BaseException:
+                try:
+                    rows.close()
+                except BaseException:
+                    pass
+                raise
+            else:
                 rows.close()
 
             removed_row = connection.execute("SELECT COUNT(*) FROM removed_trace_ids").fetchone()
@@ -2649,7 +2686,10 @@ class _PruneTraceIndex:
             total_traces = int(total_row[0])
             connection.commit()
         except BaseException:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except BaseException:
+                pass
             raise
 
         return _PruneTraceSelection(
@@ -2664,7 +2704,7 @@ class _PruneTraceIndex:
             self._require_connection()
             .execute(
                 "SELECT 1 FROM removed_trace_ids WHERE trace_id = ?",
-                (trace_id,),
+                (_prune_trace_id_key(trace_id),),
             )
             .fetchone()
         )
@@ -2717,7 +2757,7 @@ def _select_removed_trace_ids(
 
 def _stream_filtered_trace_file(
     file_path: Path,
-    removed_trace_ids: set[str],
+    is_removed: Callable[[str], bool],
     destination: IO[bytes] | None,
 ) -> tuple[int, int]:
     """Stream surviving normalized lines to ``destination`` and return counts.
@@ -2736,7 +2776,7 @@ def _stream_filtered_trace_file(
             if not stripped:
                 continue
             trace_id = json.loads(stripped).get("trace_id")
-            if trace_id in removed_trace_ids:
+            if isinstance(trace_id, str) and is_removed(trace_id):
                 removed_events += 1
                 continue
             normalized_line = (stripped + "\n").encode("utf-8")
@@ -2748,7 +2788,7 @@ def _stream_filtered_trace_file(
 
 def _stage_filtered_trace_file(
     file_path: Path,
-    removed_trace_ids: set[str],
+    is_removed: Callable[[str], bool],
     *,
     dry_run: bool,
 ) -> tuple[Path | None, int, int]:
@@ -2762,25 +2802,29 @@ def _stage_filtered_trace_file(
     temp_path = None
     try:
         if dry_run:
-            removed_events, kept_bytes = _stream_filtered_trace_file(file_path, removed_trace_ids, None)
+            removed_events, kept_bytes = _stream_filtered_trace_file(file_path, is_removed, None)
         else:
             temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
             with temp_path.open("xb") as staged_file:
                 removed_events, kept_bytes = _stream_filtered_trace_file(
                     file_path,
-                    removed_trace_ids,
+                    is_removed,
                     staged_file,
                 )
+        if removed_events == 0:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            return None, 0, 0
+        source_bytes = file_path.stat().st_size
     except BaseException:
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except BaseException:
+                pass
         raise
 
-    if removed_events == 0:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        return None, 0, 0
-    return temp_path, removed_events, file_path.stat().st_size - kept_bytes
+    return temp_path, removed_events, source_bytes - kept_bytes
 
 
 def _prune_trace_store(
@@ -2794,12 +2838,12 @@ def _prune_trace_store(
 ) -> _PruneResult:
     """Remove whole traces from the local store, serialized against appends.
 
-    Loads complete traces with the public loaders, selects the trace ids to drop
-    via :func:`_select_removed_trace_ids`, then rewrites each affected trace file
-    keeping only events whose ``trace_id`` was not selected. Keying the rewrite on
-    the removed ids means a trace is never split across the keep/drop boundary and
-    orphan events whose root is unread (for example split into a rotated file not
-    being pruned) are preserved rather than dropped.
+    Streams validated events into a temporary SQLite trace index, persists the
+    selected trace IDs there, then rewrites each affected trace file using
+    disk-backed point membership checks. Keying the rewrite on the removed IDs
+    means a trace is never split across the keep/drop boundary and orphan events
+    whose root is unread (for example split into a rotated file not being pruned)
+    are preserved rather than dropped.
 
     The load, selection, and rewrite all run while holding the in-process
     ``_write_lock`` and the trace path's :class:`_InterProcessFileLock` — the same
@@ -2819,49 +2863,58 @@ def _prune_trace_store(
 
     with _write_lock:
         with _InterProcessFileLock(trace_path):
-            traces = load_traces(trace_path, include_rotated=include_rotated)
-            removed_ids = _select_removed_trace_ids(traces, before=before, keep_last=keep_last, status=status)
-            removed_traces = sum(1 for trace in traces if trace.id in removed_ids)
-            kept_traces = len(traces) - removed_traces
-            if not removed_ids:
-                return _PruneResult(0, kept_traces, 0, 0, dry_run)
+            with _PruneTraceIndex() as index:
+                index.add_events(_iter_trace_events(trace_path, include_rotated=include_rotated))
+                selection = index.select_removed_traces(before=before, keep_last=keep_last, status=status)
+                if selection.removed_traces == 0:
+                    return _PruneResult(0, selection.kept_traces, 0, 0, dry_run)
 
-            files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
-            removed_events = 0
-            bytes_reclaimed = 0
-            staged: list[tuple[Path, Path]] = []
-            try:
-                for file_path in files:
-                    if not file_path.exists():
-                        continue
-                    temp_path, file_removed_events, reclaimed_bytes = _stage_filtered_trace_file(
-                        file_path,
-                        removed_ids,
-                        dry_run=dry_run,
-                    )
-                    if file_removed_events == 0:
-                        continue
-                    removed_events += file_removed_events
-                    bytes_reclaimed += reclaimed_bytes
-                    if dry_run:
-                        continue
-                    assert temp_path is not None
-                    staged.append((temp_path, file_path))
-                # Write every temp file before replacing any so the failure-prone
-                # step is done up front; an error here leaves all originals intact.
-                for temp_path, target_path in staged:
-                    temp_path.replace(target_path)
-            finally:
-                for temp_path, _ in staged:
-                    temp_path.unlink(missing_ok=True)
+                files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
+                removed_events = 0
+                bytes_reclaimed = 0
+                staged: list[tuple[Path, Path]] = []
+                try:
+                    for file_path in files:
+                        if not file_path.exists():
+                            continue
+                        temp_path, file_removed_events, reclaimed_bytes = _stage_filtered_trace_file(
+                            file_path,
+                            index.is_removed,
+                            dry_run=dry_run,
+                        )
+                        if file_removed_events == 0:
+                            continue
+                        removed_events += file_removed_events
+                        bytes_reclaimed += reclaimed_bytes
+                        if dry_run:
+                            continue
+                        assert temp_path is not None
+                        staged.append((temp_path, file_path))
+                    # Write every temp file before replacing any so the
+                    # failure-prone step is done up front; an error here leaves
+                    # all originals intact.
+                    for temp_path, target_path in staged:
+                        temp_path.replace(target_path)
+                except BaseException:
+                    for temp_path, _ in staged:
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except BaseException:
+                            # A cleanup failure must not replace a selection,
+                            # parsing, staging, or replacement exception.
+                            pass
+                    raise
+                else:
+                    for temp_path, _ in staged:
+                        temp_path.unlink(missing_ok=True)
 
-            return _PruneResult(
-                removed_traces=removed_traces,
-                kept_traces=kept_traces,
-                removed_events=removed_events,
-                bytes_reclaimed=bytes_reclaimed,
-                dry_run=dry_run,
-            )
+                return _PruneResult(
+                    removed_traces=selection.removed_traces,
+                    kept_traces=selection.kept_traces,
+                    removed_events=removed_events,
+                    bytes_reclaimed=bytes_reclaimed,
+                    dry_run=dry_run,
+                )
 
 
 def _events_endpoint(server_url: str) -> str:

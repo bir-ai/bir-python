@@ -88,11 +88,17 @@ filters the output is unchanged.
 `bir prune` is the **destructive** counterpart that reclaims space: it removes
 whole traces from the local store so a long-lived `.bir/traces.jsonl` (and its
 rotated siblings) does not grow without bound. It operates on whole traces and
-never splits one across the keep/drop boundary. Surviving JSONL lines are
-streamed directly to a sibling staging file instead of being accumulated in
-memory, then installed with an atomic replace under the same advisory lock an
-append takes, so a concurrent writer can never interleave and a partial staging
-failure leaves the original file intact. Selection: `--before ISO` removes
+never splits one across the keep/drop boundary. It scans the selected JSONL
+files one event at a time into a temporary, disk-backed SQLite trace index, then
+uses disk-backed removal membership while streaming surviving lines to sibling
+staging files. Its Python working set is bounded by the largest individual event
+or line, a bounded SQLite cache, and small per-source staging bookkeeping rather
+than a collection that grows with the store's event or trace count. Every staging
+file is completed before any source is replaced, and replacements remain atomic
+under the same advisory lock an append takes, so a concurrent writer can never
+interleave and a selection, parsing, or staging failure leaves every source file
+intact. Temporary index and staging files are removed after success or failure.
+Selection: `--before ISO` removes
 traces whose start time precedes the cutoff, `--keep-last N` removes all but the
 N most recent, and `--status
 {success,error}` restricts removal to that status (`--before` and `--keep-last`

@@ -16,24 +16,25 @@ Before publishing, verify the release with the SDK release checklist in
   error with Windows `WinError 32` cleanup failures on Python 3.11+; successful
   sends and retry/checkpoint behavior are unchanged.
 
-- A temporary SQLite prune trace index can now stream validated events into one
-  disk-backed summary per seen trace and reproduce the existing `--before`,
-  `--keep-last`, and `--status` selection rules without retaining event payloads.
-  Selected IDs now remain in a reusable SQLite membership table with exact
-  removed/kept counts and point lookups instead of being returned as a growing
-  Python set. The index preserves first-seen tie ordering, selects the same root
-  when duplicate roots exist, excludes rootless event groups, forces SQLite
-  sorting to disk with a bounded page cache, rolls back failed reselection, and
-  removes the temporary database after success and input failure. It remains
-  internal and is not yet connected to `bir prune`.
+- `bir prune` now streams validated events into a temporary SQLite trace index
+  and uses its disk-backed selected-ID membership throughout selection and file
+  rewriting. This replaces the production `load_traces()` path and its growing
+  Python set while preserving the existing `--before`, `--keep-last`, and
+  `--status` rules, exact removed/kept counts, first-seen tie ordering,
+  duplicate-root behavior, rootless event handling, and active/rotated scope.
+  SQLite sorting uses a bounded page cache, failed reselection rolls back, and
+  the temporary database is removed after success or failure.
 
 - `bir prune` now streams surviving JSONL lines directly into sibling staging
   files instead of collecting and joining every retained line in memory. Dry
   runs validate and count the same normalized output without creating staging
   files, partial staging files are removed on failure, and the existing
-  lock/atomic-replace behavior and result counts are preserved. Trace selection
-  still materializes complete traces; the remaining bounded-memory work stays
-  explicit in the roadmap.
+  lock/atomic-replace behavior and result counts are preserved. Combined with
+  the disk-backed trace index, selection and rewriting no longer grow Python
+  memory with the store's event or trace count: the working set is bounded by
+  the largest individual event or line, a bounded SQLite cache, and small
+  per-source staging bookkeeping. Public `load_events()` and `load_traces()`
+  behavior remains unchanged.
 
 - `send_events(batch_size=N)` and `bir send --batch-size N` now opt into
   disk-backed bounded upload preparation. Selected active/rotated JSONL files

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import inspect
 import json
@@ -54,6 +55,7 @@ from bir._sdk import (
     _parse_env_int,
     _parse_env_sample_rate,
     _post_loaded_event_batches,
+    _prune_trace_store,
     _PruneTraceIndex,
     _read_http_error_body,
     _record_sent_ids,
@@ -62,6 +64,7 @@ from bir._sdk import (
     _safe_capture,
     _select_removed_trace_ids,
     _stage_filtered_trace_file,
+    _stream_filtered_trace_file,
     _traces_from_events,
     _UploadEventSpool,
 )
@@ -86,6 +89,45 @@ CONTRACT_SCHEMA_PATH = ROOT / "tests" / "fixtures" / "event-schema-v1.json"
 
 def read_events(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def stored_event(
+    trace_id: str,
+    event_id: str | None = None,
+    *,
+    event_type: str = "trace",
+    start_time: str = "2026-01-01T00:00:00+00:00",
+    end_time: str | None = None,
+    status: str = "success",
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build one minimal valid stored event for persistence-operation tests."""
+
+    resolved_event_id = event_id or trace_id
+    return {
+        "schema_version": "1.0",
+        "id": resolved_event_id,
+        "trace_id": trace_id,
+        "parent_id": None if event_type == "trace" else trace_id,
+        "name": resolved_event_id,
+        "type": event_type,
+        "start_time": start_time,
+        "end_time": end_time or start_time,
+        "status": status,
+        "metadata": metadata or {},
+        "input": None,
+        "output": None,
+        "error": None,
+    }
+
+
+def stored_jsonl(events: list[dict[str, object]]) -> bytes:
+    """Serialize test events exactly like the SDK's JSONL writer."""
+
+    return b"".join(
+        (json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+        for event in events
+    )
 
 
 @contextmanager
@@ -3261,7 +3303,7 @@ class SdkTests(unittest.TestCase):
                 tracemalloc.reset_peak()
                 staged_path, removed_events, bytes_reclaimed = _stage_filtered_trace_file(
                     trace_path,
-                    {"remove"},
+                    {"remove"}.__contains__,
                     dry_run=False,
                 )
                 _, peak = tracemalloc.get_traced_memory()
@@ -3280,6 +3322,370 @@ class SdkTests(unittest.TestCase):
                 f"peak traced Python memory {peak} bytes should stay below half of the {store_size}-byte store",
             )
             staged_path.unlink()
+
+    def test_prune_trace_store_preserves_scope_whole_traces_orphans_and_exact_counts(self) -> None:
+        with temporary_workdir() as workdir:
+            rotated_old_events = [
+                stored_event("old", start_time="2026-01-01T00:00:00+00:00"),
+                stored_event(
+                    "old",
+                    "old-child",
+                    event_type="span",
+                    start_time="2026-01-01T00:00:01+00:00",
+                ),
+            ]
+            rotated_split_events = [stored_event("split", start_time="2026-01-02T00:00:00+00:00")]
+            active_events = [
+                stored_event(
+                    "split",
+                    "split-child",
+                    event_type="span",
+                    start_time="2026-01-02T00:00:01+00:00",
+                ),
+                stored_event("active-success", start_time="2026-01-01T12:00:00+00:00"),
+                stored_event(
+                    "active-success",
+                    "active-success-child",
+                    event_type="span",
+                    start_time="2026-01-01T12:00:01+00:00",
+                ),
+                stored_event("new", start_time="2026-01-03T00:00:00+00:00", status="error"),
+                stored_event(
+                    "new",
+                    "new-child",
+                    event_type="span",
+                    start_time="2026-01-03T00:00:01+00:00",
+                ),
+            ]
+
+            def write_store(trace_path: Path) -> dict[Path, list[dict[str, object]]]:
+                by_file = {
+                    trace_path.with_name(trace_path.name + ".2"): rotated_old_events,
+                    trace_path.with_name(trace_path.name + ".1"): rotated_split_events,
+                    trace_path: active_events,
+                }
+                for file_path, events in by_file.items():
+                    file_path.write_bytes(stored_jsonl(events))
+                return by_file
+
+            cutoff = datetime(2026, 1, 2, tzinfo=timezone.utc)
+            for include_rotated, expected_removed_ids, expected_trace_counts, expected_events in (
+                (False, {"active-success"}, (1, 1), 2),
+                (True, {"old", "split", "active-success"}, (3, 1), 6),
+            ):
+                with self.subTest(include_rotated=include_rotated):
+                    label = "rotated" if include_rotated else "active"
+                    dry_path = workdir / f"{label}-dry.jsonl"
+                    apply_path = workdir / f"{label}-apply.jsonl"
+                    dry_files = write_store(dry_path)
+                    apply_files = write_store(apply_path)
+                    dry_original = {file_path: file_path.read_bytes() for file_path in dry_files}
+                    apply_original = {file_path: file_path.read_bytes() for file_path in apply_files}
+                    expected_bytes = sum(
+                        len(stored_jsonl([event]))
+                        for events in apply_files.values()
+                        for event in events
+                        if event["trace_id"] in expected_removed_ids
+                    )
+
+                    with patch(
+                        "bir._sdk.load_traces",
+                        side_effect=AssertionError("production prune must not call load_traces"),
+                    ):
+                        dry_result = _prune_trace_store(
+                            dry_path,
+                            include_rotated=include_rotated,
+                            before=cutoff,
+                            keep_last=1,
+                            status="success",
+                            dry_run=True,
+                        )
+                        applied_result = _prune_trace_store(
+                            apply_path,
+                            include_rotated=include_rotated,
+                            before=cutoff,
+                            keep_last=1,
+                            status="success",
+                        )
+
+                    self.assertEqual(replace(dry_result, dry_run=False), applied_result)
+                    self.assertEqual(
+                        (applied_result.removed_traces, applied_result.kept_traces),
+                        expected_trace_counts,
+                    )
+                    self.assertEqual(applied_result.removed_events, expected_events)
+                    self.assertEqual(applied_result.bytes_reclaimed, expected_bytes)
+                    self.assertEqual(
+                        {file_path: file_path.read_bytes() for file_path in dry_files},
+                        dry_original,
+                    )
+
+                    remaining_active = read_events(apply_path)
+                    if include_rotated:
+                        remaining = [event for file_path in apply_files for event in read_events(file_path)]
+                        self.assertEqual([event["trace_id"] for event in remaining], ["new", "new"])
+                    else:
+                        self.assertEqual(
+                            [event["id"] for event in remaining_active],
+                            ["split-child", "new", "new-child"],
+                        )
+                        self.assertEqual(
+                            apply_path.with_name(apply_path.name + ".2").read_bytes(),
+                            apply_original[apply_path.with_name(apply_path.name + ".2")],
+                        )
+                        self.assertEqual(
+                            apply_path.with_name(apply_path.name + ".1").read_bytes(),
+                            apply_original[apply_path.with_name(apply_path.name + ".1")],
+                        )
+                    self.assertEqual(
+                        [trace.id for trace in load_traces(apply_path, include_rotated=include_rotated)],
+                        ["new"],
+                    )
+                    self.assertEqual(list(workdir.glob(f".{label}-*.tmp")), [])
+
+    def test_prune_trace_store_rotated_order_matches_an_unsplit_store(self) -> None:
+        with temporary_workdir() as workdir:
+            ordered_events = [
+                stored_event("trace-a", "a-child", event_type="span"),
+                stored_event("trace-b"),
+                stored_event("trace-a"),
+                stored_event("trace-b", "b-child", event_type="span"),
+            ]
+            split_path = workdir / "split.jsonl"
+            split_path.with_name(split_path.name + ".2").write_bytes(stored_jsonl(ordered_events[:1]))
+            split_path.with_name(split_path.name + ".1").write_bytes(stored_jsonl(ordered_events[1:2]))
+            split_path.write_bytes(stored_jsonl(ordered_events[2:]))
+            flat_path = workdir / "flat.jsonl"
+            flat_path.write_bytes(stored_jsonl(ordered_events))
+
+            split_result = _prune_trace_store(split_path, include_rotated=True, keep_last=1)
+            flat_result = _prune_trace_store(flat_path, keep_last=1)
+
+            self.assertEqual(split_result, flat_result)
+            self.assertEqual(
+                (split_result.removed_traces, split_result.kept_traces, split_result.removed_events),
+                (1, 1, 2),
+            )
+            split_survivors = [
+                event
+                for file_path in (
+                    split_path.with_name(split_path.name + ".2"),
+                    split_path.with_name(split_path.name + ".1"),
+                    split_path,
+                )
+                for event in read_events(file_path)
+            ]
+            self.assertEqual(split_survivors, read_events(flat_path))
+            self.assertEqual([event["trace_id"] for event in split_survivors], ["trace-a", "trace-a"])
+
+    def test_prune_trace_store_preserves_duplicate_root_and_first_seen_ties(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            events = [
+                stored_event("trace-a", "a-child", event_type="span"),
+                stored_event("trace-b", status="success"),
+                stored_event("trace-b", status="error"),
+                stored_event("trace-a", status="success"),
+            ]
+            trace_path.write_bytes(stored_jsonl(events))
+            expected_bytes = len(stored_jsonl(events[1:3]))
+
+            result = _prune_trace_store(trace_path, keep_last=1, status="success")
+
+            self.assertEqual(
+                (result.removed_traces, result.kept_traces, result.removed_events, result.bytes_reclaimed),
+                (1, 1, 2, expected_bytes),
+            )
+            self.assertEqual(
+                [event["id"] for event in read_events(trace_path)],
+                ["a-child", "trace-a"],
+            )
+
+    def test_prune_trace_store_accepts_escaped_lone_surrogate_trace_ids(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_path.write_bytes(stored_jsonl([stored_event("\ud800")]))
+            self.assertEqual(len(load_traces(trace_path)), 1)
+
+            result = _prune_trace_store(trace_path, status="success")
+
+            self.assertEqual(
+                (result.removed_traces, result.kept_traces, result.removed_events),
+                (1, 0, 1),
+            )
+            self.assertEqual(trace_path.read_bytes(), b"")
+
+    def test_prune_index_construction_failure_preserves_source_and_original_error(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_path.write_bytes(stored_jsonl([stored_event("trace-a")]))
+            original = trace_path.read_bytes()
+            real_temporary_directory = tempfile.TemporaryDirectory
+            real_cleanup = real_temporary_directory.cleanup
+            index_directories: list[Path] = []
+
+            def temporary_directory(*args: Any, **kwargs: Any) -> tempfile.TemporaryDirectory[str]:
+                kwargs["dir"] = workdir
+                directory = real_temporary_directory(*args, **kwargs)
+                index_directories.append(Path(directory.name))
+                return directory
+
+            def cleanup_then_fail(directory: tempfile.TemporaryDirectory[str]) -> None:
+                real_cleanup(directory)
+                raise OSError("cleanup failed")
+
+            with (
+                patch.object(real_temporary_directory, "cleanup", new=cleanup_then_fail),
+                patch("bir._sdk.tempfile.TemporaryDirectory", new=temporary_directory),
+                patch("bir._sdk.sqlite3.connect", side_effect=RuntimeError("index construction failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "index construction failed"):
+                    _prune_trace_store(trace_path, status="success")
+
+            self.assertEqual(trace_path.read_bytes(), original)
+            self.assertEqual(len(index_directories), 1)
+            self.assertFalse(index_directories[0].exists())
+            self.assertEqual(list(workdir.glob(".*.tmp")), [])
+
+    def test_prune_selection_and_parsing_failures_preserve_sources_and_remove_index(self) -> None:
+        with temporary_workdir() as workdir:
+            for failure in ("selection", "parsing"):
+                with self.subTest(failure=failure):
+                    trace_path = workdir / f"{failure}.jsonl"
+                    trace_path.write_bytes(stored_jsonl([stored_event("trace-a")]))
+                    if failure == "parsing":
+                        with trace_path.open("ab") as trace_file:
+                            trace_file.write(b"{not valid json}\n")
+                    original = trace_path.read_bytes()
+                    index = _PruneTraceIndex()
+
+                    with patch("bir._sdk._PruneTraceIndex", return_value=index):
+                        if failure == "selection":
+                            with (
+                                patch("bir._sdk._trace_starts_before", side_effect=RuntimeError("selection failed")),
+                                self.assertRaisesRegex(RuntimeError, "selection failed"),
+                            ):
+                                _prune_trace_store(
+                                    trace_path,
+                                    before=datetime(2027, 1, 1, tzinfo=timezone.utc),
+                                )
+                        else:
+                            with self.assertRaisesRegex(ValueError, "Invalid JSON"):
+                                _prune_trace_store(trace_path, status="success")
+
+                    database_path = index.database_path
+                    assert database_path is not None
+                    self.assertFalse(database_path.parent.exists())
+                    self.assertEqual(trace_path.read_bytes(), original)
+                    self.assertEqual(list(workdir.glob(".*.tmp")), [])
+
+    def test_prune_multifile_staging_failure_preserves_sources_and_original_error(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            rotated_path = trace_path.with_name(trace_path.name + ".1")
+            rotated_path.write_bytes(stored_jsonl([stored_event("old")]))
+            trace_path.write_bytes(stored_jsonl([stored_event("new", start_time="2026-01-02T00:00:00+00:00")]))
+            originals = {rotated_path: rotated_path.read_bytes(), trace_path: trace_path.read_bytes()}
+            index = _PruneTraceIndex()
+            calls = 0
+
+            def fail_second_file(
+                file_path: Path,
+                is_removed: Any,
+                destination: Any,
+            ) -> tuple[int, int]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    assert destination is not None
+                    destination.write(b"partial staging output\n")
+                    raise OSError("disk full")
+                return _stream_filtered_trace_file(file_path, is_removed, destination)
+
+            real_unlink = Path.unlink
+
+            def unlink_then_fail(path: Path, *args: Any, **kwargs: Any) -> None:
+                real_unlink(path, *args, **kwargs)
+                if path.name.endswith(".tmp"):
+                    raise OSError("cleanup failed")
+
+            with (
+                patch("bir._sdk._PruneTraceIndex", return_value=index),
+                patch("bir._sdk._stream_filtered_trace_file", new=fail_second_file),
+                patch.object(Path, "unlink", new=unlink_then_fail),
+                self.assertRaisesRegex(OSError, "disk full"),
+            ):
+                _prune_trace_store(trace_path, include_rotated=True, status="success")
+
+            database_path = index.database_path
+            assert database_path is not None
+            self.assertFalse(database_path.parent.exists())
+            self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+            self.assertEqual(list(workdir.glob(".*.tmp")), [])
+
+    def test_prune_trace_store_peak_python_memory_does_not_scale_with_store_size(self) -> None:
+        with temporary_workdir() as workdir:
+            small_count = 384
+            large_count = 3072
+            large_value = "x" * (4 * 1024)
+
+            def write_large_store(trace_path: Path, event_count: int) -> None:
+                with trace_path.open("wb") as trace_file:
+                    for index in range(event_count):
+                        trace_file.write(
+                            stored_jsonl(
+                                [
+                                    stored_event(
+                                        f"trace-{index:06d}",
+                                        metadata={"large_value": large_value},
+                                    )
+                                ]
+                            )
+                        )
+
+            small_path = workdir / "small.jsonl"
+            large_path = workdir / "large.jsonl"
+            write_large_store(small_path, small_count)
+            write_large_store(large_path, large_count)
+            small_size = small_path.stat().st_size
+            large_size = large_path.stat().st_size
+
+            def measured_prune(trace_path: Path, event_count: int, *, dry_run: bool) -> tuple[Any, int]:
+                gc.collect()
+                tracemalloc.reset_peak()
+                result = _prune_trace_store(
+                    trace_path,
+                    keep_last=event_count // 2,
+                    dry_run=dry_run,
+                )
+                _, peak = tracemalloc.get_traced_memory()
+                return result, peak
+
+            # Both stores and their large payload strings exist before tracing
+            # begins, so construction memory cannot be mistaken for prune memory.
+            tracemalloc.start()
+            try:
+                small_dry, small_dry_peak = measured_prune(small_path, small_count, dry_run=True)
+                large_dry, large_dry_peak = measured_prune(large_path, large_count, dry_run=True)
+                small_apply, small_apply_peak = measured_prune(small_path, small_count, dry_run=False)
+                large_apply, large_apply_peak = measured_prune(large_path, large_count, dry_run=False)
+            finally:
+                tracemalloc.stop()
+
+            self.assertGreater(large_size, 12 * 1024 * 1024)
+            self.assertGreater(large_size, small_size * 7)
+            self.assertEqual(replace(small_dry, dry_run=False), small_apply)
+            self.assertEqual(replace(large_dry, dry_run=False), large_apply)
+            self.assertEqual(
+                (large_apply.removed_traces, large_apply.kept_traces, large_apply.removed_events),
+                (large_count // 2, large_count // 2, large_count // 2),
+            )
+            self.assertLess(large_dry_peak, small_dry_peak * 4)
+            self.assertLess(large_apply_peak, small_apply_peak * 4)
+            self.assertLess(large_dry_peak, large_size // 2)
+            self.assertLess(large_apply_peak, large_size // 2)
+            with large_path.open("rb") as trace_file:
+                self.assertEqual(sum(1 for _ in trace_file), large_count // 2)
 
     def test_prune_trace_index_matches_in_memory_selection_and_cleans_up(self) -> None:
         with temporary_workdir():
