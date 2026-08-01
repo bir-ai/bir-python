@@ -3178,6 +3178,7 @@ class SdkTests(unittest.TestCase):
 
             database_path = spool.database_path
             assert database_path is not None
+            self.assertEqual(spool._active_cursors, set())
             self.assertFalse(database_path.parent.exists())
 
             sidecar = workdir / ".bir" / "traces.jsonl.sent"
@@ -3569,6 +3570,28 @@ class SdkTests(unittest.TestCase):
 
             assert database_parent is not None
             self.assertFalse(database_parent.exists())
+
+    def test_upload_spool_closes_partially_consumed_cursor_before_cleanup(self) -> None:
+        with temporary_workdir():
+            with trace("first"):
+                pass
+            with trace("second"):
+                pass
+
+            spool = _UploadEventSpool()
+            ordered_events: Generator[bir.TraceEvent, None, None] | None = None
+            with spool:
+                database_path = spool.database_path
+                assert database_path is not None
+                spool.add_events(load_events())
+                ordered_events = cast(Generator[bir.TraceEvent, None, None], spool.iter_ordered_events())
+                next(ordered_events)
+                self.assertEqual(len(spool._active_cursors), 1)
+
+            self.assertEqual(spool._active_cursors, set())
+            self.assertFalse(database_path.parent.exists())
+            assert ordered_events is not None
+            ordered_events.close()
 
     def test_send_events_include_rotated_orders_traces_root_first_and_keeps_orphans(self) -> None:
         with temporary_workdir() as workdir:

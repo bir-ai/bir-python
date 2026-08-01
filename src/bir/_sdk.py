@@ -890,6 +890,7 @@ class _UploadEventSpool:
         self.database_path: Path | None = None
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._connection: sqlite3.Connection | None = None
+        self._active_cursors: set[sqlite3.Cursor] = set()
 
     def __enter__(self) -> _UploadEventSpool:
         if self._connection is not None:
@@ -946,6 +947,8 @@ class _UploadEventSpool:
         self._connection = None
         self._temporary_directory = None
         try:
+            for cursor in tuple(self._active_cursors):
+                self._close_cursor(cursor)
             if connection is not None:
                 connection.close()
         finally:
@@ -1008,8 +1011,12 @@ class _UploadEventSpool:
                 event.sequence
             """
         )
-        for payload_text, sequence in complete_trace_rows:
-            yield self._event_from_payload_text(payload_text, sequence)
+        self._active_cursors.add(complete_trace_rows)
+        try:
+            for payload_text, sequence in complete_trace_rows:
+                yield self._event_from_payload_text(payload_text, sequence)
+        finally:
+            self._close_cursor(complete_trace_rows)
 
         orphan_rows = connection.execute(
             """
@@ -1025,8 +1032,24 @@ class _UploadEventSpool:
             ORDER BY event.sequence
             """
         )
-        for payload_text, sequence in orphan_rows:
-            yield self._event_from_payload_text(payload_text, sequence)
+        self._active_cursors.add(orphan_rows)
+        try:
+            for payload_text, sequence in orphan_rows:
+                yield self._event_from_payload_text(payload_text, sequence)
+        finally:
+            self._close_cursor(orphan_rows)
+
+    def _close_cursor(self, cursor: sqlite3.Cursor) -> None:
+        """Close one tracked iterator cursor, tolerating repeated cleanup."""
+
+        self._active_cursors.discard(cursor)
+        try:
+            cursor.close()
+        except sqlite3.Error:
+            # ``__exit__`` may close a cursor while its generator is suspended;
+            # the generator's eventual ``finally`` then reaches this a second
+            # time. The cursor is already closed, which is the desired state.
+            pass
 
     def _populate_depths(self) -> None:
         connection = self._require_connection()

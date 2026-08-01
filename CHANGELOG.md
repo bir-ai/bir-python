@@ -10,6 +10,12 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- The disk-backed upload spool now tracks and closes partially consumed SQLite
+  cursors before closing its connection and deleting the temporary database.
+  Bounded sends that fail between batches no longer replace the original network
+  error with Windows `WinError 32` cleanup failures on Python 3.11+; successful
+  sends and retry/checkpoint behavior are unchanged.
+
 - A temporary SQLite prune trace index can now stream validated events into one
   disk-backed summary per seen trace and reproduce the existing `--before`,
   `--keep-last`, and `--status` selection rules without retaining event payloads.
