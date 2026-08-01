@@ -2136,7 +2136,7 @@ class PruneCommandTests(CliBaseTest):
 
             # A failure after the staging file has received data must leave the
             # original untouched and remove the incomplete sibling temp file.
-            with patch.object(cli._sdk, "_stream_filtered_trace_file", side_effect=fail_mid_staging):
+            with patch("bir._storage._stream_filtered_trace_file", side_effect=fail_mid_staging):
                 code, out, err = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes")
 
             self.assertEqual(code, 1)

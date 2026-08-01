@@ -64,36 +64,14 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Split core implementation into internal modules | P1 | L | Smaller ownership boundaries without changing the public API | — |
-| 2 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
-| 3 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
-| 4 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1, 2 |
-| 5 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | 1 |
+| 1 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
+| 2 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
+| 3 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1 |
+| 4 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
 
 ## Work item details
 
-### 1. Split core implementation into internal modules
-
-**Why:** `_sdk.py`, `evals.py`, and `cli.py` are approximately 3.4k, 2.5k, and
-1.4k lines. They are tested, but persistence, redaction, execution, reporting,
-and parsing concerns now share files large enough to slow review and increase
-merge conflicts.
-
-**Scope:**
-
-- First extract private persistence/locking, capture/redaction, and validation
-  modules from `_sdk.py`.
-- Then separate experiment persistence/report rendering from evaluator execution.
-- Split CLI parser construction and presentation helpers only after core moves.
-- Preserve all imports and re-exports from `bir`, `bir.evals`, and
-  `bir.integrations`.
-- Make moves in small commits with unchanged fixture bytes and behavior tests.
-
-**Done when:** responsibilities have clear internal boundaries, the public API and
-serialized output are unchanged, and no replacement module becomes another
-catch-all.
-
-### 2. Introduce shared integration conformance tests
+### 1. Introduce shared integration conformance tests
 
 **Why:** provider wrappers independently implement the same difficult lifecycle:
 argument forwarding, `bir_` option stripping, sync/async calls, lazy streams,
@@ -111,7 +89,7 @@ are thorough but can still drift in which guarantees they assert.
 **Done when:** adding an integration requires passing the common contract matrix
 plus its provider-specific cases.
 
-### 3. Decide distributed trace-context propagation
+### 2. Decide distributed trace-context propagation
 
 **Why:** trace/span IDs are intentionally read-only and cannot currently be
 injected across process or service boundaries. That is safe and simple for local
@@ -129,7 +107,7 @@ tracing, but prevents a single trace from following queue workers or HTTP calls.
 **Done when:** the repository records an explicit decision; implementation ships
 only if the security and cross-repository contract are approved.
 
-### 4. Define beta API and compatibility policy
+### 3. Define beta API and compatibility policy
 
 **Why:** package metadata still marks the SDK Alpha while the public surface and
 integration count are substantial. Consumers need to know which names, event
@@ -146,7 +124,7 @@ fields, Python versions, and provider versions are stable.
 **Done when:** a Beta release can be evaluated against a finite checklist instead
 of a subjective readiness call.
 
-### 5. Add performance regression benchmarks
+### 4. Add performance regression benchmarks
 
 **Why:** local-first usefulness depends on low tracing overhead, while large-store
 operations and concurrent eval runners have no tracked performance baseline.
@@ -164,8 +142,8 @@ are comparable across commits.
 
 ## Sequencing
 
-1. Implement items 1–2 independently in small, behavior-preserving changes.
-2. Use the evidence from those changes to decide items 3–5 and Beta readiness.
+1. Implement item 1 in small, behavior-preserving changes.
+2. Use the evidence from that work to decide items 2–4 and Beta readiness.
 
 ## Explicitly not on the backlog
 

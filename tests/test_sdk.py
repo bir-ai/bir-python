@@ -2195,7 +2195,7 @@ class SdkTests(unittest.TestCase):
         # The server persists every event with model_dump(exclude_none=False), so
         # optional fields the SDK omits are written as explicit JSON nulls. The SDK
         # reader must keep parsing that canonical persisted shape so it cannot drift
-        # away from the writer. See docs/IMPLEMENTATION_ROADMAP.md Stage 2.
+        # away from the writer.
         with temporary_workdir() as workdir:
             trace_path = workdir / "server-shape.jsonl"
             base = {
@@ -3559,10 +3559,12 @@ class SdkTests(unittest.TestCase):
                     original = trace_path.read_bytes()
                     index = _PruneTraceIndex()
 
-                    with patch("bir._sdk._PruneTraceIndex", return_value=index):
+                    with patch("bir._storage._PruneTraceIndex", return_value=index):
                         if failure == "selection":
                             with (
-                                patch("bir._sdk._trace_starts_before", side_effect=RuntimeError("selection failed")),
+                                patch(
+                                    "bir._storage._trace_starts_before", side_effect=RuntimeError("selection failed")
+                                ),
                                 self.assertRaisesRegex(RuntimeError, "selection failed"),
                             ):
                                 _prune_trace_store(
@@ -3610,8 +3612,8 @@ class SdkTests(unittest.TestCase):
                     raise OSError("cleanup failed")
 
             with (
-                patch("bir._sdk._PruneTraceIndex", return_value=index),
-                patch("bir._sdk._stream_filtered_trace_file", new=fail_second_file),
+                patch("bir._storage._PruneTraceIndex", return_value=index),
+                patch("bir._storage._stream_filtered_trace_file", new=fail_second_file),
                 patch.object(Path, "unlink", new=unlink_then_fail),
                 self.assertRaisesRegex(OSError, "disk full"),
             ):
@@ -3787,7 +3789,7 @@ class SdkTests(unittest.TestCase):
 
                 self.assertTrue(all(index.is_removed(trace.id) for trace in traces))
                 with patch(
-                    "bir._sdk._trace_starts_before",
+                    "bir._storage._trace_starts_before",
                     side_effect=(True, RuntimeError("selection failed")),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "selection failed"):
@@ -4480,7 +4482,7 @@ for batch in range(int(batches)):
         target_path = Path("traces.jsonl")
         with (
             patch("bir._sdk.os.name", "nt"),
-            patch("bir._sdk.msvcrt", FakeMsvcrt(), create=True),
+            patch("bir._storage.msvcrt", FakeMsvcrt(), create=True),
             patch("bir._sdk.Path.open", new=fake_open),
         ):
             with _InterProcessFileLock(target_path):

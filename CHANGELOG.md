@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- The large SDK, evaluation, and CLI implementations are now split into focused
+  private modules for configuration and validation, capture and redaction, local
+  storage and locking, transport, experiment persistence and reporting, and CLI
+  construction and presentation. This is an internal-only restructuring: public
+  Python APIs and import paths, CLI behavior, schema version `1.0` and serialized
+  formats, runtime dependencies, safety guarantees, and optional-provider lazy
+  loading are unchanged.
+
 - The disk-backed upload spool now tracks and closes partially consumed SQLite
   cursors before closing its connection and deleting the temporary database.
   Bounded sends that fail between batches no longer replace the original network

@@ -1,4 +1,9 @@
-"""Deterministic evaluation, dataset, and experiment helpers for Bir."""
+"""Public evaluators and experiment-execution orchestration for Bir.
+
+Dependency direction: this compatibility surface composes private evaluation
+models, persistence, and report rendering. Those focused modules never import
+``bir.evals``; evaluator execution may call down into persistence after a run.
+"""
 
 from __future__ import annotations
 
@@ -11,48 +16,80 @@ import math
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field, replace
-from datetime import datetime
-from html import escape as _html_escape
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 from uuid import uuid4
 
+from . import _eval_persistence as _eval_persistence_helpers
+from . import _eval_reports as _eval_report_helpers
+from ._eval_models import (
+    _MISSING_SCORE_IGNORE,
+    _MISSING_SCORE_REGRESS,
+    Dataset,
+    DatasetExample,
+    DeterministicEvaluator,
+    EvalResult,
+    EvaluationContext,
+    ExperimentDiff,
+    ExperimentExampleResult,
+    ExperimentResult,
+    ExperimentSummary,
+    SendExperimentResult,
+    _validate_evaluator_name,
+    _validate_finite_number,
+)
 from ._sdk import (
     _duration_ms,
-    _is_retryable_status,
     _now,
-    _read_http_error_body,
     _record_score_event,
     _safe_capture,
     _safe_error,
-    _send_with_retry,
     _trace_context,
-    _TransientSendError,
-    _validate_non_negative_int,
-    _validate_non_negative_number,
 )
 
 _USE_EXAMPLE_EXPECTED = object()
-_EXPERIMENT_SCHEMA_VERSION = "1.0"
 _UNSUPPORTED_WORD_LIMIT = 20
 _WORD_TOKEN_PATTERN = re.compile(r"\w+")
 _CITATION_ANSWER_PREVIEW_LIMIT = 200
 _DEFAULT_CITATION_PATTERN = r"\[[\w-]+\]"
 
-# Self-contained report formats supported by render_experiment_report() and the
-# ``bir experiment-report`` CLI command.
-_REPORT_FORMATS = ("html", "markdown")
+# Private aliases preserve established implementation seams while focused
+# modules own persistence and presentation. Public functions below remain real
+# ``bir.evals`` wrappers so their observable module identity is unchanged.
+_EXPERIMENT_SCHEMA_VERSION = _eval_persistence_helpers._EXPERIMENT_SCHEMA_VERSION
+_REPORT_FORMATS = _eval_report_helpers._REPORT_FORMATS
+_REPORT_CSS = _eval_report_helpers._REPORT_CSS
+_render_experiment_report_html = _eval_report_helpers._render_experiment_report_html
+_render_experiment_report_markdown = _eval_report_helpers._render_experiment_report_markdown
+_format_report_score = _eval_report_helpers._format_report_score
+_format_report_example_scores = _eval_report_helpers._format_report_example_scores
+_collapse_newlines = _eval_report_helpers._collapse_newlines
+_markdown_inline = _eval_report_helpers._markdown_inline
+_markdown_cell = _eval_report_helpers._markdown_cell
+
+_write_experiment_result = _eval_persistence_helpers._write_experiment_result
+_persist_experiment = _eval_persistence_helpers._persist_experiment
+_experiment_result = _eval_persistence_helpers._experiment_result
+_summary_from_result = _eval_persistence_helpers._summary_from_result
+_write_experiment_summary = _eval_persistence_helpers._write_experiment_summary
+_summary_path = _eval_persistence_helpers._summary_path
+_experiment_example_result_from_payload = _eval_persistence_helpers._experiment_example_result_from_payload
+_eval_result_from_payload = _eval_persistence_helpers._eval_result_from_payload
+_experiment_summary_from_payload = _eval_persistence_helpers._experiment_summary_from_payload
+_required_string = _eval_persistence_helpers._required_string
+_required_summary_string = _eval_persistence_helpers._required_summary_string
+_required_summary_int = _eval_persistence_helpers._required_summary_int
+_default_experiment_path = _eval_persistence_helpers._default_experiment_path
+_experiments_endpoint = _eval_persistence_helpers._experiments_endpoint
+_post_experiment = _eval_persistence_helpers._post_experiment
+_send_experiment_result_from_response = _eval_persistence_helpers._send_experiment_result_from_response
 
 # Missing-score policy vocabulary for compare_experiments(). ``ignore`` keeps the
 # historical behavior (baseline-only evaluators are reported but never fail the
 # gate); ``regress`` treats a baseline-only evaluator as a regression because a
 # removed evaluator silently drops coverage.
-_MISSING_SCORE_IGNORE = "ignore"
-_MISSING_SCORE_REGRESS = "regress"
 _MISSING_SCORE_POLICIES = (_MISSING_SCORE_IGNORE, _MISSING_SCORE_REGRESS)
 
 # Machine-readable explanations recorded in ExperimentDiff.regression_reasons.
@@ -93,393 +130,6 @@ __all__ = [
     "send_experiment",
     "similarity_above",
 ]
-
-
-@dataclass(frozen=True)
-class EvalResult:
-    """A numeric evaluator score with optional JSON-safe metadata."""
-
-    name: str
-    value: float
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("eval result name must not be empty")
-        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
-            raise TypeError("eval result value must be an int or float")
-        if isinstance(self.value, float) and not math.isfinite(self.value):
-            raise ValueError("eval result value must be finite")
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("eval result metadata must be an object")
-        object.__setattr__(self, "value", float(self.value))
-        object.__setattr__(self, "metadata", _safe_mapping(self.metadata))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable representation of the score."""
-
-        return {
-            "name": self.name,
-            "value": self.value,
-            "metadata": self.metadata,
-        }
-
-
-@dataclass(frozen=True)
-class DeterministicEvaluator:
-    """Callable evaluator wrapper used by experiment runs."""
-
-    name: str
-    _evaluate: Callable[..., EvalResult]
-    _uses_context: bool = False
-
-    def __post_init__(self) -> None:
-        _validate_evaluator_name(self.name)
-        if not callable(self._evaluate):
-            raise TypeError("deterministic evaluator evaluate function must be callable")
-
-    def evaluate(
-        self,
-        output: Any,
-        *,
-        expected: Any = None,
-        context: EvaluationContext | None = None,
-    ) -> EvalResult:
-        """Evaluate a task output and return an EvalResult."""
-
-        if self._uses_context:
-            if context is None:
-                raise ValueError(f"{self.name} requires an evaluation context")
-            return self._evaluate(context)
-        return self._evaluate(output, expected)
-
-
-@dataclass(frozen=True)
-class EvaluationContext:
-    """Runtime context passed to evaluators that need experiment metadata."""
-
-    example: DatasetExample | None
-    output: Any
-    duration_ms: float
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "duration_ms", _validate_finite_number(self.duration_ms, "duration_ms"))
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("evaluation context metadata must be an object")
-        object.__setattr__(self, "metadata", _safe_mapping(self.metadata))
-
-
-@dataclass(frozen=True)
-class DatasetExample:
-    """One input, expected output, and metadata row in an evaluation dataset."""
-
-    id: str
-    input: Any
-    expected: Any = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.id:
-            raise ValueError("dataset example id must not be empty")
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("dataset example metadata must be an object")
-        object.__setattr__(self, "metadata", {str(key): value for key, value in self.metadata.items()})
-
-    def to_dict(self, *, redact: bool = True) -> dict[str, Any]:
-        """Return a JSON-serializable dataset row, redacted by default."""
-
-        input_value = _safe_capture(self.input) if redact else self.input
-        expected_value = _safe_capture(self.expected) if redact else self.expected
-        metadata = _safe_mapping(self.metadata) if redact else dict(self.metadata)
-        return {
-            "id": self.id,
-            "input": input_value,
-            "expected": expected_value,
-            "metadata": metadata,
-        }
-
-
-@dataclass(frozen=True)
-class Dataset:
-    """A collection of uniquely identified examples for experiment runs."""
-
-    examples: list[DatasetExample]
-
-    def __post_init__(self) -> None:
-        seen_ids: set[str] = set()
-        duplicate_ids: set[str] = set()
-        for example in self.examples:
-            if example.id in seen_ids:
-                duplicate_ids.add(example.id)
-            seen_ids.add(example.id)
-        if duplicate_ids:
-            formatted_ids = ", ".join(sorted(duplicate_ids))
-            raise ValueError(f"dataset contains duplicate example IDs: {formatted_ids}")
-
-    @classmethod
-    def from_jsonl(cls, path: str | Path) -> Dataset:
-        """Load dataset examples from a JSONL file."""
-
-        dataset_path = Path(path)
-        examples: list[DatasetExample] = []
-
-        with dataset_path.open("r", encoding="utf-8") as dataset_file:
-            for line_number, line in enumerate(dataset_file, start=1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    payload = json.loads(stripped)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSON in dataset {dataset_path} at line {line_number}") from exc
-                if not isinstance(payload, Mapping):
-                    raise ValueError(f"Dataset {dataset_path} line {line_number} must contain a JSON object")
-                examples.append(_dataset_example_from_payload(payload, dataset_path, line_number))
-
-        return cls(examples)
-
-    def to_jsonl(self, path: str | Path, *, redact: bool = True) -> None:
-        """Write dataset examples to a JSONL file.
-
-        Redaction is enabled by default so exported datasets use the same safe
-        capture behavior as trace and experiment artifacts. Pass
-        ``redact=False`` only when you intentionally want to preserve raw
-        example payloads.
-        """
-
-        dataset_path = Path(path)
-        dataset_path.parent.mkdir(parents=True, exist_ok=True)
-        with dataset_path.open("w", encoding="utf-8") as dataset_file:
-            for example in self.examples:
-                dataset_file.write(_json_line(example.to_dict(redact=redact)))
-
-    def __iter__(self) -> Iterator[DatasetExample]:
-        """Iterate over dataset examples."""
-
-        return iter(self.examples)
-
-    def __len__(self) -> int:
-        """Return the number of examples in the dataset."""
-
-        return len(self.examples)
-
-
-@dataclass(frozen=True)
-class ExperimentExampleResult:
-    """The task output and evaluator scores for one dataset example."""
-
-    id: str
-    example_id: str
-    input: Any
-    expected: Any
-    output: Any
-    scores: list[EvalResult]
-    start_time: str
-    end_time: str
-    status: str
-    error: str | None
-    trace_id: str | None = None
-
-    @property
-    def duration_ms(self) -> float:
-        """Return the example runtime in milliseconds."""
-
-        start = datetime.fromisoformat(self.start_time)
-        end = datetime.fromisoformat(self.end_time)
-        return (end - start).total_seconds() * 1000
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable experiment result row."""
-
-        payload = {
-            "id": self.id,
-            "example_id": self.example_id,
-            "input": self.input,
-            "expected": self.expected,
-            "output": self.output,
-            "scores": [score.to_dict() for score in self.scores],
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "duration_ms": self.duration_ms,
-            "status": self.status,
-            "error": self.error,
-        }
-        if self.trace_id is not None:
-            payload["trace_id"] = self.trace_id
-        return payload
-
-
-@dataclass(frozen=True)
-class ExperimentResult:
-    """All example results and aggregate scores for one experiment run."""
-
-    id: str
-    name: str
-    start_time: str
-    end_time: str
-    status: str
-    results: list[ExperimentExampleResult]
-    path: str | None
-
-    @property
-    def aggregate_scores(self) -> dict[str, float]:
-        """Return the mean score for each evaluator name."""
-
-        totals: dict[str, float] = {}
-        counts: dict[str, int] = {}
-        for result in self.results:
-            for score in result.scores:
-                totals[score.name] = totals.get(score.name, 0.0) + score.value
-                counts[score.name] = counts.get(score.name, 0) + 1
-        return {name: totals[name] / counts[name] for name in sorted(totals)}
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable experiment payload."""
-
-        return {
-            "id": self.id,
-            "name": self.name,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "status": self.status,
-            "aggregate_scores": self.aggregate_scores,
-            "path": self.path,
-            "results": [result.to_dict() for result in self.results],
-        }
-
-
-@dataclass(frozen=True)
-class ExperimentDiff:
-    """Aggregate-score differences between two experiment runs.
-
-    ``tolerance`` is the global tolerance, while ``effective_tolerances`` records
-    the tolerance actually applied to each shared evaluator after per-evaluator
-    overrides. ``missing_score`` is the configured policy for evaluators present
-    only in the baseline, and ``regression_reasons`` maps every evaluator that
-    fails the gate to a machine-readable reason. ``example_deltas`` is the opt-in
-    per-example detail: for each shared evaluator it maps an example_id present in
-    both runs to the candidate-minus-baseline delta for that example, and is empty
-    unless :func:`compare_experiments` was called with ``per_example=True``. All
-    mappings are ordered by key so the diff serializes deterministically.
-    """
-
-    deltas: dict[str, float]
-    regressed: frozenset[str]
-    improved: frozenset[str]
-    unchanged: frozenset[str]
-    baseline_only: frozenset[str]
-    candidate_only: frozenset[str]
-    tolerance: float
-    effective_tolerances: dict[str, float] = field(default_factory=dict)
-    missing_score: str = _MISSING_SCORE_IGNORE
-    regression_reasons: dict[str, str] = field(default_factory=dict)
-    example_deltas: dict[str, dict[str, float]] = field(default_factory=dict)
-
-    @property
-    def has_regressions(self) -> bool:
-        """Return whether the configured policy reports any regression.
-
-        A shared evaluator that dropped beyond its effective tolerance always
-        counts. When the missing-score policy is ``regress``, evaluators present
-        only in the baseline also count: a removed evaluator drops coverage even
-        though no aggregate delta can be computed.
-        """
-
-        if self.regressed:
-            return True
-        return self.missing_score == _MISSING_SCORE_REGRESS and bool(self.baseline_only)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a deterministic JSON-serializable representation of the diff.
-
-        ``example_deltas`` is included only when populated (it is empty unless
-        per-example detail was requested), so the default aggregate-only output is
-        byte-for-byte unchanged from before the field existed.
-        """
-
-        payload: dict[str, Any] = {
-            "deltas": self.deltas,
-            "regressed": sorted(self.regressed),
-            "improved": sorted(self.improved),
-            "unchanged": sorted(self.unchanged),
-            "baseline_only": sorted(self.baseline_only),
-            "candidate_only": sorted(self.candidate_only),
-            "tolerance": self.tolerance,
-            "effective_tolerances": self.effective_tolerances,
-            "missing_score": self.missing_score,
-            "regression_reasons": self.regression_reasons,
-            "has_regressions": self.has_regressions,
-        }
-        if self.example_deltas:
-            payload["example_deltas"] = self.example_deltas
-        return payload
-
-
-@dataclass(frozen=True)
-class ExperimentSummary:
-    """Compact metadata persisted next to an experiment result file."""
-
-    schema_version: str
-    experiment_id: str
-    name: str
-    start_time: str
-    end_time: str
-    status: str
-    example_count: int
-    error_count: int
-    aggregate_scores: dict[str, float]
-    result_path: str
-
-    def __post_init__(self) -> None:
-        if self.schema_version != _EXPERIMENT_SCHEMA_VERSION:
-            raise ValueError(f"experiment summary schema_version must be {_EXPERIMENT_SCHEMA_VERSION}")
-        if not self.experiment_id:
-            raise ValueError("experiment summary experiment_id must not be empty")
-        if not self.name:
-            raise ValueError("experiment summary name must not be empty")
-        if self.status not in {"success", "error"}:
-            raise ValueError("experiment summary status must be success or error")
-        if isinstance(self.example_count, bool) or not isinstance(self.example_count, int) or self.example_count < 0:
-            raise ValueError("experiment summary example_count must be a non-negative integer")
-        if isinstance(self.error_count, bool) or not isinstance(self.error_count, int) or self.error_count < 0:
-            raise ValueError("experiment summary error_count must be a non-negative integer")
-        if not isinstance(self.aggregate_scores, Mapping):
-            raise ValueError("experiment summary aggregate_scores must be an object")
-        if not self.result_path:
-            raise ValueError("experiment summary result_path must not be empty")
-        object.__setattr__(
-            self,
-            "aggregate_scores",
-            {
-                str(name): _validate_finite_number(value, f"aggregate_scores.{name}")
-                for name, value in self.aggregate_scores.items()
-            },
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable experiment summary."""
-
-        return {
-            "schema_version": self.schema_version,
-            "experiment_id": self.experiment_id,
-            "name": self.name,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "status": self.status,
-            "example_count": self.example_count,
-            "error_count": self.error_count,
-            "aggregate_scores": self.aggregate_scores,
-            "result_path": self.result_path,
-        }
-
-
-@dataclass(frozen=True)
-class SendExperimentResult:
-    """Result returned after sending an experiment to a Bir server."""
-
-    accepted: int
-    experiment_id: str
 
 
 @dataclass(frozen=True)
@@ -1201,63 +851,7 @@ async def run_experiment_async(
 def load_experiment(path: str | Path) -> ExperimentResult:
     """Load an experiment result JSONL file."""
 
-    experiment_path = Path(path)
-    results: list[ExperimentExampleResult] = []
-    experiment_id: str | None = None
-    experiment_name: str | None = None
-
-    with experiment_path.open("r", encoding="utf-8") as experiment_file:
-        for line_number, line in enumerate(experiment_file, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in experiment {experiment_path} at line {line_number}") from exc
-            if not isinstance(payload, Mapping):
-                raise ValueError(f"Experiment {experiment_path} line {line_number} must contain a JSON object")
-
-            row_experiment_id = _required_string(payload, "experiment_id", experiment_path, line_number)
-            row_experiment_name = _required_string(payload, "experiment_name", experiment_path, line_number)
-            if experiment_id is None:
-                experiment_id = row_experiment_id
-            elif experiment_id != row_experiment_id:
-                raise ValueError(f"Experiment {experiment_path} contains multiple experiment IDs")
-            if experiment_name is None:
-                experiment_name = row_experiment_name
-            elif experiment_name != row_experiment_name:
-                raise ValueError(f"Experiment {experiment_path} contains multiple experiment names")
-            results.append(_experiment_example_result_from_payload(payload, experiment_path, line_number))
-
-    if not results:
-        summary_path = _summary_path(experiment_path)
-        if not summary_path.exists():
-            raise ValueError(f"Experiment {experiment_path} does not contain result rows")
-        summary = load_experiment_summary(summary_path)
-        return ExperimentResult(
-            id=summary.experiment_id,
-            name=summary.name,
-            start_time=summary.start_time,
-            end_time=summary.end_time,
-            status=summary.status,
-            results=[],
-            path=str(experiment_path),
-        )
-
-    if experiment_id is None or experiment_name is None:
-        raise ValueError(f"Experiment {experiment_path} does not contain experiment metadata")
-
-    start_time = min(result.start_time for result in results)
-    end_time = max(result.end_time for result in results)
-    return _experiment_result(
-        experiment_id=experiment_id,
-        name=experiment_name,
-        start_time=start_time,
-        end_time=end_time,
-        results=results,
-        path=experiment_path,
-    )
+    return _eval_persistence_helpers.load_experiment(path)
 
 
 def render_experiment_report(result: ExperimentResult, *, format: str = "html") -> str:
@@ -1278,12 +872,7 @@ def render_experiment_report(result: ExperimentResult, *, format: str = "html") 
     standard library only.
     """
 
-    if format not in _REPORT_FORMATS:
-        valid = ", ".join(_REPORT_FORMATS)
-        raise ValueError(f"render_experiment_report format must be one of: {valid}")
-    if format == "markdown":
-        return _render_experiment_report_markdown(result)
-    return _render_experiment_report_html(result)
+    return _eval_report_helpers.render_experiment_report(result, format=format)
 
 
 def compare_experiments(
@@ -1418,28 +1007,13 @@ def _example_scores_by_evaluator(result: ExperimentResult) -> dict[str, dict[str
 def load_experiment_summary(path: str | Path) -> ExperimentSummary:
     """Load an experiment summary JSON file."""
 
-    summary_path = Path(path)
-    try:
-        payload = json.loads(summary_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in experiment summary {summary_path}") from exc
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Experiment summary {summary_path} must contain a JSON object")
-    return _experiment_summary_from_payload(payload, summary_path)
+    return _eval_persistence_helpers.load_experiment_summary(path)
 
 
 def list_experiments(directory: str | Path = Path(".bir") / "experiments") -> list[ExperimentSummary]:
     """List experiment summaries in newest-first order."""
 
-    experiment_directory = Path(directory)
-    if not experiment_directory.exists():
-        return []
-    summaries = [
-        load_experiment_summary(summary_path)
-        for summary_path in experiment_directory.glob("*.summary.json")
-        if summary_path.is_file()
-    ]
-    return sorted(summaries, key=lambda summary: (summary.start_time, summary.experiment_id), reverse=True)
+    return _eval_persistence_helpers.list_experiments(directory)
 
 
 def send_experiment(
@@ -1461,25 +1035,10 @@ def send_experiment(
     a single attempt with no sleep, so the default behavior is unchanged.
     """
 
-    timeout = float(_validate_non_negative_number(timeout, "timeout"))
-    retries = _validate_non_negative_int(retries, "retries")
-    backoff = float(_validate_non_negative_number(backoff, "backoff"))
-
-    experiment_path = Path(path)
-    if not experiment_path.exists():
-        raise ValueError(f"Experiment result file {experiment_path} does not exist")
-    summary_path = _summary_path(experiment_path)
-    if not summary_path.exists():
-        raise ValueError(f"Experiment summary file {summary_path} does not exist")
-    experiment = load_experiment(experiment_path)
-    summary = load_experiment_summary(summary_path)
-    payload = {
-        "summary": summary.to_dict(),
-        "results": [result.to_dict() for result in experiment.results],
-    }
-    endpoint = _experiments_endpoint(server_url)
-    return _send_with_retry(
-        lambda: _post_experiment(endpoint, payload, timeout=timeout),
+    return _eval_persistence_helpers.send_experiment(
+        path,
+        server_url,
+        timeout=timeout,
         retries=retries,
         backoff=backoff,
     )
@@ -1716,41 +1275,6 @@ async def _call_task_async(task: Callable[..., Any], input_value: Any) -> Any:
     return result
 
 
-def _dataset_example_from_payload(
-    payload: Mapping[Any, Any],
-    dataset_path: Path,
-    line_number: int,
-) -> DatasetExample:
-    example_id = payload.get("id")
-    if not isinstance(example_id, str) or not example_id:
-        raise ValueError(f"Dataset {dataset_path} line {line_number} field 'id' must be a non-empty string")
-    if "input" not in payload:
-        raise ValueError(f"Dataset {dataset_path} line {line_number} is missing required field 'input'")
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise ValueError(f"Dataset {dataset_path} line {line_number} field 'metadata' must be an object")
-    return DatasetExample(
-        id=example_id,
-        input=payload["input"],
-        expected=payload.get("expected"),
-        metadata={str(key): value for key, value in metadata.items()},
-    )
-
-
-def _write_experiment_result(
-    experiment_file: TextIO,
-    experiment_id: str,
-    experiment_name: str,
-    result: ExperimentExampleResult,
-) -> None:
-    record = {
-        "experiment_id": experiment_id,
-        "experiment_name": experiment_name,
-        **result.to_dict(),
-    }
-    experiment_file.write(_json_line(record))
-
-
 def _run_experiment_threaded(
     *,
     name: str,
@@ -1964,246 +1488,6 @@ def _timeout_exc(timeout: float) -> TimeoutError:
     return TimeoutError(f"task timed out after {timeout}s")
 
 
-def _persist_experiment(
-    *,
-    output_path: Path,
-    experiment_id: str,
-    name: str,
-    start_time: str,
-    end_time: str,
-    results: list[ExperimentExampleResult],
-) -> ExperimentResult:
-    """Write ordered result rows and the summary, returning the experiment result.
-
-    Used by :func:`run_experiment_async`, which collects results by dataset index
-    and persists them in one pass once every example has finished.
-    """
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as experiment_file:
-        for result in results:
-            _write_experiment_result(experiment_file, experiment_id, name, result)
-    experiment_result = _experiment_result(
-        experiment_id=experiment_id,
-        name=name,
-        start_time=start_time,
-        end_time=end_time,
-        results=results,
-        path=output_path,
-    )
-    _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
-    return experiment_result
-
-
-def _experiment_result(
-    *,
-    experiment_id: str,
-    name: str,
-    start_time: str,
-    end_time: str,
-    results: list[ExperimentExampleResult],
-    path: Path,
-) -> ExperimentResult:
-    status = "error" if any(result.status == "error" for result in results) else "success"
-    return ExperimentResult(
-        id=experiment_id,
-        name=name,
-        start_time=start_time,
-        end_time=end_time,
-        status=status,
-        results=results,
-        path=str(path),
-    )
-
-
-def _summary_from_result(result: ExperimentResult) -> ExperimentSummary:
-    return ExperimentSummary(
-        schema_version=_EXPERIMENT_SCHEMA_VERSION,
-        experiment_id=result.id,
-        name=result.name,
-        start_time=result.start_time,
-        end_time=result.end_time,
-        status=result.status,
-        example_count=len(result.results),
-        error_count=sum(1 for example_result in result.results if example_result.status == "error"),
-        aggregate_scores=result.aggregate_scores,
-        result_path=result.path or "",
-    )
-
-
-def _write_experiment_summary(path: Path, summary: ExperimentSummary) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8"
-    )
-
-
-def _summary_path(result_path: Path) -> Path:
-    return result_path.with_suffix(".summary.json")
-
-
-def _experiment_example_result_from_payload(
-    payload: Mapping[Any, Any],
-    experiment_path: Path,
-    line_number: int,
-) -> ExperimentExampleResult:
-    status = _required_string(payload, "status", experiment_path, line_number)
-    if status not in {"success", "error"}:
-        raise ValueError(f"Experiment {experiment_path} line {line_number} field 'status' must be success or error")
-    scores = payload.get("scores")
-    if not isinstance(scores, list):
-        raise ValueError(f"Experiment {experiment_path} line {line_number} field 'scores' must be a list")
-    error = payload.get("error")
-    if error is not None and not isinstance(error, str):
-        raise ValueError(f"Experiment {experiment_path} line {line_number} field 'error' must be a string or null")
-    trace_id = payload.get("trace_id")
-    if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):
-        raise ValueError(
-            f"Experiment {experiment_path} line {line_number} field 'trace_id' must be a non-empty string or null"
-        )
-    for field_name in ("input", "expected", "output"):
-        if field_name not in payload:
-            raise ValueError(
-                f"Experiment {experiment_path} line {line_number} is missing required field '{field_name}'"
-            )
-    return ExperimentExampleResult(
-        id=_required_string(payload, "id", experiment_path, line_number),
-        example_id=_required_string(payload, "example_id", experiment_path, line_number),
-        input=_safe_capture(payload["input"]),
-        expected=_safe_capture(payload["expected"]),
-        output=_safe_capture(payload["output"]),
-        scores=[_eval_result_from_payload(score, experiment_path, line_number) for score in scores],
-        start_time=_required_string(payload, "start_time", experiment_path, line_number),
-        end_time=_required_string(payload, "end_time", experiment_path, line_number),
-        status=status,
-        error=_safe_error(RuntimeError(error)) if error is not None else None,
-        trace_id=trace_id,
-    )
-
-
-def _eval_result_from_payload(
-    payload: Any,
-    experiment_path: Path,
-    line_number: int,
-) -> EvalResult:
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Experiment {experiment_path} line {line_number} score entries must be objects")
-    name = payload.get("name")
-    if not isinstance(name, str) or not name:
-        raise ValueError(
-            f"Experiment {experiment_path} line {line_number} score field 'name' must be a non-empty string"
-        )
-    if "value" not in payload:
-        raise ValueError(f"Experiment {experiment_path} line {line_number} score is missing required field 'value'")
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise ValueError(f"Experiment {experiment_path} line {line_number} score field 'metadata' must be an object")
-    return EvalResult(name=name, value=payload["value"], metadata=dict(metadata))
-
-
-def _experiment_summary_from_payload(payload: Mapping[Any, Any], summary_path: Path) -> ExperimentSummary:
-    aggregate_scores = payload.get("aggregate_scores")
-    if not isinstance(aggregate_scores, Mapping):
-        raise ValueError(f"Experiment summary {summary_path} field 'aggregate_scores' must be an object")
-    return ExperimentSummary(
-        schema_version=_required_summary_string(payload, "schema_version", summary_path),
-        experiment_id=_required_summary_string(payload, "experiment_id", summary_path),
-        name=_required_summary_string(payload, "name", summary_path),
-        start_time=_required_summary_string(payload, "start_time", summary_path),
-        end_time=_required_summary_string(payload, "end_time", summary_path),
-        status=_required_summary_string(payload, "status", summary_path),
-        example_count=_required_summary_int(payload, "example_count", summary_path),
-        error_count=_required_summary_int(payload, "error_count", summary_path),
-        aggregate_scores={str(key): value for key, value in aggregate_scores.items()},
-        result_path=_required_summary_string(payload, "result_path", summary_path),
-    )
-
-
-def _required_string(payload: Mapping[Any, Any], field_name: str, path: Path, line_number: int) -> str:
-    value = payload.get(field_name)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Experiment {path} line {line_number} field '{field_name}' must be a non-empty string")
-    return value
-
-
-def _required_summary_string(payload: Mapping[Any, Any], field_name: str, path: Path) -> str:
-    value = payload.get(field_name)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Experiment summary {path} field '{field_name}' must be a non-empty string")
-    return value
-
-
-def _required_summary_int(payload: Mapping[Any, Any], field_name: str, path: Path) -> int:
-    value = payload.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"Experiment summary {path} field '{field_name}' must be a non-negative integer")
-    return value
-
-
-def _default_experiment_path(name: str, experiment_id: str) -> Path:
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip("-") or "experiment"
-    return Path(".bir") / "experiments" / f"{safe_name}-{experiment_id}.jsonl"
-
-
-def _experiments_endpoint(server_url: str) -> str:
-    normalized_url = server_url.rstrip("/")
-    if not normalized_url:
-        raise ValueError("bir experiment server_url must not be empty")
-    return f"{normalized_url}/v1/experiments"
-
-
-def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: float) -> SendExperimentResult:
-    """Post the experiment once, raising :class:`_TransientSendError` for retryable failures.
-
-    Network errors, timeouts, and HTTP 5xx are surfaced as ``_TransientSendError``
-    so :func:`_send_with_retry` can retry them; HTTP 4xx and an invalid success
-    body are permanent ``RuntimeError`` failures that propagate immediately.
-    """
-
-    payload = json.dumps(experiment, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.status
-            body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        body = _read_http_error_body(exc)
-        message = f"bir server rejected experiment with HTTP {exc.code}: {body}"
-        if _is_retryable_status(exc.code):
-            raise _TransientSendError(message, cause=exc) from exc
-        raise RuntimeError(message) from exc
-    except urllib.error.URLError as exc:
-        raise _TransientSendError(f"bir could not send experiment to {endpoint}: {exc.reason}", cause=exc) from exc
-    except TimeoutError as exc:
-        # A socket read timeout surfaces as TimeoutError rather than URLError.
-        raise _TransientSendError(f"bir could not send experiment to {endpoint}: {exc}", cause=exc) from exc
-
-    if status < 200 or status >= 300:
-        raise RuntimeError(f"bir server rejected experiment with HTTP {status}: {body}")
-    return _send_experiment_result_from_response(body)
-
-
-def _send_experiment_result_from_response(body: str) -> SendExperimentResult:
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("bir server returned invalid experiment response JSON") from exc
-    if not isinstance(payload, Mapping):
-        raise RuntimeError("bir server returned invalid experiment response")
-    accepted = payload.get("accepted")
-    experiment_id = payload.get("id")
-    if isinstance(accepted, bool) or not isinstance(accepted, int):
-        raise RuntimeError("bir server experiment response field 'accepted' must be an integer")
-    if not isinstance(experiment_id, str) or not experiment_id:
-        raise RuntimeError("bir server experiment response field 'id' must be a non-empty string")
-    return SendExperimentResult(accepted=accepted, experiment_id=experiment_id)
-
-
 def _expected_value(configured_expected: Any, example_expected: Any, evaluator_name: str) -> Any:
     if configured_expected is _USE_EXAMPLE_EXPECTED:
         if example_expected is None:
@@ -2292,13 +1576,6 @@ def _resolve_field_path(output: Any, field_path: list[str | int]) -> _ResolvedFi
     return _ResolvedField(exists=True, value=current)
 
 
-def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
-    captured = _safe_capture({str(key): item for key, item in value.items()})
-    if not isinstance(captured, dict):
-        return {}
-    return captured
-
-
 def _validate_non_negative_float(value: Any, field: str) -> float:
     numeric_value = _validate_finite_number(value, field)
     if numeric_value < 0:
@@ -2359,19 +1636,6 @@ def _validate_positive_number(value: Any, field: str) -> float:
     return numeric_value
 
 
-def _validate_finite_number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be an int or float")
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{field} must be finite")
-    return float(value)
-
-
-def _validate_evaluator_name(name: str) -> None:
-    if not name:
-        raise ValueError("evaluator name must not be empty")
-
-
 def _word_tokens(text: str) -> set[str]:
     return set(_WORD_TOKEN_PATTERN.findall(text.casefold()))
 
@@ -2380,159 +1644,3 @@ def _answer_preview(answer: str) -> str:
     if len(answer) <= _CITATION_ANSWER_PREVIEW_LIMIT:
         return answer
     return answer[:_CITATION_ANSWER_PREVIEW_LIMIT] + "..."
-
-
-_REPORT_CSS = (
-    "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
-    "margin:2rem;color:#1a1a1a;}"
-    "h1{font-size:1.5rem;}"
-    "h2{font-size:1.1rem;margin-top:2rem;}"
-    "table{border-collapse:collapse;margin-top:0.5rem;}"
-    "th,td{border:1px solid #d0d0d0;padding:0.35rem 0.6rem;text-align:left;"
-    "font-size:0.9rem;vertical-align:top;}"
-    "th{background:#f4f4f4;}"
-    "table.meta th{width:8rem;}"
-)
-
-
-def _render_experiment_report_html(result: ExperimentResult) -> str:
-    """Render ``result`` as a complete standalone HTML document.
-
-    Every experiment-derived string is passed through :func:`html.escape`, so
-    example ids, evaluator names, and error text cannot inject markup.
-    """
-
-    aggregate_scores = result.aggregate_scores
-    example_count = len(result.results)
-    error_count = sum(1 for example in result.results if example.status == "error")
-    title = f"Experiment Report: {result.name}"
-
-    parts: list[str] = [
-        "<!DOCTYPE html>",
-        '<html lang="en">',
-        "<head>",
-        '<meta charset="utf-8">',
-        f"<title>{_html_escape(title)}</title>",
-        f"<style>{_REPORT_CSS}</style>",
-        "</head>",
-        "<body>",
-        f"<h1>{_html_escape(title)}</h1>",
-        '<table class="meta">',
-    ]
-    for label, value in (
-        ("ID", result.id),
-        ("Status", result.status),
-        ("Examples", str(example_count)),
-        ("Errors", str(error_count)),
-        ("Start", result.start_time),
-        ("End", result.end_time),
-    ):
-        parts.append(f"<tr><th>{_html_escape(label)}</th><td>{_html_escape(value)}</td></tr>")
-    parts.append("</table>")
-
-    parts.append("<h2>Evaluator aggregates</h2>")
-    if aggregate_scores:
-        parts.append("<table>")
-        parts.append("<thead><tr><th>Evaluator</th><th>Mean</th></tr></thead>")
-        parts.append("<tbody>")
-        for name in sorted(aggregate_scores):
-            mean = _format_report_score(aggregate_scores[name])
-            parts.append(f"<tr><td>{_html_escape(name)}</td><td>{_html_escape(mean)}</td></tr>")
-        parts.append("</tbody>")
-        parts.append("</table>")
-    else:
-        parts.append("<p>No evaluator scores.</p>")
-
-    parts.append("<h2>Examples</h2>")
-    parts.append("<table>")
-    parts.append("<thead><tr><th>Example</th><th>Status</th><th>Scores</th><th>Error</th></tr></thead>")
-    parts.append("<tbody>")
-    for example in result.results:
-        scores = _format_report_example_scores(example.scores)
-        error = example.error or "-"
-        parts.append(
-            "<tr>"
-            f"<td>{_html_escape(example.example_id)}</td>"
-            f"<td>{_html_escape(example.status)}</td>"
-            f"<td>{_html_escape(scores)}</td>"
-            f"<td>{_html_escape(error)}</td>"
-            "</tr>"
-        )
-    parts.append("</tbody>")
-    parts.append("</table>")
-    parts.append("</body>")
-    parts.append("</html>")
-    return "\n".join(parts) + "\n"
-
-
-def _render_experiment_report_markdown(result: ExperimentResult) -> str:
-    """Render ``result`` as a self-contained Markdown document.
-
-    Table cells escape the pipe separator and collapse newlines so example text
-    cannot break the table structure.
-    """
-
-    aggregate_scores = result.aggregate_scores
-    example_count = len(result.results)
-    error_count = sum(1 for example in result.results if example.status == "error")
-
-    lines: list[str] = [
-        f"# Experiment Report: {_markdown_inline(result.name)}",
-        "",
-        f"- **ID:** {_markdown_inline(result.id)}",
-        f"- **Status:** {_markdown_inline(result.status)}",
-        f"- **Examples:** {example_count}",
-        f"- **Errors:** {error_count}",
-        f"- **Start:** {_markdown_inline(result.start_time)}",
-        f"- **End:** {_markdown_inline(result.end_time)}",
-        "",
-        "## Evaluator aggregates",
-        "",
-    ]
-    if aggregate_scores:
-        lines.append("| Evaluator | Mean |")
-        lines.append("| --- | --- |")
-        for name in sorted(aggregate_scores):
-            lines.append(f"| {_markdown_cell(name)} | {_format_report_score(aggregate_scores[name])} |")
-    else:
-        lines.append("No evaluator scores.")
-    lines.append("")
-    lines.append("## Examples")
-    lines.append("")
-    lines.append("| Example | Status | Scores | Error |")
-    lines.append("| --- | --- | --- | --- |")
-    for example in result.results:
-        scores = _format_report_example_scores(example.scores)
-        error = example.error or "-"
-        lines.append(
-            f"| {_markdown_cell(example.example_id)} | {_markdown_cell(example.status)} "
-            f"| {_markdown_cell(scores)} | {_markdown_cell(error)} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _format_report_score(value: float) -> str:
-    return f"{value:.2f}"
-
-
-def _format_report_example_scores(scores: list[EvalResult]) -> str:
-    if not scores:
-        return "-"
-    return " ".join(f"{score.name}={score.value:.2f}" for score in sorted(scores, key=lambda score: score.name))
-
-
-def _collapse_newlines(text: str) -> str:
-    return text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-
-
-def _markdown_inline(text: str) -> str:
-    return _collapse_newlines(text)
-
-
-def _markdown_cell(text: str) -> str:
-    return _collapse_newlines(text).replace("|", "\\|")
-
-
-def _json_line(payload: Mapping[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"

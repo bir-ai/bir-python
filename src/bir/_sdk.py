@@ -1,99 +1,142 @@
-"""Core tracing primitives and local JSONL persistence for the Bir SDK."""
+"""Core tracing lifecycle and public orchestration for the Bir SDK.
+
+Dependency direction: this public compatibility surface owns mutable runtime
+state and composes the lower-level configuration, capture, storage, and sending
+modules. Those private modules never import this module or one another upward.
+"""
 
 from __future__ import annotations
 
 import functools
 import hashlib
 import inspect
-import json
-import math
-import os
+import os  # noqa: F401 - compatibility patch seam for storage internals
 import random
 import re
-import sqlite3
-import tempfile
-import time
-import urllib.error
-import urllib.request
+import sqlite3  # noqa: F401 - compatibility patch seam for storage internals
+import tempfile  # noqa: F401 - compatibility patch seam for storage internals
+import time  # noqa: F401 - compatibility patch seam for transport internals
+import urllib.error  # noqa: F401 - compatibility patch seam for transport internals
+import urllib.request  # noqa: F401 - compatibility patch seam for transport internals
 from collections.abc import Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
 from types import TracebackType
-from typing import IO, Any, Callable, Iterable, Mapping, TypeVar, cast
+from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+from . import _capture as _capture_helpers
+from . import _config as _config_helpers
+from . import _sending as _sending_helpers
+from . import _storage as _storage_helpers
+from ._config import (
+    _Config,
+    _config_from_env,
+    _ModelPrice,
+    _retrieval_document_from_mapping,
+    _validate_additional_redaction_patterns,
+    _validate_additional_secret_keys,
+    _validate_bool,
+    _validate_currency,
+    _validate_event_name,
+    _validate_model_prices,
+    _validate_non_negative_int,
+    _validate_non_negative_number,
+    _validate_number,
+    _validate_positive_int,
+    _validate_sample_rate,
+    _validate_sample_rules,
+)
+from ._config import (
+    _price_for_model as _configured_price_for_model,
+)
+from ._config import (
+    _sample_rate_for_trace as _configured_sample_rate_for_trace,
+)
+from ._sending import SendEventsResult
+from ._storage import LoadedTrace, TraceEvent
+
+# Keep established private names available from ``bir._sdk`` while the focused
+# modules own their implementations and constants.
+_DEFAULT_TRACE_PATH = _config_helpers._DEFAULT_TRACE_PATH
+_ENV_FALSE_VALUES = _config_helpers._ENV_FALSE_VALUES
+_ENV_TRUE_VALUES = _config_helpers._ENV_TRUE_VALUES
+_MAX_ADDITIONAL_REDACTION_PATTERNS = _config_helpers._MAX_ADDITIONAL_REDACTION_PATTERNS
+_MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH = _config_helpers._MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH
+_MAX_ADDITIONAL_SECRET_KEYS = _config_helpers._MAX_ADDITIONAL_SECRET_KEYS
+_MAX_ADDITIONAL_SECRET_KEY_LENGTH = _config_helpers._MAX_ADDITIONAL_SECRET_KEY_LENGTH
+_MAX_MODEL_PRICES = _config_helpers._MAX_MODEL_PRICES
+_MAX_SAMPLE_RULES = _config_helpers._MAX_SAMPLE_RULES
+_MODEL_PRICE_RATE_KEYS = _config_helpers._MODEL_PRICE_RATE_KEYS
+_compile_additional_redaction_pattern = _config_helpers._compile_additional_redaction_pattern
+_env_value = _config_helpers._env_value
+_parse_env_bool = _config_helpers._parse_env_bool
+_parse_env_int = _config_helpers._parse_env_int
+_parse_env_sample_rate = _config_helpers._parse_env_sample_rate
+_validate_model_price = _config_helpers._validate_model_price
+_MAX_CAPTURE_DEPTH = _capture_helpers._MAX_CAPTURE_DEPTH
+_MAX_DEPTH_REACHED = _capture_helpers._MAX_DEPTH_REACHED
+_TRUNCATED = _capture_helpers._TRUNCATED
+_REDACTED = _capture_helpers._REDACTED
+_SECRET_KEY_PARTS = _capture_helpers._SECRET_KEY_PARTS
+_SECRET_KEY_NAMES = _capture_helpers._SECRET_KEY_NAMES
 
 F = TypeVar("F", bound=Callable[..., Any])
-T = TypeVar("T")
 
-_DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")
 # Sidecar suffix appended to the trace file name to record the IDs the server has
 # already accepted, so an opt-in ``send_events(mark_sent=True)`` can cheaply skip
 # them on a later send. SDK-local bookkeeping only; never part of the event schema.
-_SENT_IDS_SUFFIX = ".sent"
-_SCHEMA_VERSION = "1.0"
-_MAX_CAPTURE_DEPTH = 6
-_MAX_DEPTH_REACHED = "[max_depth]"
-# Sentinel appended when an opt-in capture-size limit truncates a value: as a
-# suffix on an over-long string and as an extra element/sentinel entry on an
-# over-large list or mapping. Like the depth and redaction markers it keeps the
-# captured value valid JSON while making the truncation visible.
-_TRUNCATED = "…[truncated]"
-_REDACTED = "[redacted]"
-_EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
-_EVENT_STATUSES = {"success", "error"}
-_EVENT_SORT_PRIORITY = {
-    "trace": 0,
-    "span": 1,
-    "generation": 1,
-    "tool_call": 1,
-    "score": 2,
-}
-_SECRET_KEY_PARTS = (
-    "access_key",
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth_header",
-    "client_secret",
-    "password",
-    "private_key",
-    "secret",
-    "token",
-)
-_SECRET_KEY_NAMES = {
-    "auth",
-    "credential",
-    "credentials",
-    "creds",
-}
-# Upper bounds on the user-supplied additive redaction rules accepted by
-# ``configure``. They reject unboundedly large configuration that would slow
-# every capture or grow memory without limit. Built-in rules are never counted
-# against these caps and can never be disabled, replaced, or reordered.
-_MAX_ADDITIONAL_SECRET_KEYS = 100
-_MAX_ADDITIONAL_REDACTION_PATTERNS = 100
-_MAX_ADDITIONAL_SECRET_KEY_LENGTH = 200
-_MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH = 1000
-# Upper bound on the opt-in ``sample_rules`` table accepted by ``configure``.
-# Rules are checked only at trace-root creation, but a cap still avoids carrying
-# an unbounded process-global configuration. Exact name matching keeps lookups
-# predictable and leaves the global ``sample_rate`` as the default.
-_MAX_SAMPLE_RULES = 1000
-# Upper bound on the opt-in ``model_prices`` table accepted by ``configure``. It
-# rejects an unboundedly large price table while leaving ample room for a
-# user-curated list. Bir bundles no prices; this only caps what a caller supplies.
-_MAX_MODEL_PRICES = 1000
-# The only keys accepted inside a single model's rate mapping: the per-token
-# ``input``/``output`` rates and an optional ``currency`` (default "USD").
-_MODEL_PRICE_RATE_KEYS = frozenset({"input", "output", "currency"})
+_SENT_IDS_SUFFIX = _storage_helpers._SENT_IDS_SUFFIX
+_SCHEMA_VERSION = _storage_helpers._SCHEMA_VERSION
+_EVENT_TYPES = _storage_helpers._EVENT_TYPES
+_EVENT_STATUSES = _storage_helpers._EVENT_STATUSES
+_EVENT_SORT_PRIORITY = _storage_helpers._EVENT_SORT_PRIORITY
+
+# Storage aliases keep established private imports available without restoring
+# a second implementation. Wrappers below are used only where active config is
+# an input or a historical private signature must remain unchanged.
+_write_lock = _storage_helpers._write_lock
+_sent_ids_lock = _storage_helpers._sent_ids_lock
+_InterProcessFileLock = _storage_helpers._InterProcessFileLock
+_iter_trace_events_from_file = _storage_helpers._iter_trace_events_from_file
+_trace_files_oldest_first = _storage_helpers._trace_files_oldest_first
+_traces_from_events = _storage_helpers._traces_from_events
+_iter_event_batches = _storage_helpers._iter_event_batches
+_UploadEventSpool = _storage_helpers._UploadEventSpool
+_rotate_trace_files = _storage_helpers._rotate_trace_files
+_PruneResult = _storage_helpers._PruneResult
+_PruneTraceSelection = _storage_helpers._PruneTraceSelection
+_trace_starts_before = _storage_helpers._trace_starts_before
+_prune_trace_id_key = _storage_helpers._prune_trace_id_key
+_PruneTraceIndex = _storage_helpers._PruneTraceIndex
+_select_removed_trace_ids = _storage_helpers._select_removed_trace_ids
+_stream_filtered_trace_file = _storage_helpers._stream_filtered_trace_file
+_stage_filtered_trace_file = _storage_helpers._stage_filtered_trace_file
+_load_sent_ids = _storage_helpers._load_sent_ids
+_record_sent_ids = _storage_helpers._record_sent_ids
+_trace_event_from_payload = _storage_helpers._trace_event_from_payload
+_expect_string = _storage_helpers._expect_string
+_expect_optional_string = _storage_helpers._expect_optional_string
+_expect_datetime_string = _storage_helpers._expect_datetime_string
+_expect_mapping = _storage_helpers._expect_mapping
+_validate_json_value = _storage_helpers._validate_json_value
+_duration_ms = _storage_helpers._duration_ms
+_event_sort_key = _storage_helpers._event_sort_key
+_event_depths = _storage_helpers._event_depths
+
+# Transport is dependency-bottom code; request grouping and checkpoint
+# orchestration stay in this module so their long-standing patch seams remain.
+_TransientSendError = _sending_helpers._TransientSendError
+_events_endpoint = _sending_helpers._events_endpoint
+_is_retryable_status = _sending_helpers._is_retryable_status
+_read_http_error_body = _sending_helpers._read_http_error_body
+_post_event_batch = _sending_helpers._post_event_batch
+_batch_result_from_response = _sending_helpers._batch_result_from_response
+_post_event = _sending_helpers._post_event
+_accepted_count_from_response = _sending_helpers._accepted_count_from_response
+_send_with_retry = _sending_helpers._send_with_retry
 _current_trace_id: ContextVar[str | None] = ContextVar("bir_current_trace_id", default=None)
 _current_parent_id: ContextVar[str | None] = ContextVar("bir_current_parent_id", default=None)
 _current_capture_inputs: ContextVar[bool | None] = ContextVar("bir_current_capture_inputs", default=None)
@@ -101,144 +144,6 @@ _current_capture_outputs: ContextVar[bool | None] = ContextVar("bir_current_capt
 # Set once at trace-root creation so every descendant event of a sampled-out
 # trace is skipped. False means "keep this trace"; the default keeps everything.
 _current_trace_dropped: ContextVar[bool] = ContextVar("bir_current_trace_dropped", default=False)
-
-
-@dataclass(frozen=True)
-class _ModelPrice:
-    """Validated per-token rates and currency for one ``model_prices`` entry.
-
-    ``input``/``output`` are non-negative, finite per-token rates and either may
-    be ``None`` when only one side is priced; ``currency`` defaults to ``"USD"``.
-    Frozen so the whole price table stays hashable on the immutable ``_Config``.
-    """
-
-    input: int | float | None
-    output: int | float | None
-    currency: str
-
-
-@dataclass(frozen=True)
-class _Config:
-    trace_path: Path = _DEFAULT_TRACE_PATH
-    capture_inputs: bool = False
-    capture_outputs: bool = False
-    service_name: str | None = None
-    environment: str | None = None
-    # Optional trace-source tag recorded on trace roots under ``metadata.source``.
-    # It mirrors the ``source`` field the product's Playground writes and that the
-    # server/dashboard filter on by exact match, giving SDK callers a first-class
-    # way to tag where a trace came from. ``None`` records nothing.
-    source: str | None = None
-    # Master on/off switch for all recording. When False, every primitive still
-    # runs the user's body and still propagates exceptions, but nothing is ever
-    # written — an explicit, intent-revealing kill switch (feature flag, incident
-    # toggle, tests) enforced through the same "trace dropped" path as sampling
-    # (see ``_should_drop_trace`` and ``_write_event``) so the contract matches
-    # exactly. Defaults to True, so untouched behavior is byte-for-byte unchanged.
-    enabled: bool = True
-    sample_rate: float = 1.0
-    # Optional exact trace-root-name sampling overrides. Empty by default so the
-    # global ``sample_rate`` remains the only sampling input unless a caller opts
-    # in. Stored as a validated, name-sorted tuple so the frozen config stays
-    # hashable; a rule affects only trace roots with the same name, and children
-    # inherit the root's already-rolled decision.
-    sample_rules: tuple[tuple[str, float], ...] = ()
-    # ``max_bytes is None`` keeps the historical behavior of a single trace file
-    # that grows without bound. When set, the active file is rotated before a
-    # write that would push it past the cap, keeping at most ``backup_count``
-    # rotated siblings (``traces.jsonl.1`` .. ``traces.jsonl.N``).
-    max_bytes: int | None = None
-    backup_count: int = 3
-    # Additive, user-supplied redaction rules layered on top of the built-in
-    # rules; both default to empty so out-of-the-box behavior is unchanged. They
-    # only ever widen coverage: ``additional_secret_keys`` are extra mapping-key
-    # names redacted by exact, case-insensitive match (already normalized to the
-    # built-in name form), and ``additional_redaction_patterns`` are extra
-    # compiled regexes whose every match is replaced with the ``[redacted]``
-    # marker. Built-in rules always run regardless of these and can never be
-    # disabled, replaced, or reordered.
-    additional_secret_keys: frozenset[str] = frozenset()
-    additional_redaction_patterns: tuple[re.Pattern[str], ...] = ()
-    # Opt-in, local-only price table that auto-fills a generation's cost from its
-    # token usage. Empty by default so cost stays user-provided and no prices are
-    # bundled. Stored as a validated, name-sorted tuple of ``(model, _ModelPrice)``
-    # pairs so the frozen config stays hashable; an explicit ``set_cost`` on a
-    # generation always wins over a rate-derived cost.
-    model_prices: tuple[tuple[str, _ModelPrice], ...] = ()
-    # Opt-in capture-size limits applied during ``_safe_capture`` after redaction.
-    # Both default to ``None`` (unlimited), so captured output is byte-for-byte
-    # unchanged unless a caller opts in. ``max_value_length`` caps the length of a
-    # captured string (truncating the already-redacted text and appending the
-    # ``_TRUNCATED`` marker); ``max_collection_items`` caps how many items of a
-    # captured list/tuple/set or mapping are kept (the rest are replaced by a
-    # single ``_TRUNCATED`` marker). They bound an individual huge payload, a
-    # different concern from the ``max_bytes`` whole-file rotation cap.
-    max_value_length: int | None = None
-    max_collection_items: int | None = None
-
-
-@dataclass(frozen=True)
-class TraceEvent:
-    """A single trace, span, generation, tool call, or score loaded from storage."""
-
-    id: str
-    trace_id: str
-    parent_id: str | None
-    name: str
-    type: str
-    start_time: str
-    end_time: str
-    status: str
-    metadata: dict[str, Any]
-    input: Any
-    output: Any
-    error: str | None
-    raw: dict[str, Any]
-    value: int | float | None = None
-    model: str | None = None
-    usage: dict[str, int | float] | None = None
-    cost: dict[str, int | float] | None = None
-    currency: str | None = None
-
-    @property
-    def duration_ms(self) -> float:
-        """Return the event duration in milliseconds."""
-
-        return _duration_ms(self.start_time, self.end_time)
-
-
-@dataclass(frozen=True)
-class LoadedTrace:
-    """A trace root event with all events that share its trace ID."""
-
-    id: str
-    name: str
-    start_time: str
-    end_time: str
-    status: str
-    events: list[TraceEvent]
-    root: TraceEvent
-
-    @property
-    def duration_ms(self) -> float:
-        """Return the root trace duration in milliseconds."""
-
-        return self.root.duration_ms
-
-
-@dataclass(frozen=True)
-class SendEventsResult:
-    """Result returned after sending local events to a Bir server."""
-
-    accepted: int
-    event_ids: list[str]
-    attempted: int = 0
-
-    @property
-    def skipped(self) -> int:
-        """Return events the server did not newly accept, usually duplicates."""
-
-        return max(self.attempted - self.accepted, 0)
 
 
 @dataclass(frozen=True)
@@ -293,61 +198,11 @@ class PromptRecord:
         return self.template.format(**self.variables)
 
 
-# ``_config`` holds the active configuration. It is initialized from the BIR_*
-# environment variables at import time by ``_config_from_env`` near the bottom of
-# this module (defined there so the validators it reuses already exist) and is
-# then replaced wholesale by ``configure``.
-_write_lock = Lock()
-_sent_ids_lock = Lock()
-
-
-class _InterProcessFileLock:
-    """Exclusive advisory lock backed by a stable sibling lock file.
-
-    Callers must also hold their operation's in-process ``Lock`` before entering
-    this lock. The SDK never nests trace and sent-sidecar locks: if a future
-    operation needs both, it must acquire the trace lock first and the sidecar
-    lock second.
-    """
-
-    def __init__(self, target_path: Path) -> None:
-        self._path = target_path.with_name(f".{target_path.name}.lock")
-        self._file: IO[bytes] | None = None
-
-    def __enter__(self) -> _InterProcessFileLock:
-        lock_file = self._path.open("a+b")
-        try:
-            if os.name == "nt":
-                # msvcrt byte-range locks may extend past EOF, so avoid writing
-                # a sentinel first; writes before the lock race with writers.
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except BaseException:
-            lock_file.close()
-            raise
-        self._file = lock_file
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        lock_file = self._file
-        self._file = None
-        if lock_file is None:
-            return
-        try:
-            if os.name == "nt":
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
+# ``bir._sdk._config`` holds the active configuration. It is initialized from
+# the BIR_* environment variables near the bottom of this module and then
+# replaced wholesale by ``configure``. The immutable value type and parsing
+# helpers live in :mod:`bir._config`; runtime ownership of the active instance
+# stays here.
 
 
 def configure(
@@ -547,7 +402,11 @@ def load_events(path: str | Path | None = None, *, include_rotated: bool = False
     occur mid-trace, a single logical trace may be split across files.
     """
 
-    return list(_iter_trace_events(path, include_rotated=include_rotated))
+    return _storage_helpers.load_events(
+        path,
+        include_rotated=include_rotated,
+        default_path=_config.trace_path,
+    )
 
 
 def _iter_trace_events(
@@ -562,54 +421,11 @@ def _iter_trace_events(
     materialize their documented list return types.
     """
 
-    trace_path = Path(path) if path is not None else _config.trace_path
-    trace_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
-    for file_path in trace_files:
-        yield from _iter_trace_events_from_file(file_path)
-
-
-def _iter_trace_events_from_file(trace_path: Path) -> Iterator[TraceEvent]:
-    """Yield validated events from one JSONL file."""
-
-    if not trace_path.exists():
-        return
-
-    with trace_path.open("r", encoding="utf-8") as trace_file:
-        for line_number, line in enumerate(trace_file, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in trace file {trace_path} at line {line_number}") from exc
-            if not isinstance(payload, dict):
-                raise ValueError(f"Trace file {trace_path} line {line_number} must contain a JSON object")
-            yield _trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number)
-
-
-def _trace_files_oldest_first(trace_path: Path) -> list[Path]:
-    """Return rotated trace files then the active file, oldest event first.
-
-    Rotated siblings are named ``<trace_path>.<n>`` where a higher ``n`` is
-    older, so the original write order is reconstructed by reading the
-    highest-numbered backup first, down to ``.1``, and the active file last.
-    """
-
-    rotated: list[tuple[int, Path]] = []
-    prefix = f"{trace_path.name}."
-    try:
-        entries = list(trace_path.parent.iterdir())
-    except FileNotFoundError:
-        entries = []
-    for entry in entries:
-        if not entry.name.startswith(prefix):
-            continue
-        suffix = entry.name[len(prefix) :]
-        if suffix.isdigit() and int(suffix) >= 1:
-            rotated.append((int(suffix), entry))
-    rotated.sort(key=lambda item: item[0], reverse=True)
-    return [entry for _, entry in rotated] + [trace_path]
+    return _storage_helpers._iter_trace_events(
+        path,
+        include_rotated=include_rotated,
+        default_path=_config.trace_path,
+    )
 
 
 def load_traces(path: str | Path | None = None, *, include_rotated: bool = False) -> list[LoadedTrace]:
@@ -619,36 +435,11 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
     traces possibly being split across rotated files.
     """
 
-    events = _iter_trace_events(path, include_rotated=include_rotated)
-    return _traces_from_events(events)
-
-
-def _traces_from_events(events: Iterable[TraceEvent]) -> list[LoadedTrace]:
-    """Group already parsed events without reading their JSONL store again."""
-
-    events_by_trace_id: dict[str, list[TraceEvent]] = {}
-    for event in events:
-        events_by_trace_id.setdefault(event.trace_id, []).append(event)
-
-    traces: list[LoadedTrace] = []
-    for trace_id, trace_events in events_by_trace_id.items():
-        depths = _event_depths(trace_events)
-        sorted_events = sorted(trace_events, key=lambda event: _event_sort_key(event, depths[event.id]))
-        root = next((event for event in sorted_events if event.type == "trace" and event.id == trace_id), None)
-        if root is None:
-            continue
-        traces.append(
-            LoadedTrace(
-                id=trace_id,
-                name=root.name,
-                start_time=root.start_time,
-                end_time=root.end_time,
-                status=root.status,
-                events=sorted_events,
-                root=root,
-            )
-        )
-    return sorted(traces, key=lambda trace: trace.start_time)
+    return _storage_helpers.load_traces(
+        path,
+        include_rotated=include_rotated,
+        default_path=_config.trace_path,
+    )
 
 
 def send_events(
@@ -816,292 +607,17 @@ def _post_loaded_event_batches(
     return SendEventsResult(accepted=accepted, event_ids=event_ids, attempted=attempted)
 
 
-def _send_with_retry(operation: Callable[[], T], *, retries: int, backoff: float) -> T:
-    """Run ``operation`` and retry transient send failures with exponential backoff.
+def _events_for_sending(
+    path: str | Path | None = None,
+    *,
+    include_rotated: bool = False,
+) -> list[TraceEvent]:
+    """Order local events for upload: complete traces root-first, then orphans."""
 
-    A transient failure (network error, timeout, or HTTP 5xx) is raised by the
-    callers as :class:`_TransientSendError` and retried up to ``retries`` times,
-    sleeping ``backoff * 2**attempt`` seconds before each retry. Permanent failures
-    (HTTP 4xx, raised as ``RuntimeError``) propagate immediately. When the retries
-    are exhausted the failure is surfaced as ``RuntimeError`` so callers see the
-    same exception type a single failed attempt raises.
-    """
-
-    attempt = 0
-    while True:
-        try:
-            return operation()
-        except _TransientSendError as exc:
-            if attempt >= retries:
-                raise RuntimeError(str(exc)) from exc.cause
-            time.sleep(backoff * (2**attempt))
-            attempt += 1
-
-
-def _events_for_sending(path: str | Path | None = None, *, include_rotated: bool = False) -> list[TraceEvent]:
-    """Order local events for upload: complete traces root-first, then orphans.
-
-    Events are deduplicated by ID, so a rotated file that overlaps the active file
-    (for example a copied backup) still uploads each event once. Orphan events
-    whose trace root is missing are kept rather than dropped. With
-    ``include_rotated=True`` the active file and its size-rotated siblings are read
-    oldest-first, preserving write-order chronology across files.
-    """
-
-    events = load_events(path, include_rotated=include_rotated)
-    traces = _traces_from_events(events)
-    ordered_events: list[TraceEvent] = []
-    ordered_event_ids: set[str] = set()
-
-    for trace in traces:
-        for event in trace.events:
-            if event.id in ordered_event_ids:
-                continue
-            ordered_events.append(event)
-            ordered_event_ids.add(event.id)
-
-    for event in events:
-        if event.id in ordered_event_ids:
-            continue
-        ordered_events.append(event)
-        ordered_event_ids.add(event.id)
-    return ordered_events
-
-
-def _iter_event_batches(events: Iterable[TraceEvent], batch_size: int) -> Iterator[list[TraceEvent]]:
-    """Yield ordered event batches containing at most ``batch_size`` items."""
-
-    batch_size = _validate_positive_int(batch_size, "batch_size")
-
-    batch: list[TraceEvent] = []
-    for event in events:
-        batch.append(event)
-        if len(batch) == batch_size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
-
-
-class _UploadEventSpool:
-    """Disk-backed deduplication and upload ordering for parsed events."""
-
-    def __init__(self) -> None:
-        self.database_path: Path | None = None
-        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
-        self._connection: sqlite3.Connection | None = None
-        self._active_cursors: set[sqlite3.Cursor] = set()
-
-    def __enter__(self) -> _UploadEventSpool:
-        if self._connection is not None:
-            raise RuntimeError("upload event spool is already open")
-
-        temporary_directory = tempfile.TemporaryDirectory(prefix="bir-upload-spool-")
-        database_path = Path(temporary_directory.name) / "events.sqlite3"
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = sqlite3.connect(database_path)
-            connection.execute("PRAGMA journal_mode = OFF")
-            connection.execute("PRAGMA synchronous = OFF")
-            connection.execute("PRAGMA temp_store = FILE")
-            connection.execute("PRAGMA cache_size = -2048")
-            connection.executescript(
-                """
-                CREATE TABLE events (
-                    sequence INTEGER PRIMARY KEY,
-                    event_id TEXT NOT NULL UNIQUE,
-                    trace_id TEXT NOT NULL,
-                    parent_id TEXT,
-                    event_type TEXT NOT NULL,
-                    start_time TEXT NOT NULL,
-                    end_time TEXT NOT NULL,
-                    priority INTEGER NOT NULL,
-                    depth INTEGER NOT NULL DEFAULT 0,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX events_trace_id ON events(trace_id);
-                """
-            )
-        except BaseException:
-            try:
-                if connection is not None:
-                    connection.close()
-            finally:
-                temporary_directory.cleanup()
-            raise
-
-        assert connection is not None
-        self.database_path = database_path
-        self._temporary_directory = temporary_directory
-        self._connection = connection
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        connection = self._connection
-        temporary_directory = self._temporary_directory
-        self._connection = None
-        self._temporary_directory = None
-        try:
-            for cursor in tuple(self._active_cursors):
-                self._close_cursor(cursor)
-            if connection is not None:
-                connection.close()
-        finally:
-            if temporary_directory is not None:
-                temporary_directory.cleanup()
-
-    def add_events(self, events: Iterable[TraceEvent]) -> None:
-        """Stream events into the spool, retaining the first occurrence of each ID."""
-
-        connection = self._require_connection()
-        for sequence, event in enumerate(events):
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO events (
-                    sequence, event_id, trace_id, parent_id, event_type,
-                    start_time, end_time, priority, payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sequence,
-                    event.id,
-                    event.trace_id,
-                    event.parent_id,
-                    event.type,
-                    event.start_time,
-                    event.end_time,
-                    _EVENT_SORT_PRIORITY.get(event.type, 99),
-                    json.dumps(event.raw, sort_keys=True, separators=(",", ":"), allow_nan=False),
-                ),
-            )
-            if (sequence + 1) % 1000 == 0:
-                connection.commit()
-        connection.commit()
-        self._populate_depths()
-
-    def iter_ordered_events(self) -> Iterator[TraceEvent]:
-        """Yield complete traces root-first, followed by rootless events."""
-
-        connection = self._require_connection()
-        complete_trace_rows = connection.execute(
-            """
-            SELECT event.payload, event.sequence
-            FROM events AS event
-            JOIN events AS root
-              ON root.trace_id = event.trace_id
-             AND root.event_id = event.trace_id
-             AND root.event_type = 'trace'
-            JOIN (
-                SELECT trace_id, MIN(sequence) AS first_sequence
-                FROM events
-                GROUP BY trace_id
-            ) AS first_seen ON first_seen.trace_id = event.trace_id
-            ORDER BY
-                root.start_time,
-                first_seen.first_sequence,
-                event.start_time,
-                event.priority,
-                event.depth,
-                event.end_time,
-                event.sequence
-            """
-        )
-        self._active_cursors.add(complete_trace_rows)
-        try:
-            for payload_text, sequence in complete_trace_rows:
-                yield self._event_from_payload_text(payload_text, sequence)
-        finally:
-            self._close_cursor(complete_trace_rows)
-
-        orphan_rows = connection.execute(
-            """
-            SELECT event.payload, event.sequence
-            FROM events AS event
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM events AS root
-                WHERE root.trace_id = event.trace_id
-                  AND root.event_id = event.trace_id
-                  AND root.event_type = 'trace'
-            )
-            ORDER BY event.sequence
-            """
-        )
-        self._active_cursors.add(orphan_rows)
-        try:
-            for payload_text, sequence in orphan_rows:
-                yield self._event_from_payload_text(payload_text, sequence)
-        finally:
-            self._close_cursor(orphan_rows)
-
-    def _close_cursor(self, cursor: sqlite3.Cursor) -> None:
-        """Close one tracked iterator cursor, tolerating repeated cleanup."""
-
-        self._active_cursors.discard(cursor)
-        try:
-            cursor.close()
-        except sqlite3.Error:
-            # ``__exit__`` may close a cursor while its generator is suspended;
-            # the generator's eventual ``finally`` then reaches this a second
-            # time. The cursor is already closed, which is the desired state.
-            pass
-
-    def _populate_depths(self) -> None:
-        connection = self._require_connection()
-        last_sequence = -1
-        while True:
-            rows = connection.execute(
-                """
-                SELECT sequence, event_id, trace_id, parent_id
-                FROM events
-                WHERE sequence > ?
-                ORDER BY sequence
-                LIMIT 1000
-                """,
-                (last_sequence,),
-            ).fetchall()
-            if not rows:
-                break
-            for sequence, event_id, trace_id, parent_id in rows:
-                depth = self._event_depth(event_id, trace_id, parent_id)
-                connection.execute("UPDATE events SET depth = ? WHERE sequence = ?", (depth, sequence))
-            connection.commit()
-            last_sequence = rows[-1][0]
-
-    def _event_depth(self, event_id: str, trace_id: str, parent_id: str | None) -> int:
-        connection = self._require_connection()
-        depth = 0
-        seen = {event_id}
-        while parent_id is not None and parent_id not in seen:
-            parent = connection.execute(
-                "SELECT parent_id FROM events WHERE event_id = ? AND trace_id = ?",
-                (parent_id, trace_id),
-            ).fetchone()
-            if parent is None:
-                break
-            seen.add(parent_id)
-            depth += 1
-            parent_id = parent[0]
-        return depth
-
-    def _event_from_payload_text(self, payload_text: str, sequence: int) -> TraceEvent:
-        payload = json.loads(payload_text)
-        if not isinstance(payload, dict):
-            raise RuntimeError("upload event spool contains a non-object payload")
-        database_path = self.database_path
-        if database_path is None:
-            raise RuntimeError("upload event spool is not open")
-        return _trace_event_from_payload(payload, trace_path=database_path, line_number=sequence + 1)
-
-    def _require_connection(self) -> sqlite3.Connection:
-        if self._connection is None:
-            raise RuntimeError("upload event spool is not open")
-        return self._connection
+    # Keep reads routed through this module's streaming wrapper so integrations
+    # that instrument the established private seam still observe one store pass.
+    events = _iter_trace_events(path, include_rotated=include_rotated)
+    return _storage_helpers._order_events_for_sending(events)
 
 
 def observe(
@@ -2351,480 +1867,26 @@ def _service_metadata() -> dict[str, str] | None:
 
 
 def _write_event(event: dict[str, Any]) -> None:
-    # The master ``enabled`` switch short-circuits every write, so disabling
-    # recording mid-trace (an incident toggle) stops even a trace that was
-    # already sampled in, and any direct writer (``score``) is covered too.
-    if not _config.enabled:
+    # The master switch and root sampling decision remain lifecycle concerns.
+    if not _config.enabled or _current_trace_dropped.get():
         return
-    # Child events (spans, generations, tool calls, scores) run while the root's
-    # contextvar is still active, so dropping them is centralized here. Trace
-    # roots reset their contextvars before writing, so they check their own
-    # stored decision instead and never reach this guard while dropped.
-    if _current_trace_dropped.get():
-        return
-    payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
-    with _write_lock:
-        trace_path = _config.trace_path
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with _InterProcessFileLock(trace_path):
-            _rotate_trace_file_if_needed(trace_path, payload)
-            with trace_path.open("a", encoding="utf-8") as trace_file:
-                trace_file.write(payload)
+    _storage_helpers._append_event(
+        event,
+        trace_path=_config.trace_path,
+        max_bytes=_config.max_bytes,
+        backup_count=_config.backup_count,
+    )
 
 
 def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
-    """Rotate the active trace file before a write that would exceed ``max_bytes``.
+    """Rotate the active trace file before a write that would exceed its cap."""
 
-    A no-op unless ``max_bytes`` is configured. Rotation is decided on the
-    already-complete active file (every prior write ended on a newline), so files
-    only ever break on whole-line boundaries. The incoming line is never split:
-    when an empty active file is about to receive a line larger than the cap, the
-    line is still written whole rather than rotated away. Must be called while
-    holding both ``_write_lock`` and the trace path's process lock.
-    """
-
-    max_bytes = _config.max_bytes
-    if max_bytes is None:
-        return
-    try:
-        current_size = trace_path.stat().st_size
-    except FileNotFoundError:
-        return
-    if current_size == 0:
-        return
-    if current_size + len(payload.encode("utf-8")) <= max_bytes:
-        return
-    _rotate_trace_files(trace_path, _config.backup_count)
-
-
-def _rotate_trace_files(trace_path: Path, backup_count: int) -> None:
-    """Shift ``traces.jsonl`` -> ``.1`` -> ``.2`` .., dropping the oldest.
-
-    ``Path.replace`` overwrites its destination atomically, so shifting ``.k``
-    onto ``.k+1`` discards the previous oldest backup and keeps at most
-    ``backup_count`` rotated files. ``backup_count == 0`` keeps none and just
-    drops the filled active file.
-    """
-
-    if backup_count <= 0:
-        trace_path.unlink(missing_ok=True)
-        return
-    for index in range(backup_count - 1, 0, -1):
-        source = trace_path.with_name(f"{trace_path.name}.{index}")
-        if source.exists():
-            source.replace(trace_path.with_name(f"{trace_path.name}.{index + 1}"))
-    trace_path.replace(trace_path.with_name(f"{trace_path.name}.1"))
-
-
-@dataclass(frozen=True)
-class _PruneResult:
-    """Outcome of a :func:`_prune_trace_store` call.
-
-    ``removed_traces``/``kept_traces`` count whole traces; ``removed_events`` is
-    the number of event lines dropped and ``bytes_reclaimed`` the on-disk bytes
-    freed. ``dry_run`` is True when selection ran but nothing was written, so the
-    counts describe what *would* be removed.
-    """
-
-    removed_traces: int
-    kept_traces: int
-    removed_events: int
-    bytes_reclaimed: int
-    dry_run: bool
-
-
-@dataclass(frozen=True)
-class _PruneTraceSelection:
-    """Counts produced by disk-backed prune selection."""
-
-    removed_traces: int
-    kept_traces: int
-
-
-def _trace_starts_before(start_time: str, cutoff: datetime) -> bool:
-    """Return True when ``start_time`` precedes ``cutoff``, comparing both in UTC.
-
-    Trace start times are recorded in UTC; a naive ``start_time`` is treated as UTC
-    so it compares against the (already UTC-normalized) cutoff without raising.
-    """
-
-    start = datetime.fromisoformat(start_time)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    else:
-        start = start.astimezone(timezone.utc)
-    return start < cutoff
-
-
-def _prune_trace_id_key(trace_id: str) -> bytes:
-    """Encode a trace ID losslessly for SQLite equality membership.
-
-    JSON strings may contain escaped lone surrogates. Public loaders preserve
-    those strings, while SQLite cannot bind them as TEXT, so prune stores IDs as
-    BLOB keys using ``surrogatepass`` to keep the historical accepted input
-    domain unchanged.
-    """
-
-    return trace_id.encode("utf-8", errors="surrogatepass")
-
-
-class _PruneTraceIndex:
-    """Disk-backed trace summaries for bounded-memory prune selection.
-
-    Every event contributes only its trace's first-seen sequence; complete trace
-    roots additionally contribute the fields prune filters need. Rootless event
-    groups remain absent from selection, matching :func:`load_traces`. Multiple
-    roots for one trace retain the same root that the in-memory event sort would
-    choose: earliest ``start_time``, then earliest ``end_time``, then input order.
-
-    The selected IDs remain in SQLite while :func:`_prune_trace_store` streams
-    every source file, so neither selection nor rewrite materializes a collection
-    proportional to the store's trace or event count in Python memory.
-    """
-
-    def __init__(self) -> None:
-        self.database_path: Path | None = None
-        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
-        self._connection: sqlite3.Connection | None = None
-
-    def __enter__(self) -> _PruneTraceIndex:
-        if self._connection is not None:
-            raise RuntimeError("prune trace index is already open")
-
-        temporary_directory = tempfile.TemporaryDirectory(prefix="bir-prune-index-")
-        database_path = Path(temporary_directory.name) / "traces.sqlite3"
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = sqlite3.connect(database_path)
-            connection.execute("PRAGMA journal_mode = OFF")
-            connection.execute("PRAGMA synchronous = OFF")
-            connection.execute("PRAGMA temp_store = FILE")
-            connection.execute("PRAGMA cache_size = -2048")
-            connection.executescript(
-                """
-                CREATE TABLE trace_summaries (
-                    trace_id BLOB PRIMARY KEY,
-                    first_sequence INTEGER NOT NULL,
-                    root_sequence INTEGER,
-                    start_time TEXT,
-                    end_time TEXT,
-                    status TEXT
-                );
-                CREATE INDEX complete_trace_order
-                    ON trace_summaries(start_time DESC, first_sequence ASC)
-                    WHERE root_sequence IS NOT NULL;
-                CREATE TABLE removed_trace_ids (
-                    trace_id BLOB PRIMARY KEY
-                ) WITHOUT ROWID;
-                """
-            )
-        except BaseException:
-            # Best-effort cleanup must never replace the construction failure that
-            # explains why the index could not be created.
-            try:
-                if connection is not None:
-                    connection.close()
-            except BaseException:
-                pass
-            try:
-                temporary_directory.cleanup()
-            except BaseException:
-                pass
-            raise
-
-        assert connection is not None
-        self.database_path = database_path
-        self._temporary_directory = temporary_directory
-        self._connection = connection
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        connection = self._connection
-        temporary_directory = self._temporary_directory
-        self._connection = None
-        self._temporary_directory = None
-        cleanup_error: BaseException | None = None
-        try:
-            if connection is not None:
-                connection.close()
-        except BaseException as error:
-            cleanup_error = error
-        try:
-            if temporary_directory is not None:
-                temporary_directory.cleanup()
-        except BaseException as error:
-            if cleanup_error is None:
-                cleanup_error = error
-
-        # If selection, parsing, or staging is already failing, keep that original
-        # exception visible. With a successful body, a cleanup error still
-        # surfaces so callers do not silently leak the temporary index.
-        if exc_type is None and cleanup_error is not None:
-            raise cleanup_error
-
-    def add_events(self, events: Iterable[TraceEvent]) -> None:
-        """Stream events into one summary row per seen trace ID."""
-
-        connection = self._require_connection()
-        for sequence, event in enumerate(events):
-            trace_id_key = _prune_trace_id_key(event.trace_id)
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO trace_summaries (trace_id, first_sequence)
-                VALUES (?, ?)
-                """,
-                (trace_id_key, sequence),
-            )
-            if event.type == "trace" and event.id == event.trace_id:
-                connection.execute(
-                    """
-                    UPDATE trace_summaries
-                    SET root_sequence = ?, start_time = ?, end_time = ?, status = ?
-                    WHERE trace_id = ? AND (
-                        root_sequence IS NULL
-                        OR start_time > ?
-                        OR (start_time = ? AND end_time > ?)
-                    )
-                    """,
-                    (
-                        sequence,
-                        event.start_time,
-                        event.end_time,
-                        event.status,
-                        trace_id_key,
-                        event.start_time,
-                        event.start_time,
-                        event.end_time,
-                    ),
-                )
-            if (sequence + 1) % 1000 == 0:
-                connection.commit()
-        connection.commit()
-
-    def count_traces(self) -> int:
-        """Return the number of complete traces represented by the index."""
-
-        row = (
-            self._require_connection()
-            .execute("SELECT COUNT(*) FROM trace_summaries WHERE root_sequence IS NOT NULL")
-            .fetchone()
-        )
-        assert row is not None
-        return int(row[0])
-
-    def select_removed_traces(
-        self,
-        *,
-        before: datetime | None,
-        keep_last: int | None,
-        status: str | None,
-    ) -> _PruneTraceSelection:
-        """Persist selected trace IDs and return their counts.
-
-        Selection matches :func:`_select_removed_trace_ids`, but IDs stay in the
-        SQLite index instead of being materialized as a Python set. Each call
-        replaces the prior selection so the same index can evaluate multiple
-        filter combinations with a bounded working set.
-        """
-
-        connection = self._require_connection()
-        try:
-            connection.execute("DELETE FROM removed_trace_ids")
-            rows = connection.execute(
-                """
-                SELECT trace_id, start_time, status, recency_rank
-                FROM (
-                    SELECT
-                        trace_id,
-                        first_sequence,
-                        start_time,
-                        status,
-                        ROW_NUMBER() OVER (
-                            ORDER BY start_time DESC, first_sequence ASC
-                        ) AS recency_rank
-                    FROM trace_summaries
-                    WHERE root_sequence IS NOT NULL
-                )
-                ORDER BY start_time ASC, first_sequence ASC
-                """
-            )
-            try:
-                has_selector = before is not None or keep_last is not None
-                for trace_id, start_time, trace_status, recency_rank in rows:
-                    if status is not None and trace_status != status:
-                        continue
-                    if (
-                        not has_selector
-                        or (before is not None and _trace_starts_before(str(start_time), before))
-                        or (keep_last is not None and int(recency_rank) > keep_last)
-                    ):
-                        connection.execute(
-                            "INSERT INTO removed_trace_ids (trace_id) VALUES (?)",
-                            (trace_id,),
-                        )
-            except BaseException:
-                try:
-                    rows.close()
-                except BaseException:
-                    pass
-                raise
-            else:
-                rows.close()
-
-            removed_row = connection.execute("SELECT COUNT(*) FROM removed_trace_ids").fetchone()
-            total_row = connection.execute(
-                "SELECT COUNT(*) FROM trace_summaries WHERE root_sequence IS NOT NULL"
-            ).fetchone()
-            assert removed_row is not None
-            assert total_row is not None
-            removed_traces = int(removed_row[0])
-            total_traces = int(total_row[0])
-            connection.commit()
-        except BaseException:
-            try:
-                connection.rollback()
-            except BaseException:
-                pass
-            raise
-
-        return _PruneTraceSelection(
-            removed_traces=removed_traces,
-            kept_traces=total_traces - removed_traces,
-        )
-
-    def is_removed(self, trace_id: str) -> bool:
-        """Return whether ``trace_id`` belongs to the current selection."""
-
-        row = (
-            self._require_connection()
-            .execute(
-                "SELECT 1 FROM removed_trace_ids WHERE trace_id = ?",
-                (_prune_trace_id_key(trace_id),),
-            )
-            .fetchone()
-        )
-        return row is not None
-
-    def _require_connection(self) -> sqlite3.Connection:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("prune trace index is not open")
-        return connection
-
-
-def _select_removed_trace_ids(
-    traces: list[LoadedTrace],
-    *,
-    before: datetime | None,
-    keep_last: int | None,
-    status: str | None,
-) -> set[str]:
-    """Choose the trace ids to drop from ``traces`` for the given prune filters.
-
-    ``before`` selects traces whose start time precedes the cutoff; ``keep_last``
-    selects every trace except the ``N`` most recent (by start time); ``status``
-    restricts removal to traces with that exact status. The ``before`` and
-    ``keep_last`` selectors combine by union — a trace is removed when it matches
-    any active selector — and the ``status`` restriction is applied last, so a
-    trace is removed only when it also matches ``status``. When neither ``before``
-    nor ``keep_last`` is given, every trace matching ``status`` is removed. Returns
-    an empty set when nothing matches.
-    """
-
-    beyond_keep_last: set[str] = set()
-    if keep_last is not None:
-        by_recent = sorted(traces, key=lambda trace: trace.start_time, reverse=True)
-        beyond_keep_last = {trace.id for trace in by_recent[keep_last:]}
-
-    has_selector = before is not None or keep_last is not None
-    removed: set[str] = set()
-    for trace in traces:
-        if status is not None and trace.status != status:
-            continue
-        if not has_selector:
-            removed.add(trace.id)
-        elif before is not None and _trace_starts_before(trace.start_time, before):
-            removed.add(trace.id)
-        elif keep_last is not None and trace.id in beyond_keep_last:
-            removed.add(trace.id)
-    return removed
-
-
-def _stream_filtered_trace_file(
-    file_path: Path,
-    is_removed: Callable[[str], bool],
-    destination: IO[bytes] | None,
-) -> tuple[int, int]:
-    """Stream surviving normalized lines to ``destination`` and return counts.
-
-    ``destination=None`` is the dry-run path: input is still scanned and the
-    exact normalized output byte count is computed, but no staging file is
-    created. Keeping only the current input line and encoded output line bounds
-    rewrite memory independently of the trace file size.
-    """
-
-    removed_events = 0
-    kept_bytes = 0
-    with file_path.open("r", encoding="utf-8") as trace_file:
-        for line in trace_file:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            trace_id = json.loads(stripped).get("trace_id")
-            if isinstance(trace_id, str) and is_removed(trace_id):
-                removed_events += 1
-                continue
-            normalized_line = (stripped + "\n").encode("utf-8")
-            kept_bytes += len(normalized_line)
-            if destination is not None:
-                destination.write(normalized_line)
-    return removed_events, kept_bytes
-
-
-def _stage_filtered_trace_file(
-    file_path: Path,
-    is_removed: Callable[[str], bool],
-    *,
-    dry_run: bool,
-) -> tuple[Path | None, int, int]:
-    """Stage one filtered trace file without accumulating surviving lines.
-
-    Returns the staging path (``None`` for dry runs or unchanged files), removed
-    event count, and reclaimed byte count. A staging failure removes its partial
-    temp file before propagating, leaving the original untouched.
-    """
-
-    temp_path = None
-    try:
-        if dry_run:
-            removed_events, kept_bytes = _stream_filtered_trace_file(file_path, is_removed, None)
-        else:
-            temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            with temp_path.open("xb") as staged_file:
-                removed_events, kept_bytes = _stream_filtered_trace_file(
-                    file_path,
-                    is_removed,
-                    staged_file,
-                )
-        if removed_events == 0:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
-            return None, 0, 0
-        source_bytes = file_path.stat().st_size
-    except BaseException:
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except BaseException:
-                pass
-        raise
-
-    return temp_path, removed_events, source_bytes - kept_bytes
+    _storage_helpers._rotate_trace_file_if_needed(
+        trace_path,
+        payload,
+        max_bytes=_config.max_bytes,
+        backup_count=_config.backup_count,
+    )
 
 
 def _prune_trace_store(
@@ -2836,446 +1898,23 @@ def _prune_trace_store(
     status: str | None = None,
     dry_run: bool = False,
 ) -> _PruneResult:
-    """Remove whole traces from the local store, serialized against appends.
+    """Remove whole traces from the local store, serialized against appends."""
 
-    Streams validated events into a temporary SQLite trace index, persists the
-    selected trace IDs there, then rewrites each affected trace file using
-    disk-backed point membership checks. Keying the rewrite on the removed IDs
-    means a trace is never split across the keep/drop boundary and orphan events
-    whose root is unread (for example split into a rotated file not being pruned)
-    are preserved rather than dropped.
-
-    The load, selection, and rewrite all run while holding the in-process
-    ``_write_lock`` and the trace path's :class:`_InterProcessFileLock` — the same
-    locks an append takes — so a concurrent writer can never interleave. Each file
-    is rewritten via a sibling temp file and an atomic ``replace``, so a failure
-    leaves the original file intact. With ``dry_run`` the selection and counts are
-    computed but nothing is written. Only the active file is rewritten unless
-    ``include_rotated`` is set, matching the loaders' default scope.
-    """
-
-    trace_path = Path(path) if path is not None else _config.trace_path
-    candidate_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
-    # An empty store has nothing to lock or rewrite; short-circuit so a prune of a
-    # never-written store does not create the directory or lock file as a side effect.
-    if not any(file_path.exists() for file_path in candidate_files):
-        return _PruneResult(0, 0, 0, 0, dry_run)
-
-    with _write_lock:
-        with _InterProcessFileLock(trace_path):
-            with _PruneTraceIndex() as index:
-                index.add_events(_iter_trace_events(trace_path, include_rotated=include_rotated))
-                selection = index.select_removed_traces(before=before, keep_last=keep_last, status=status)
-                if selection.removed_traces == 0:
-                    return _PruneResult(0, selection.kept_traces, 0, 0, dry_run)
-
-                files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
-                removed_events = 0
-                bytes_reclaimed = 0
-                staged: list[tuple[Path, Path]] = []
-                try:
-                    for file_path in files:
-                        if not file_path.exists():
-                            continue
-                        temp_path, file_removed_events, reclaimed_bytes = _stage_filtered_trace_file(
-                            file_path,
-                            index.is_removed,
-                            dry_run=dry_run,
-                        )
-                        if file_removed_events == 0:
-                            continue
-                        removed_events += file_removed_events
-                        bytes_reclaimed += reclaimed_bytes
-                        if dry_run:
-                            continue
-                        assert temp_path is not None
-                        staged.append((temp_path, file_path))
-                    # Write every temp file before replacing any so the
-                    # failure-prone step is done up front; an error here leaves
-                    # all originals intact.
-                    for temp_path, target_path in staged:
-                        temp_path.replace(target_path)
-                except BaseException:
-                    for temp_path, _ in staged:
-                        try:
-                            temp_path.unlink(missing_ok=True)
-                        except BaseException:
-                            # A cleanup failure must not replace a selection,
-                            # parsing, staging, or replacement exception.
-                            pass
-                    raise
-                else:
-                    for temp_path, _ in staged:
-                        temp_path.unlink(missing_ok=True)
-
-                return _PruneResult(
-                    removed_traces=selection.removed_traces,
-                    kept_traces=selection.kept_traces,
-                    removed_events=removed_events,
-                    bytes_reclaimed=bytes_reclaimed,
-                    dry_run=dry_run,
-                )
-
-
-def _events_endpoint(server_url: str) -> str:
-    normalized_url = server_url.rstrip("/")
-    if not normalized_url:
-        raise ValueError("bir server_url must not be empty")
-    return f"{normalized_url}/v1/events"
-
-
-class _TransientSendError(Exception):
-    """Internal signal that a send attempt failed transiently and may be retried.
-
-    Carries the original cause so :func:`_send_with_retry` can chain it when the
-    retries are exhausted and the failure is re-raised as a ``RuntimeError``.
-    """
-
-    def __init__(self, message: str, *, cause: BaseException) -> None:
-        super().__init__(message)
-        self.cause = cause
-
-
-def _is_retryable_status(status: int) -> bool:
-    """Return True for HTTP 5xx, the only status codes worth retrying."""
-
-    return 500 <= status < 600
-
-
-def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
-    """Read and close an HTTP error response without leaking its file object."""
-
-    try:
-        return exc.read().decode("utf-8", errors="replace")
-    finally:
-        exc.close()
-
-
-def _post_event_batch(
-    endpoint: str,
-    events: list[dict[str, Any]],
-    *,
-    timeout: float,
-) -> SendEventsResult | None:
-    """Post all events in one request; return None when the server has no batch endpoint."""
-
-    payload = json.dumps(events, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return _storage_helpers._prune_trace_store(
+        path,
+        default_path=_config.trace_path,
+        include_rotated=include_rotated,
+        before=before,
+        keep_last=keep_last,
+        status=status,
+        dry_run=dry_run,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.status
-            body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            exc.close()
-            return None
-        body = _read_http_error_body(exc)
-        message = f"bir server rejected event batch with HTTP {exc.code}: {body}"
-        if _is_retryable_status(exc.code):
-            raise _TransientSendError(message, cause=exc) from exc
-        raise RuntimeError(message) from exc
-    except urllib.error.URLError as exc:
-        raise _TransientSendError(f"bir could not send events to {endpoint}: {exc.reason}", cause=exc) from exc
-    except TimeoutError as exc:
-        # A socket read timeout surfaces as TimeoutError rather than URLError.
-        raise _TransientSendError(f"bir could not send events to {endpoint}: {exc}", cause=exc) from exc
-
-    if status < 200 or status >= 300:
-        raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {body}")
-    return _batch_result_from_response(body, attempted=len(events))
-
-
-def _batch_result_from_response(body: str, *, attempted: int) -> SendEventsResult:
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}") from exc
-    if not isinstance(payload, Mapping):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
-    accepted = payload.get("accepted")
-    event_ids = payload.get("event_ids")
-    if isinstance(accepted, bool) or not isinstance(accepted, int):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
-    if not isinstance(event_ids, list) or not all(isinstance(event_id, str) for event_id in event_ids):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
-    return SendEventsResult(accepted=accepted, event_ids=list(event_ids), attempted=attempted)
-
-
-def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> int:
-    payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.status
-            body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        body = _read_http_error_body(exc)
-        message = f"bir server rejected event with HTTP {exc.code}: {body}"
-        if _is_retryable_status(exc.code):
-            raise _TransientSendError(message, cause=exc) from exc
-        raise RuntimeError(message) from exc
-    except urllib.error.URLError as exc:
-        raise _TransientSendError(f"bir could not send event to {endpoint}: {exc.reason}", cause=exc) from exc
-    except TimeoutError as exc:
-        # A socket read timeout surfaces as TimeoutError rather than URLError.
-        raise _TransientSendError(f"bir could not send event to {endpoint}: {exc}", cause=exc) from exc
-
-    if status < 200 or status >= 300:
-        raise RuntimeError(f"bir server rejected event with HTTP {status}: {body}")
-    return _accepted_count_from_response(body)
-
-
-def _accepted_count_from_response(body: str) -> int:
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return 1
-    if not isinstance(payload, Mapping):
-        return 1
-    accepted = payload.get("accepted")
-    if isinstance(accepted, int) and not isinstance(accepted, bool):
-        return accepted
-    return 1
 
 
 def _sent_ids_path(path: str | Path | None) -> Path:
-    """Return the sidecar path that records IDs the server has already accepted.
+    """Return the sidecar path that records IDs the server has already accepted."""
 
-    The sidecar lives next to the trace file being sent (``<trace_path>.sent``).
-    ``path`` is resolved the same way :func:`load_events` resolves it so a custom
-    ``send_events(path=...)`` records against the matching file. The ``.sent``
-    suffix is non-numeric, so size-based rotation (which only shifts ``.1`` ..
-    ``.N`` siblings) never touches it.
-    """
-
-    trace_path = Path(path) if path is not None else _config.trace_path
-    return trace_path.with_name(trace_path.name + _SENT_IDS_SUFFIX)
-
-
-def _load_sent_ids(sent_ids_path: Path) -> set[str]:
-    """Load the set of already-sent event IDs from the sidecar.
-
-    Bookkeeping must never block a send, so a missing, unreadable, or malformed
-    sidecar is treated as empty: the worst case is re-sending events the
-    idempotent server already has, exactly as a send without ``mark_sent`` would.
-    """
-
-    try:
-        raw = sent_ids_path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return set()
-    if not isinstance(payload, Mapping):
-        return set()
-    event_ids = payload.get("event_ids")
-    if not isinstance(event_ids, list):
-        return set()
-    return {event_id for event_id in event_ids if isinstance(event_id, str)}
-
-
-def _record_sent_ids(sent_ids_path: Path, event_ids: list[str]) -> None:
-    """Merge ``event_ids`` into the sidecar of already-sent IDs.
-
-    Writes the union of the previously recorded IDs and the newly accepted ones
-    through a temp-file replace so a crash mid-write cannot corrupt the sidecar.
-    Only ever touches ``<trace_path>.sent`` — the trace JSONL is never modified.
-    """
-
-    sent_ids_path.parent.mkdir(parents=True, exist_ok=True)
-    with _sent_ids_lock:
-        with _InterProcessFileLock(sent_ids_path):
-            merged = _load_sent_ids(sent_ids_path)
-            merged.update(event_ids)
-            payload = json.dumps({"event_ids": sorted(merged)}, separators=(",", ":")) + "\n"
-            temp_path = sent_ids_path.with_name(f".{sent_ids_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            try:
-                temp_path.write_text(payload, encoding="utf-8")
-                temp_path.replace(sent_ids_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
-
-
-def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:
-    required_fields = (
-        "schema_version",
-        "id",
-        "trace_id",
-        "parent_id",
-        "name",
-        "type",
-        "start_time",
-        "end_time",
-        "status",
-        "metadata",
-        "input",
-        "output",
-        "error",
-    )
-    for field in required_fields:
-        if field not in payload:
-            raise ValueError(f"Trace file {trace_path} line {line_number} is missing required field {field!r}")
-
-    schema_version = _expect_string(payload["schema_version"], "schema_version", trace_path, line_number)
-    if schema_version != _SCHEMA_VERSION:
-        raise ValueError(
-            f"Trace file {trace_path} line {line_number} has unsupported schema_version {schema_version!r}"
-        )
-    event_id = _expect_string(payload["id"], "id", trace_path, line_number)
-    trace_id = _expect_string(payload["trace_id"], "trace_id", trace_path, line_number)
-    parent_id = _expect_optional_string(payload["parent_id"], "parent_id", trace_path, line_number)
-    name = _expect_string(payload["name"], "name", trace_path, line_number)
-    event_type = _expect_string(payload["type"], "type", trace_path, line_number)
-    if event_type not in _EVENT_TYPES:
-        raise ValueError(
-            f"Trace file {trace_path} line {line_number} field 'type' has unsupported value {event_type!r}"
-        )
-    start_time = _expect_datetime_string(payload["start_time"], "start_time", trace_path, line_number)
-    end_time = _expect_datetime_string(payload["end_time"], "end_time", trace_path, line_number)
-    if datetime.fromisoformat(end_time) < datetime.fromisoformat(start_time):
-        raise ValueError(f"Trace file {trace_path} line {line_number} has end_time before start_time")
-    status = _expect_string(payload["status"], "status", trace_path, line_number)
-    if status not in _EVENT_STATUSES:
-        raise ValueError(f"Trace file {trace_path} line {line_number} field 'status' has unsupported value {status!r}")
-    metadata = _expect_mapping(payload["metadata"], "metadata", trace_path, line_number)
-    error = _expect_optional_string(payload["error"], "error", trace_path, line_number)
-    if event_type == "trace" and event_id != trace_id:
-        raise ValueError(f"Trace file {trace_path} line {line_number} trace event id must match trace_id")
-    if event_type == "trace" and parent_id is not None:
-        raise ValueError(f"Trace file {trace_path} line {line_number} trace event parent_id must be null")
-    if event_type != "trace" and parent_id is None:
-        raise ValueError(f"Trace file {trace_path} line {line_number} {event_type} event requires parent_id")
-    event_value = None
-    if event_type == "score":
-        if "value" not in payload:
-            raise ValueError(
-                f"Trace file {trace_path} line {line_number} score event is missing required field 'value'"
-            )
-        event_value = _validate_number(payload["value"], "score value")
-    elif payload.get("value") is not None:
-        event_value = _validate_number(payload["value"], "value")
-    event_model = None
-    if payload.get("model") is not None:
-        event_model = _expect_string(payload["model"], "model", trace_path, line_number)
-    event_usage = None
-    if "usage" in payload:
-        usage = payload["usage"]
-        if usage is not None:
-            if not isinstance(usage, Mapping):
-                raise ValueError(f"Trace file {trace_path} line {line_number} field 'usage' must be an object")
-            event_usage = {}
-            for key, value in usage.items():
-                usage_key = _expect_string(key, "usage key", trace_path, line_number)
-                event_usage[usage_key] = _validate_non_negative_number(value, f"usage.{key}")
-    event_cost = None
-    if "cost" in payload:
-        cost = payload["cost"]
-        if cost is not None:
-            if not isinstance(cost, Mapping):
-                raise ValueError(f"Trace file {trace_path} line {line_number} field 'cost' must be an object")
-            event_cost = {}
-            for key, value in cost.items():
-                cost_key = _expect_string(key, "cost key", trace_path, line_number)
-                event_cost[cost_key] = _validate_non_negative_number(value, f"cost.{cost_key}")
-    event_currency = None
-    if payload.get("currency") is not None:
-        event_currency = _expect_string(payload["currency"], "currency", trace_path, line_number)
-    _validate_json_value(metadata, "metadata", trace_path, line_number)
-    _validate_json_value(payload["input"], "input", trace_path, line_number)
-    _validate_json_value(payload["output"], "output", trace_path, line_number)
-    for key, value in payload.items():
-        _expect_string(key, "event key", trace_path, line_number)
-        if key not in required_fields and key not in {"value", "model", "usage", "cost", "currency"}:
-            _validate_json_value(value, key, trace_path, line_number)
-    raw = {str(key): value for key, value in payload.items()}
-
-    return TraceEvent(
-        id=event_id,
-        trace_id=trace_id,
-        parent_id=parent_id,
-        name=name,
-        type=event_type,
-        start_time=start_time,
-        end_time=end_time,
-        status=status,
-        metadata=metadata,
-        input=payload["input"],
-        output=payload["output"],
-        error=error,
-        raw=raw,
-        value=event_value,
-        model=event_model,
-        usage=event_usage,
-        cost=event_cost,
-        currency=event_currency,
-    )
-
-
-def _expect_string(value: Any, field: str, trace_path: Path, line_number: int) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be a string")
-    return value
-
-
-def _expect_optional_string(value: Any, field: str, trace_path: Path, line_number: int) -> str | None:
-    if value is None:
-        return None
-    return _expect_string(value, field, trace_path, line_number)
-
-
-def _expect_datetime_string(value: Any, field: str, trace_path: Path, line_number: int) -> str:
-    timestamp = _expect_string(value, field, trace_path, line_number)
-    try:
-        datetime.fromisoformat(timestamp)
-    except ValueError as exc:
-        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be an ISO datetime") from exc
-    return timestamp
-
-
-def _expect_mapping(value: Any, field: str, trace_path: Path, line_number: int) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be an object")
-    return {str(key): item for key, item in value.items()}
-
-
-def _validate_json_value(value: Any, field: str, trace_path: Path, line_number: int) -> None:
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float):
-        try:
-            _validate_number(value, field)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be finite") from exc
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate_json_value(item, f"{field}[{index}]", trace_path, line_number)
-        return
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} keys must be strings")
-            _validate_json_value(item, f"{field}.{key}", trace_path, line_number)
-        return
-    raise ValueError(f"Trace file {trace_path} line {line_number} field {field!r} must be JSON-compatible")
-
-
-def _duration_ms(start_time: str, end_time: str) -> float:
-    start = datetime.fromisoformat(start_time)
-    end = datetime.fromisoformat(end_time)
-    return (end - start).total_seconds() * 1000
+    return _storage_helpers._sent_ids_path(path, default_path=_config.trace_path)
 
 
 def _should_capture(override: bool | None, target: str) -> bool:
@@ -3317,517 +1956,67 @@ def _capture_call_input(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
-    bound = signature.bind_partial(*args, **kwargs)
-    bound.apply_defaults()
-    return {name: _safe_capture(value, key=name) for name, value in bound.arguments.items()}
+    return _capture_helpers._capture_call_input(signature, args, kwargs, config=_config)
 
 
 def _safe_capture(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
-    if key is not None and _is_secret_key(key):
-        return _REDACTED
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    if isinstance(value, str):
-        return _truncate_captured_text(_redact_secret_text(value))
-    if isinstance(value, float):
-        return value if math.isfinite(value) else repr(value)
-    if isinstance(value, Path):
-        return _truncate_captured_text(_redact_secret_text(str(value)))
-    if depth >= _MAX_CAPTURE_DEPTH:
-        return _MAX_DEPTH_REACHED
-    if isinstance(value, Mapping):
-        return _capture_mapping(value, depth)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return _capture_sequence(value, depth)
-    return _truncate_captured_text(_safe_repr(value))
+    return _capture_helpers._safe_capture(value, config=_config, key=key, depth=depth)
 
 
 def _truncate_captured_text(text: str) -> str:
-    """Bound an already-redacted captured string to ``max_value_length``.
-
-    Truncation runs only on text that redaction has already processed, so a
-    secret is always replaced before any cut and can never be split in a way
-    that defeats the redactor. With no ``max_value_length`` configured (the
-    default) the text is returned unchanged, so capture stays byte-for-byte
-    identical unless a caller opts in.
-    """
-
-    limit = _config.max_value_length
-    if limit is None or len(text) <= limit:
-        return text
-    return text[:limit] + _TRUNCATED
+    return _capture_helpers._truncate_captured_text(text, config=_config)
 
 
 def _capture_mapping(value: Mapping[Any, Any], depth: int) -> dict[str, Any]:
-    """Capture a mapping, bounding entry count by ``max_collection_items``.
-
-    With no limit configured every entry is captured, matching the historical
-    behavior. When a limit is set and the mapping is larger, only the first that
-    many entries (in iteration order) are kept and a single ``_TRUNCATED``
-    sentinel entry records that the remainder was dropped, keeping the result
-    valid JSON.
-    """
-
-    limit = _config.max_collection_items
-    captured: dict[str, Any] = {}
-    truncated = False
-    for index, (item_key, item_value) in enumerate(value.items()):
-        if limit is not None and index >= limit:
-            truncated = True
-            break
-        item_key_text = _safe_key(item_key)
-        captured[item_key_text] = _safe_capture(item_value, key=item_key_text, depth=depth + 1)
-    if truncated:
-        captured[_TRUNCATED] = _TRUNCATED
-    return captured
+    return _capture_helpers._capture_mapping(value, depth, config=_config)
 
 
 def _capture_sequence(value: Iterable[Any], depth: int) -> list[Any]:
-    """Capture a list/tuple/set, bounding item count by ``max_collection_items``.
-
-    With no limit configured every item is captured, matching the historical
-    behavior. When a limit is set and the sequence is larger, only the first
-    that many items (in iteration order) are kept and a single ``_TRUNCATED``
-    marker element records that the remainder was dropped, keeping the result
-    valid JSON.
-    """
-
-    limit = _config.max_collection_items
-    captured: list[Any] = []
-    truncated = False
-    for index, item in enumerate(value):
-        if limit is not None and index >= limit:
-            truncated = True
-            break
-        captured.append(_safe_capture(item, depth=depth + 1))
-    if truncated:
-        captured.append(_TRUNCATED)
-    return captured
+    return _capture_helpers._capture_sequence(value, depth, config=_config)
 
 
 def _is_secret_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    # The user-supplied ``additional_secret_keys`` are stored already normalized to
-    # this same form, so they join the built-in name set as exact whole-name
-    # matches (never substrings) and can only add coverage, never remove it.
-    if normalized in _SECRET_KEY_NAMES or normalized in _config.additional_secret_keys:
-        return True
-    return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
+    return _capture_helpers._is_secret_key(key, config=_config)
 
 
 def _safe_key(value: Any) -> str:
-    try:
-        return str(value)
-    except Exception:
-        return f"<unrepresentable {type(value).__name__}>"
+    return _capture_helpers._safe_key(value)
 
 
 def _safe_repr(value: Any) -> str:
-    try:
-        return _redact_secret_text(repr(value))
-    except Exception:
-        return f"<unrepresentable {type(value).__name__}>"
+    return _capture_helpers._safe_repr(value, config=_config)
 
 
 def _safe_error(exc: BaseException) -> str:
-    return _redact_secret_text(str(exc))
+    return _capture_helpers._safe_error(exc, config=_config)
 
 
 def _redact_secret_text(value: str) -> str:
-    redacted = value
-    redacted = re.sub(
-        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?(?!\[redacted\])[^\s,;\)\]\}]+",
-        _redact_labeled_secret_match,
-        redacted,
-    )
-    redacted = re.sub(
-        (
-            r"(?i)\b(access[_-]?key|api[_-]?key|apikey|auth|client[_-]?secret|credential|credentials|password|"
-            r"private[_-]?key|secret|token)(\s*[:=]\s*)(?!\[redacted\])(?!\{[A-Za-z_][A-Za-z0-9_]*\})"
-            r"[^\s,;\)\]\}]+"
-        ),
-        _redact_labeled_secret_match,
-        redacted,
-    )
-    redacted = re.sub(
-        r"(?i)\b(bearer\s+)(?!\[redacted\])[^\s,;\)\]\}]+",
-        _redact_bearer_secret_match,
-        redacted,
-    )
-    redacted = re.sub(r"\b(sk-[A-Za-z0-9_-]{4,})\b", _REDACTED, redacted)
-    redacted = re.sub(
-        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
-        _REDACTED,
-        redacted,
-    )
-    redacted = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", _REDACTED, redacted)
-    redacted = re.sub(r"(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", _REDACTED, redacted)
-    redacted = re.sub(r"\bxox[baprs]-[0-9A-Za-z-]+\b", _REDACTED, redacted)
-    redacted = re.sub(r"\b(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}\b", _REDACTED, redacted)
-    # Stripe secret/restricted keys (``sk_live_``/``sk_test_``/``rk_live_``/``rk_test_``).
-    redacted = re.sub(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b", _REDACTED, redacted)
-    # Azure storage-style account keys: a 512-bit key base64-encoded to 88 chars
-    # ending in ``==``. Anchored to that exact length class to avoid over-redaction.
-    redacted = re.sub(r"(?<![0-9A-Za-z+/])[0-9A-Za-z+/]{86}==(?![0-9A-Za-z+/=])", _REDACTED, redacted)
-    # PEM private-key blocks (``-----BEGIN ... PRIVATE KEY-----`` .. ``-----END ...
-    # PRIVATE KEY-----``), spanning lines via a non-greedy DOTALL-scoped match.
-    redacted = re.sub(
-        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-        _REDACTED,
-        redacted,
-    )
-    # Credit-card / PAN numbers: 13-19 digit sequences, optionally split into
-    # groups by single spaces or hyphens, that pass the Luhn checksum. A pure
-    # regex cannot verify Luhn, so the regex only finds candidate digit groups and
-    # the Luhn gate in ``_redact_pan_match`` decides replacement -- a candidate
-    # that fails Luhn (an ordinary long id, a phone number) is left untouched. The
-    # digit-run boundaries (``\b`` plus the {12,18}+1 length) also leave runs of
-    # 20+ digits intact, so this never over-redacts an arbitrary long integer.
-    redacted = re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _redact_pan_match, redacted)
-    # User-supplied patterns run last, in configuration order, and only ever add
-    # redaction on top of the built-in rules above; each replaces its whole match
-    # with the marker. They cannot weaken or bypass any built-in rule.
-    for pattern in _config.additional_redaction_patterns:
-        redacted = pattern.sub(_REDACTED, redacted)
-    return redacted
+    return _capture_helpers._redact_secret_text(value, config=_config)
 
 
 def _redact_labeled_secret_match(match: re.Match[str]) -> str:
-    return f"{match.group(1)}{match.group(2) or ''}{_REDACTED}"
+    return _capture_helpers._redact_labeled_secret_match(match)
 
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:
-    return f"{match.group(1)}{_REDACTED}"
+    return _capture_helpers._redact_bearer_secret_match(match)
 
 
 def _redact_pan_match(match: re.Match[str]) -> str:
-    """Redact a candidate card number only when its digits pass the Luhn check.
-
-    The candidate regex matches a 13-19 digit run (optionally single-space- or
-    hyphen-separated); this gate strips the separators and replaces the whole run
-    with the marker only when the bare digits satisfy the Luhn checksum, so an
-    arbitrary long digit string that happens to match the shape is left intact.
-    """
-
-    candidate = match.group(0)
-    digits = candidate.replace(" ", "").replace("-", "")
-    if 13 <= len(digits) <= 19 and _luhn_checksum_valid(digits):
-        return _REDACTED
-    return candidate
+    return _capture_helpers._redact_pan_match(match)
 
 
 def _luhn_checksum_valid(digits: str) -> bool:
-    """Return whether a bare digit string passes the Luhn (mod-10) checksum.
-
-    ``digits`` must contain only ASCII digits (the caller strips separators).
-    Doubling starts from the second-rightmost digit, matching the standard
-    payment-card Luhn definition.
-    """
-
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = ord(char) - 48
-        if index % 2 == 1:
-            value *= 2
-            if value > 9:
-                value -= 9
-        total += value
-    return total % 10 == 0
-
-
-def _validate_additional_secret_keys(value: Any) -> frozenset[str]:
-    """Validate and normalize the user-supplied extra secret-key names.
-
-    Accepts any non-string iterable of non-empty strings and returns them
-    normalized to the same form the built-in name rule uses (lower-cased with
-    ``-`` treated as ``_``), so matching is exact and case-insensitive. A bare
-    ``str``/``bytes`` is rejected so a single key is never silently iterated
-    character by character. The entry count and per-key length are bounded so a
-    pathologically large configuration fails fast with a clear error.
-    """
-
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        raise TypeError("bir additional_secret_keys must be an iterable of strings")
-    keys = list(value)
-    if len(keys) > _MAX_ADDITIONAL_SECRET_KEYS:
-        raise ValueError(f"bir additional_secret_keys must not exceed {_MAX_ADDITIONAL_SECRET_KEYS} entries")
-    normalized: set[str] = set()
-    for key in keys:
-        if not isinstance(key, str):
-            raise TypeError("bir additional_secret_keys entries must be strings")
-        if not key:
-            raise ValueError("bir additional_secret_keys entries must not be empty")
-        if len(key) > _MAX_ADDITIONAL_SECRET_KEY_LENGTH:
-            raise ValueError(
-                f"bir additional_secret_keys entries must not exceed {_MAX_ADDITIONAL_SECRET_KEY_LENGTH} characters"
-            )
-        normalized.add(key.lower().replace("-", "_"))
-    return frozenset(normalized)
-
-
-def _validate_additional_redaction_patterns(value: Any) -> tuple[re.Pattern[str], ...]:
-    """Validate and compile the user-supplied extra text-redaction patterns.
-
-    Accepts any non-string iterable of regex strings and/or already-compiled
-    ``re.Pattern`` objects, compiling and validating each exactly once here so a
-    bad pattern fails at ``configure`` time rather than on a later capture. The
-    entry count is bounded to reject unboundedly large configuration. The
-    returned patterns run in order, after every built-in rule.
-    """
-
-    if isinstance(value, (str, bytes, re.Pattern)) or not isinstance(value, Iterable):
-        raise TypeError("bir additional_redaction_patterns must be an iterable of regex strings or compiled patterns")
-    raw_patterns = list(value)
-    if len(raw_patterns) > _MAX_ADDITIONAL_REDACTION_PATTERNS:
-        raise ValueError(
-            f"bir additional_redaction_patterns must not exceed {_MAX_ADDITIONAL_REDACTION_PATTERNS} entries"
-        )
-    return tuple(_compile_additional_redaction_pattern(pattern) for pattern in raw_patterns)
-
-
-def _compile_additional_redaction_pattern(pattern: Any) -> re.Pattern[str]:
-    """Return a compiled ``str`` regex for one ``additional_redaction_patterns`` entry.
-
-    An already-compiled ``re.Pattern`` is accepted as-is so the caller's flags are
-    preserved, but a bytes pattern is rejected because it cannot apply to captured
-    text. A string is length-checked and compiled with default flags; an empty
-    string or invalid regex raises ``ValueError``.
-    """
-
-    if isinstance(pattern, re.Pattern):
-        if isinstance(pattern.pattern, bytes):
-            raise TypeError("bir additional_redaction_patterns compiled patterns must be str patterns, not bytes")
-        return cast("re.Pattern[str]", pattern)
-    if not isinstance(pattern, str):
-        raise TypeError(
-            "bir additional_redaction_patterns entries must be regex strings or compiled re.Pattern objects"
-        )
-    if not pattern:
-        raise ValueError("bir additional_redaction_patterns entries must not be empty")
-    if len(pattern) > _MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH:
-        raise ValueError(
-            f"bir additional_redaction_patterns entries must not exceed "
-            f"{_MAX_ADDITIONAL_REDACTION_PATTERN_LENGTH} characters"
-        )
-    try:
-        return re.compile(pattern)
-    except re.error as exc:
-        raise ValueError(f"bir additional_redaction_patterns entry is not a valid regex: {exc}") from exc
-
-
-def _validate_event_name(value: Any, field: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"bir {field} must be a string")
-    if not value:
-        raise ValueError(f"bir {field} must not be empty")
-    return value
-
-
-def _validate_bool(value: Any, field: str) -> bool:
-    # Reject ints (and everything else): ``enabled`` is a strict on/off switch,
-    # so ``1``/``0`` or a truthy string must not silently pass as a bool.
-    if not isinstance(value, bool):
-        raise TypeError(f"bir {field} must be a bool")
-    return value
-
-
-def _validate_number(value: Any, field: str) -> int | float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"bir {field} must be an int or float")
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"bir {field} must be finite")
-    return value
-
-
-def _validate_non_negative_number(value: Any, field: str) -> int | float:
-    numeric_value = _validate_number(value, field)
-    if numeric_value < 0:
-        raise ValueError(f"bir {field} must be non-negative")
-    return numeric_value
-
-
-def _validate_sample_rate(value: Any) -> float:
-    numeric_value = _validate_number(value, "sample_rate")
-    if numeric_value < 0.0 or numeric_value > 1.0:
-        raise ValueError("bir sample_rate must be between 0.0 and 1.0")
-    return float(numeric_value)
-
-
-def _validate_sample_rules(value: Any) -> tuple[tuple[str, float], ...]:
-    """Validate exact trace-root-name sampling overrides.
-
-    Accepts a mapping of trace root name to sample rate. The returned tuple is
-    sorted by name so the frozen config remains deterministic and hashable. An
-    empty mapping is valid and clears the prior rule table.
-    """
-
-    if not isinstance(value, Mapping):
-        raise TypeError("bir sample_rules must be a mapping of trace name to sample rate")
-    if len(value) > _MAX_SAMPLE_RULES:
-        raise ValueError(f"bir sample_rules must not exceed {_MAX_SAMPLE_RULES} entries")
-    normalized: list[tuple[str, float]] = []
-    for trace_name, sample_rate in value.items():
-        name = _validate_event_name(trace_name, "sample_rules keys")
-        try:
-            rate = _validate_sample_rate(sample_rate)
-        except TypeError as exc:
-            raise TypeError(f"bir sample_rules[{name!r}] rate must be an int or float") from exc
-        except ValueError as exc:
-            message = str(exc).replace("sample_rate", f"sample_rules[{name!r}] rate")
-            raise ValueError(message) from exc
-        normalized.append((name, rate))
-    normalized.sort(key=lambda item: item[0])
-    return tuple(normalized)
+    return _capture_helpers._luhn_checksum_valid(digits)
 
 
 def _sample_rate_for_trace(trace_name: str) -> float:
-    for name, sample_rate in _config.sample_rules:
-        if name == trace_name:
-            return sample_rate
-    return _config.sample_rate
-
-
-def _validate_non_negative_int(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"bir {field} must be an int")
-    if value < 0:
-        raise ValueError(f"bir {field} must be non-negative")
-    return value
-
-
-def _validate_positive_int(value: Any, field: str) -> int:
-    value = _validate_non_negative_int(value, field)
-    if value == 0:
-        raise ValueError(f"bir {field} must be positive")
-    return value
-
-
-def _retrieval_document_from_mapping(document: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(document)
-    if "rank" in normalized and normalized["rank"] is not None:
-        normalized["rank"] = _validate_non_negative_int(normalized["rank"], "retrieval document rank")
-    if "score" in normalized and normalized["score"] is not None:
-        normalized["score"] = _validate_non_negative_number(normalized["score"], "retrieval document score")
-    return normalized
-
-
-def _validate_currency(value: Any) -> str:
-    if not isinstance(value, str):
-        raise TypeError("bir currency must be a string")
-    if not value:
-        raise ValueError("bir currency must not be empty")
-    return value
-
-
-def _validate_model_prices(value: Any) -> tuple[tuple[str, _ModelPrice], ...]:
-    """Validate and normalize the opt-in ``model_prices`` table.
-
-    Accepts a mapping of model name to a rates mapping, validating each entry once
-    here so a bad table fails at ``configure`` time rather than on a later
-    generation. Returns a name-sorted tuple of ``(model, _ModelPrice)`` pairs so
-    the result is immutable and hashable on ``_Config``. An empty mapping is valid
-    and clears any previously configured table.
-    """
-
-    if not isinstance(value, Mapping):
-        raise TypeError("bir model_prices must be a mapping of model name to rates")
-    if len(value) > _MAX_MODEL_PRICES:
-        raise ValueError(f"bir model_prices must not exceed {_MAX_MODEL_PRICES} entries")
-    normalized: list[tuple[str, _ModelPrice]] = []
-    for model, rates in value.items():
-        if not isinstance(model, str):
-            raise TypeError("bir model_prices keys must be model-name strings")
-        if not model:
-            raise ValueError("bir model_prices keys must not be empty")
-        normalized.append((model, _validate_model_price(rates, model)))
-    normalized.sort(key=lambda item: item[0])
-    return tuple(normalized)
-
-
-def _validate_model_price(value: Any, model: str) -> _ModelPrice:
-    """Validate one model's rate mapping into a frozen ``_ModelPrice``.
-
-    Requires a mapping that sets at least one of the per-token ``input``/``output``
-    rates, each validated as a non-negative, finite number (rejecting booleans),
-    rejects any unknown rate key, and accepts an optional ``currency`` (default
-    ``"USD"``) validated like ``set_cost``'s currency.
-    """
-
-    if not isinstance(value, Mapping):
-        raise TypeError(f"bir model_prices[{model!r}] must be a mapping of rates")
-    unknown = [key for key in value if key not in _MODEL_PRICE_RATE_KEYS]
-    if unknown:
-        listed = ", ".join(sorted(repr(key) for key in unknown))
-        raise ValueError(f"bir model_prices[{model!r}] has unknown rate keys: {listed}")
-    input_rate = value.get("input")
-    output_rate = value.get("output")
-    if input_rate is None and output_rate is None:
-        raise ValueError(f"bir model_prices[{model!r}] must set at least one of 'input' or 'output'")
-    validated_input = (
-        _validate_non_negative_number(input_rate, f"model_prices[{model!r}].input") if input_rate is not None else None
-    )
-    validated_output = (
-        _validate_non_negative_number(output_rate, f"model_prices[{model!r}].output")
-        if output_rate is not None
-        else None
-    )
-    currency = value.get("currency", "USD")
-    return _ModelPrice(input=validated_input, output=validated_output, currency=_validate_currency(currency))
+    return _configured_sample_rate_for_trace(trace_name, _config)
 
 
 def _price_for_model(model: str) -> _ModelPrice | None:
-    """Return the configured price entry whose model name matches, or ``None``.
-
-    Reads the immutable, validated table on the active config. The table is empty
-    by default, so with no ``configure(model_prices=...)`` this is a cheap miss
-    and generation cost behavior is unchanged.
-    """
-
-    for name, price in _config.model_prices:
-        if name == model:
-            return price
-    return None
-
-
-def _event_sort_key(event: TraceEvent, depth: int = 0) -> tuple[str, int, int, str]:
-    # ``depth`` (ancestor count) breaks ``start_time``/priority ties so an enclosing
-    # parent sorts before a nested child even when their timestamps are identical.
-    # Callers ordering siblings of a single parent can omit it: siblings share a
-    # depth, so it never changes their order. Equal keys intentionally fall back to
-    # Python's stable sort, preserving JSONL read order instead of exposing UUID
-    # ordering when a coarse clock gives back-to-back events the same timestamp.
-    return (
-        event.start_time,
-        _EVENT_SORT_PRIORITY.get(event.type, 99),
-        depth,
-        event.end_time,
-    )
-
-
-def _event_depths(events: list[TraceEvent]) -> dict[str, int]:
-    """Map each event id to its depth (ancestor count) within ``events``.
-
-    The trace root has depth 0 and every other event one more than its parent.
-    Depth breaks ``start_time``/priority ties so an enclosing parent sorts before a
-    nested child even when their timestamps are identical — which happens when the
-    clock resolution is coarser than back-to-back event creation (notably on
-    Windows), where a span and the tool call nested inside it can share a
-    ``start_time``. The walk guards against a missing, self-referential, or cyclic
-    ``parent_id`` so a malformed file cannot loop forever.
-    """
-
-    by_id = {event.id: event for event in events}
-    depths: dict[str, int] = {}
-    for event in events:
-        depth = 0
-        seen = {event.id}
-        parent_id = event.parent_id
-        while parent_id is not None and parent_id in by_id and parent_id not in seen:
-            seen.add(parent_id)
-            depth += 1
-            parent_id = by_id[parent_id].parent_id
-        depths[event.id] = depth
-    return depths
+    return _configured_price_for_model(model, _config)
 
 
 def _reset_context(
@@ -3889,133 +2078,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---------------------------------------------------------------------------
-# Environment-variable configuration
-#
-# The BIR_* variables let deployments configure the SDK without code changes.
-# They supply the starting defaults for ``_config`` at import time; explicit
-# ``configure(...)`` arguments still win. Capture stays opt-in: it is enabled
-# only when an env var or a ``configure`` call asks for it.
-# ---------------------------------------------------------------------------
-
-_ENV_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_ENV_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
-
-
-def _env_value(name: str) -> str | None:
-    """Return the stripped value of ``name``, or ``None`` when unset or blank.
-
-    A blank (whitespace-only) value is treated as unset so a deployment template
-    that always defines ``BIR_*`` but sometimes leaves it empty falls back to the
-    hardcoded default instead of failing at import.
-    """
-
-    raw = os.environ.get(name)
-    if raw is None:
-        return None
-    stripped = raw.strip()
-    return stripped or None
-
-
-def _parse_env_bool(value: str, name: str) -> bool:
-    """Parse a boolean-like environment value, rejecting ambiguous input."""
-
-    normalized = value.strip().lower()
-    if normalized in _ENV_TRUE_VALUES:
-        return True
-    if normalized in _ENV_FALSE_VALUES:
-        return False
-    allowed = ", ".join(sorted(_ENV_TRUE_VALUES | _ENV_FALSE_VALUES))
-    raise ValueError(f"bir {name} must be a boolean-like value (one of: {allowed}), got {value!r}")
-
-
-def _parse_env_sample_rate(value: str) -> float:
-    """Parse a float sample rate from the environment and range-check it."""
-
-    try:
-        numeric = float(value.strip())
-    except ValueError as exc:
-        raise ValueError(f"bir BIR_SAMPLE_RATE must be a number between 0.0 and 1.0, got {value!r}") from exc
-    return _validate_sample_rate(numeric)
-
-
-def _parse_env_int(value: str, name: str) -> int:
-    """Parse a non-negative integer capture-size limit from the environment.
-
-    Reuses ``_validate_non_negative_int`` for the range check so the env path
-    rejects the same values ``configure`` does, raising a clear ``ValueError``
-    that names the variable for both non-integer text and a negative value.
-    """
-
-    try:
-        numeric = int(value.strip())
-    except ValueError as exc:
-        raise ValueError(f"bir {name} must be a non-negative integer, got {value!r}") from exc
-    return _validate_non_negative_int(numeric, name)
-
-
-def _config_from_env() -> _Config:
-    """Build the starting config from the ``BIR_*`` environment variables.
-
-    Every field falls back to its hardcoded default when the matching variable is
-    unset or blank, so with no environment set this returns a pristine
-    ``_Config()``. Invalid values raise a clear error, and capture stays disabled
-    unless an env var explicitly enables it.
-    """
-
-    defaults = _Config()
-    trace_path = _env_value("BIR_TRACE_PATH")
-    capture_inputs = _env_value("BIR_CAPTURE_INPUTS")
-    capture_outputs = _env_value("BIR_CAPTURE_OUTPUTS")
-    service_name = _env_value("BIR_SERVICE_NAME")
-    environment = _env_value("BIR_ENVIRONMENT")
-    source = _env_value("BIR_SOURCE")
-    disabled = _env_value("BIR_DISABLED")
-    sample_rate = _env_value("BIR_SAMPLE_RATE")
-    max_value_length = _env_value("BIR_MAX_VALUE_LENGTH")
-    max_collection_items = _env_value("BIR_MAX_COLLECTION_ITEMS")
-    return _Config(
-        trace_path=Path(trace_path) if trace_path is not None else defaults.trace_path,
-        capture_inputs=(
-            _parse_env_bool(capture_inputs, "BIR_CAPTURE_INPUTS")
-            if capture_inputs is not None
-            else defaults.capture_inputs
-        ),
-        capture_outputs=(
-            _parse_env_bool(capture_outputs, "BIR_CAPTURE_OUTPUTS")
-            if capture_outputs is not None
-            else defaults.capture_outputs
-        ),
-        service_name=(
-            _validate_event_name(service_name, "BIR_SERVICE_NAME")
-            if service_name is not None
-            else defaults.service_name
-        ),
-        environment=(
-            _validate_event_name(environment, "BIR_ENVIRONMENT") if environment is not None else defaults.environment
-        ),
-        source=(_validate_event_name(source, "BIR_SOURCE") if source is not None else defaults.source),
-        # ``BIR_DISABLED`` is the inverse of the ``enabled`` field: a truthy value
-        # disables all recording. Parsed with the shared boolean parser so it
-        # rejects the same ambiguous values as the other BIR_* booleans.
-        enabled=(not _parse_env_bool(disabled, "BIR_DISABLED") if disabled is not None else defaults.enabled),
-        sample_rate=(_parse_env_sample_rate(sample_rate) if sample_rate is not None else defaults.sample_rate),
-        max_value_length=(
-            _parse_env_int(max_value_length, "BIR_MAX_VALUE_LENGTH")
-            if max_value_length is not None
-            else defaults.max_value_length
-        ),
-        max_collection_items=(
-            _parse_env_int(max_collection_items, "BIR_MAX_COLLECTION_ITEMS")
-            if max_collection_items is not None
-            else defaults.max_collection_items
-        ),
-    )
-
-
-# Apply env-derived defaults at import, now that the validators above exist.
-# ``configure(...)`` still overrides these, and tests reset to a pristine
-# ``_Config()`` via ``_reset_config_for_tests`` so ambient env never leaks in.
+# Apply env-derived defaults at import. ``configure(...)`` still overrides these,
+# and tests reset to a pristine ``_Config()`` via ``_reset_config_for_tests`` so
+# ambient env never leaks in.
 _config = _config_from_env()
 
 
