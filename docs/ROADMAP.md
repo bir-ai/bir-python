@@ -76,18 +76,21 @@ breaking release says otherwise:
 ### 1. Finish bounded memory use for large trace stores
 
 **Why:** opt-in bounded uploads now use the validated JSONL iterator and a
-disk-backed ordering spool, but pruning still calls `load_events()` and
-materializes the selected store. Public loaders intentionally retain their
-documented list return types.
+disk-backed ordering spool, and prune rewrites now stream surviving lines to
+staging files. Trace selection still calls `load_traces()` and retains the
+complete event grouping for the selected store. Public loaders intentionally
+retain their documented list return types.
 
 **Scope:**
 
-- Rework pruning around the validated iterator without splitting traces across
-  the keep/drop boundary or weakening its atomic rewrite and locking guarantees.
+- Replace prune trace selection with a disk-backed summary/index built from the
+  validated iterator, without splitting traces across the keep/drop boundary or
+  weakening its atomic rewrite and locking guarantees.
 - Preserve active/rotated ordering, ID deduplication, selection semantics, and
   exact dry-run/apply results.
 - Keep existing `load_events()` / `load_traces()` return types and behavior.
-- Add a large synthetic-store memory test and failure/rollback coverage.
+- Add a full-operation large synthetic-store memory test and selection-phase
+  failure/rollback coverage.
 
 **Done when:** prune peak client memory is bounded by a documented working set,
 serialized output remains deterministic, and public loaders remain compatible.

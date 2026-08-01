@@ -2026,6 +2026,7 @@ class PruneCommandTests(CliBaseTest):
             # The store is untouched and still readable.
             self.assertEqual(trace_path.read_bytes(), original)
             self.assertEqual(len(bir.load_traces(trace_path)), 2)
+            self.assertEqual(list(workdir.glob(".*.tmp")), [])
 
     def test_default_previews_without_yes(self) -> None:
         with temporary_workdir() as workdir:
@@ -2128,9 +2129,14 @@ class PruneCommandTests(CliBaseTest):
             write_two_traces(trace_path)
             original = trace_path.read_bytes()
 
-            # The temp file is written via Path.write_text; making it fail mid-prune
-            # must leave the original file untouched (atomic replace never happens).
-            with patch.object(cli._sdk.Path, "write_text", side_effect=OSError("disk full")):
+            def fail_mid_staging(*args: Any, **_kwargs: Any) -> None:
+                destination = args[2]
+                destination.write(b"partial staging output\n")
+                raise OSError("disk full")
+
+            # A failure after the staging file has received data must leave the
+            # original untouched and remove the incomplete sibling temp file.
+            with patch.object(cli._sdk, "_stream_filtered_trace_file", side_effect=fail_mid_staging):
                 code, out, err = run_cli("prune", "--path", str(trace_path), "--before", "2999-01-01", "--yes")
 
             self.assertEqual(code, 1)
@@ -2138,6 +2144,7 @@ class PruneCommandTests(CliBaseTest):
             self.assertIn("bir:", err)
             self.assertEqual(trace_path.read_bytes(), original)
             self.assertEqual(len(bir.load_traces(trace_path)), 2)
+            self.assertEqual(list(workdir.glob(".*.tmp")), [])
 
 
 @contextmanager

@@ -52,7 +52,8 @@ and p95) for a quick cost or health check (and accepts the same `--name`,
 `bir prune` reclaims space by removing whole old or unwanted traces (`--before ISO`,
 `--keep-last N`, optionally restricted by `--status`); it is destructive but
 safe-by-default — it requires a selection filter and only previews unless you pass
-`--yes`, rewriting the store atomically under the same lock as appends.
+`--yes`, streaming surviving lines through an atomically replaced staging file
+under the same lock as appends.
 `bir config` prints the effective resolved configuration (trace path, capture
 flags, sampling, service metadata, rotation, and capture-size limits) plus which
 `BIR_*` variables are set, so you can answer "why isn't capture on?" without a

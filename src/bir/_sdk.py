@@ -2463,18 +2463,21 @@ def _select_removed_trace_ids(
     return removed
 
 
-def _filter_trace_file(file_path: Path, removed_trace_ids: set[str]) -> tuple[list[str], int, int]:
-    """Return ``file_path``'s surviving lines, dropped-event count, and current size.
+def _stream_filtered_trace_file(
+    file_path: Path,
+    removed_trace_ids: set[str],
+    destination: IO[bytes] | None,
+) -> tuple[int, int]:
+    """Stream surviving normalized lines to ``destination`` and return counts.
 
-    Every non-blank line is parsed only far enough to read its ``trace_id``; a line
-    whose trace was selected for removal is dropped and the rest are kept as
-    normalized ``<json>\\n`` lines so the rewritten file stays valid JSONL. The size
-    is read after the scan (before any rewrite) so a caller can report the bytes a
-    rewrite would reclaim.
+    ``destination=None`` is the dry-run path: input is still scanned and the
+    exact normalized output byte count is computed, but no staging file is
+    created. Keeping only the current input line and encoded output line bounds
+    rewrite memory independently of the trace file size.
     """
 
-    kept_lines: list[str] = []
     removed_events = 0
+    kept_bytes = 0
     with file_path.open("r", encoding="utf-8") as trace_file:
         for line in trace_file:
             stripped = line.strip()
@@ -2484,8 +2487,48 @@ def _filter_trace_file(file_path: Path, removed_trace_ids: set[str]) -> tuple[li
             if trace_id in removed_trace_ids:
                 removed_events += 1
                 continue
-            kept_lines.append(stripped + "\n")
-    return kept_lines, removed_events, file_path.stat().st_size
+            normalized_line = (stripped + "\n").encode("utf-8")
+            kept_bytes += len(normalized_line)
+            if destination is not None:
+                destination.write(normalized_line)
+    return removed_events, kept_bytes
+
+
+def _stage_filtered_trace_file(
+    file_path: Path,
+    removed_trace_ids: set[str],
+    *,
+    dry_run: bool,
+) -> tuple[Path | None, int, int]:
+    """Stage one filtered trace file without accumulating surviving lines.
+
+    Returns the staging path (``None`` for dry runs or unchanged files), removed
+    event count, and reclaimed byte count. A staging failure removes its partial
+    temp file before propagating, leaving the original untouched.
+    """
+
+    temp_path = None
+    try:
+        if dry_run:
+            removed_events, kept_bytes = _stream_filtered_trace_file(file_path, removed_trace_ids, None)
+        else:
+            temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            with temp_path.open("xb") as staged_file:
+                removed_events, kept_bytes = _stream_filtered_trace_file(
+                    file_path,
+                    removed_trace_ids,
+                    staged_file,
+                )
+    except BaseException:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
+
+    if removed_events == 0:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        return None, 0, 0
+    return temp_path, removed_events, file_path.stat().st_size - kept_bytes
 
 
 def _prune_trace_store(
@@ -2539,16 +2582,18 @@ def _prune_trace_store(
                 for file_path in files:
                     if not file_path.exists():
                         continue
-                    kept_lines, file_removed_events, original_size = _filter_trace_file(file_path, removed_ids)
+                    temp_path, file_removed_events, reclaimed_bytes = _stage_filtered_trace_file(
+                        file_path,
+                        removed_ids,
+                        dry_run=dry_run,
+                    )
                     if file_removed_events == 0:
                         continue
                     removed_events += file_removed_events
-                    new_text = "".join(kept_lines)
-                    bytes_reclaimed += original_size - len(new_text.encode("utf-8"))
+                    bytes_reclaimed += reclaimed_bytes
                     if dry_run:
                         continue
-                    temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-                    temp_path.write_text(new_text, encoding="utf-8")
+                    assert temp_path is not None
                     staged.append((temp_path, file_path))
                 # Write every temp file before replacing any so the failure-prone
                 # step is done up front; an error here leaves all originals intact.

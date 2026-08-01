@@ -88,11 +88,13 @@ filters the output is unchanged.
 `bir prune` is the **destructive** counterpart that reclaims space: it removes
 whole traces from the local store so a long-lived `.bir/traces.jsonl` (and its
 rotated siblings) does not grow without bound. It operates on whole traces and
-never splits one across the keep/drop boundary, rewriting each file via a temp
-file and atomic replace under the same advisory lock an append takes, so a
-concurrent writer can never interleave and a partial failure leaves the original
-file intact. Selection: `--before ISO` removes traces whose start time precedes
-the cutoff, `--keep-last N` removes all but the N most recent, and `--status
+never splits one across the keep/drop boundary. Surviving JSONL lines are
+streamed directly to a sibling staging file instead of being accumulated in
+memory, then installed with an atomic replace under the same advisory lock an
+append takes, so a concurrent writer can never interleave and a partial staging
+failure leaves the original file intact. Selection: `--before ISO` removes
+traces whose start time precedes the cutoff, `--keep-last N` removes all but the
+N most recent, and `--status
 {success,error}` restricts removal to that status (`--before` and `--keep-last`
 combine by union; `--status` is applied as a further restriction). It is **safe by
 default in two ways**: a bare `bir prune` with no selection filter is rejected so

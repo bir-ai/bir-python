@@ -57,6 +57,7 @@ from bir._sdk import (
     _redact_secret_text,
     _reset_config_for_tests,
     _safe_capture,
+    _stage_filtered_trace_file,
     _UploadEventSpool,
 )
 
@@ -3237,6 +3238,42 @@ class SdkTests(unittest.TestCase):
                 store_size // 2,
                 f"peak traced Python memory {peak} bytes should stay below half of the {store_size}-byte store",
             )
+
+    def test_prune_staging_peak_python_memory_does_not_scale_with_surviving_lines(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            event_count = 384
+            large_value = "x" * (32 * 1024)
+            with trace_path.open("w", encoding="utf-8") as trace_file:
+                trace_file.write(json.dumps({"trace_id": "remove", "value": "gone"}) + "\n")
+                for index in range(event_count):
+                    trace_file.write(json.dumps({"trace_id": "keep", "index": index, "value": large_value}) + "\n")
+
+            store_size = trace_path.stat().st_size
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                staged_path, removed_events, bytes_reclaimed = _stage_filtered_trace_file(
+                    trace_path,
+                    {"remove"},
+                    dry_run=False,
+                )
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
+            self.assertIsNotNone(staged_path)
+            assert staged_path is not None
+            self.assertTrue(staged_path.exists())
+            self.assertEqual(removed_events, 1)
+            self.assertEqual(bytes_reclaimed, store_size - staged_path.stat().st_size)
+            self.assertGreater(store_size, 12 * 1024 * 1024)
+            self.assertLess(
+                peak,
+                store_size // 2,
+                f"peak traced Python memory {peak} bytes should stay below half of the {store_size}-byte store",
+            )
+            staged_path.unlink()
 
     def test_internal_event_batches_preserve_order_identity_and_boundaries(self) -> None:
         with temporary_workdir():

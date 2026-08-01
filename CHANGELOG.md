@@ -10,6 +10,14 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- `bir prune` now streams surviving JSONL lines directly into sibling staging
+  files instead of collecting and joining every retained line in memory. Dry
+  runs validate and count the same normalized output without creating staging
+  files, partial staging files are removed on failure, and the existing
+  lock/atomic-replace behavior and result counts are preserved. Trace selection
+  still materializes complete traces; the remaining bounded-memory work stays
+  explicit in the roadmap.
+
 - `send_events(batch_size=N)` and `bir send --batch-size N` now opt into
   disk-backed bounded upload preparation. Selected active/rotated JSONL files
   are parsed once into a temporary SQLite spool, preserving the globally
