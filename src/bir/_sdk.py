@@ -2425,6 +2425,181 @@ def _trace_starts_before(start_time: str, cutoff: datetime) -> bool:
     return start < cutoff
 
 
+class _PruneTraceIndex:
+    """Disk-backed trace summaries for bounded-memory prune selection.
+
+    Every event contributes only its trace's first-seen sequence; complete trace
+    roots additionally contribute the fields prune filters need. Rootless event
+    groups remain absent from selection, matching :func:`load_traces`. Multiple
+    roots for one trace retain the same root that the in-memory event sort would
+    choose: earliest ``start_time``, then earliest ``end_time``, then input order.
+
+    This index is intentionally not connected to :func:`_prune_trace_store` yet.
+    It establishes and tests the disk-backed selection contract independently
+    before replacing the existing public-loader path.
+    """
+
+    def __init__(self) -> None:
+        self.database_path: Path | None = None
+        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+        self._connection: sqlite3.Connection | None = None
+
+    def __enter__(self) -> _PruneTraceIndex:
+        if self._connection is not None:
+            raise RuntimeError("prune trace index is already open")
+
+        temporary_directory = tempfile.TemporaryDirectory(prefix="bir-prune-index-")
+        database_path = Path(temporary_directory.name) / "traces.sqlite3"
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(database_path)
+            connection.execute("PRAGMA journal_mode = OFF")
+            connection.execute("PRAGMA synchronous = OFF")
+            connection.execute("PRAGMA temp_store = FILE")
+            connection.execute("PRAGMA cache_size = -2048")
+            connection.executescript(
+                """
+                CREATE TABLE trace_summaries (
+                    trace_id TEXT PRIMARY KEY,
+                    first_sequence INTEGER NOT NULL,
+                    root_sequence INTEGER,
+                    start_time TEXT,
+                    end_time TEXT,
+                    status TEXT
+                );
+                CREATE INDEX complete_trace_order
+                    ON trace_summaries(start_time DESC, first_sequence ASC)
+                    WHERE root_sequence IS NOT NULL;
+                """
+            )
+        except BaseException:
+            try:
+                if connection is not None:
+                    connection.close()
+            finally:
+                temporary_directory.cleanup()
+            raise
+
+        assert connection is not None
+        self.database_path = database_path
+        self._temporary_directory = temporary_directory
+        self._connection = connection
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        connection = self._connection
+        temporary_directory = self._temporary_directory
+        self._connection = None
+        self._temporary_directory = None
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if temporary_directory is not None:
+                temporary_directory.cleanup()
+
+    def add_events(self, events: Iterable[TraceEvent]) -> None:
+        """Stream events into one summary row per seen trace ID."""
+
+        connection = self._require_connection()
+        for sequence, event in enumerate(events):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO trace_summaries (trace_id, first_sequence)
+                VALUES (?, ?)
+                """,
+                (event.trace_id, sequence),
+            )
+            if event.type == "trace" and event.id == event.trace_id:
+                connection.execute(
+                    """
+                    UPDATE trace_summaries
+                    SET root_sequence = ?, start_time = ?, end_time = ?, status = ?
+                    WHERE trace_id = ? AND (
+                        root_sequence IS NULL
+                        OR start_time > ?
+                        OR (start_time = ? AND end_time > ?)
+                    )
+                    """,
+                    (
+                        sequence,
+                        event.start_time,
+                        event.end_time,
+                        event.status,
+                        event.trace_id,
+                        event.start_time,
+                        event.start_time,
+                        event.end_time,
+                    ),
+                )
+            if (sequence + 1) % 1000 == 0:
+                connection.commit()
+        connection.commit()
+
+    def count_traces(self) -> int:
+        """Return the number of complete traces represented by the index."""
+
+        row = (
+            self._require_connection()
+            .execute("SELECT COUNT(*) FROM trace_summaries WHERE root_sequence IS NOT NULL")
+            .fetchone()
+        )
+        assert row is not None
+        return int(row[0])
+
+    def select_removed_trace_ids(
+        self,
+        *,
+        before: datetime | None,
+        keep_last: int | None,
+        status: str | None,
+    ) -> set[str]:
+        """Select trace IDs with the same rules as :func:`_select_removed_trace_ids`."""
+
+        rows = self._require_connection().execute(
+            """
+            SELECT trace_id, start_time, status, recency_rank
+            FROM (
+                SELECT
+                    trace_id,
+                    first_sequence,
+                    start_time,
+                    status,
+                    ROW_NUMBER() OVER (
+                        ORDER BY start_time DESC, first_sequence ASC
+                    ) AS recency_rank
+                FROM trace_summaries
+                WHERE root_sequence IS NOT NULL
+            )
+            ORDER BY start_time ASC, first_sequence ASC
+            """
+        )
+
+        has_selector = before is not None or keep_last is not None
+        removed: set[str] = set()
+        for trace_id, start_time, trace_status, recency_rank in rows:
+            if status is not None and trace_status != status:
+                continue
+            if not has_selector:
+                removed.add(str(trace_id))
+            elif before is not None and _trace_starts_before(str(start_time), before):
+                removed.add(str(trace_id))
+            elif keep_last is not None and int(recency_rank) > keep_last:
+                removed.add(str(trace_id))
+        return removed
+
+    def _require_connection(self) -> sqlite3.Connection:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("prune trace index is not open")
+        return connection
+
+
 def _select_removed_trace_ids(
     traces: list[LoadedTrace],
     *,

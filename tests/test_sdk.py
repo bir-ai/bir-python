@@ -17,6 +17,8 @@ import urllib.error
 from collections.abc import AsyncGenerator, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import datetime, timezone
 from http.client import HTTPMessage
 from io import BytesIO
 from pathlib import Path
@@ -52,12 +54,15 @@ from bir._sdk import (
     _parse_env_int,
     _parse_env_sample_rate,
     _post_loaded_event_batches,
+    _PruneTraceIndex,
     _read_http_error_body,
     _record_sent_ids,
     _redact_secret_text,
     _reset_config_for_tests,
     _safe_capture,
+    _select_removed_trace_ids,
     _stage_filtered_trace_file,
+    _traces_from_events,
     _UploadEventSpool,
 )
 
@@ -3274,6 +3279,119 @@ class SdkTests(unittest.TestCase):
                 f"peak traced Python memory {peak} bytes should stay below half of the {store_size}-byte store",
             )
             staged_path.unlink()
+
+    def test_prune_trace_index_matches_in_memory_selection_and_cleans_up(self) -> None:
+        with temporary_workdir():
+            with trace("template"):
+                pass
+            template = load_events()[0]
+
+            def root(
+                trace_id: str,
+                start_time: str,
+                *,
+                end_time: str | None = None,
+                status: str = "success",
+            ) -> bir.TraceEvent:
+                return replace(
+                    template,
+                    id=trace_id,
+                    trace_id=trace_id,
+                    parent_id=None,
+                    name=trace_id,
+                    type="trace",
+                    start_time=start_time,
+                    end_time=end_time or start_time,
+                    status=status,
+                )
+
+            def child(trace_id: str, event_id: str) -> bir.TraceEvent:
+                return replace(
+                    template,
+                    id=event_id,
+                    trace_id=trace_id,
+                    parent_id=trace_id,
+                    name=event_id,
+                    type="span",
+                )
+
+            events = [
+                child("trace-a", "a-child"),  # first-seen order precedes its root
+                root("trace-c", "2026-01-03T00:00:00+00:00"),
+                root("trace-d", "2026-01-03T00:00:00+00:00", status="error"),
+                root("trace-b", "2026-01-04T00:00:00+00:00", status="error"),
+                root("trace-a", "2026-01-02T00:00:00+00:00"),
+                # Duplicate roots exercise start/end ordering and stable input
+                # order: the first 00:00:01 root wins, while its exact-key
+                # successor must not replace its status.
+                root(
+                    "trace-b",
+                    "2026-01-01T00:00:00+00:00",
+                    end_time="2026-01-01T00:00:02+00:00",
+                    status="success",
+                ),
+                root(
+                    "trace-b",
+                    "2026-01-01T00:00:00+00:00",
+                    end_time="2026-01-01T00:00:01+00:00",
+                    status="success",
+                ),
+                root(
+                    "trace-b",
+                    "2026-01-01T00:00:00+00:00",
+                    end_time="2026-01-01T00:00:01+00:00",
+                    status="error",
+                ),
+                child("orphan-trace", "orphan-child"),
+            ]
+            traces = _traces_from_events(events)
+            cases = (
+                {"before": datetime(2026, 1, 2, tzinfo=timezone.utc), "keep_last": None, "status": None},
+                {"before": None, "keep_last": 1, "status": None},
+                {"before": None, "keep_last": None, "status": "error"},
+                {
+                    "before": datetime(2026, 1, 2, tzinfo=timezone.utc),
+                    "keep_last": 2,
+                    "status": "success",
+                },
+                {"before": None, "keep_last": None, "status": None},
+            )
+
+            index = _PruneTraceIndex()
+            with index:
+                database_path = index.database_path
+                assert database_path is not None
+                index.add_events(events)
+                self.assertTrue(database_path.is_file())
+                self.assertEqual(index.count_traces(), 4)
+                for filters in cases:
+                    with self.subTest(**filters):
+                        expected = _select_removed_trace_ids(traces, **filters)
+                        self.assertEqual(index.select_removed_trace_ids(**filters), expected)
+
+            self.assertFalse(database_path.parent.exists())
+
+    def test_prune_trace_index_cleans_up_after_input_failure(self) -> None:
+        with temporary_workdir():
+            with trace("first"):
+                pass
+            event = load_events()[0]
+
+            def failing_events() -> Iterator[bir.TraceEvent]:
+                yield event
+                raise RuntimeError("input failed")
+
+            index = _PruneTraceIndex()
+            database_parent: Path | None = None
+            with self.assertRaisesRegex(RuntimeError, "input failed"):
+                with index:
+                    database_path = index.database_path
+                    assert database_path is not None
+                    database_parent = database_path.parent
+                    index.add_events(failing_events())
+
+            assert database_parent is not None
+            self.assertFalse(database_parent.exists())
 
     def test_internal_event_batches_preserve_order_identity_and_boundaries(self) -> None:
         with temporary_workdir():
