@@ -52,39 +52,14 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Bound memory in the read paths | P1 | M | Inspecting a large store costs what streaming it costs | — |
-| 2 | Give the deprecation policy a mechanism | P2 | S | A promised warning is code, not prose | — |
-| 3 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
-| 4 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
-| 5 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
+| 1 | Give the deprecation policy a mechanism | P2 | S | A promised warning is code, not prose | — |
+| 2 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
+| 3 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
+| 4 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
 
 ## Work item details
 
-### 1. Bound memory in the read paths
-
-**Why:** the prune and send paths were made bounded-memory; the read paths were
-not, and they are what a user runs against the same growing store. Measured with
-`scripts/benchmarks.py` and a scaling check: `load_traces()` peaks at **2.4 KiB
-per event**, linear (4,000 events → 9.4 MiB; 16,000 → 37.8 MiB). That is roughly
-240 MiB at 100k events and 2.4 GiB at 1M. `bir stats` calls both `load_traces()`
-and `load_events()` (`cli.py:233-235`), so it pays it twice. Nothing rotates by
-default (`max_bytes` is `None`), so a long-lived store reaches these sizes
-without the user doing anything unusual.
-
-**Scope:**
-
-- Give the CLI read commands a streaming path over the existing lazy event
-  iterator, so `stats`, `traces`, and `export-otel` do not materialize the store.
-- Keep `load_events()` / `load_traces()` returning lists: they are public API and
-  the stability policy governs them. A streaming public loader, if wanted, is an
-  addition, not a change.
-- Extend the benchmark suite with the CLI paths so the improvement is measured
-  rather than asserted.
-
-**Done when:** `bir stats` and `bir traces` on a large store have a peak that
-does not grow with the store, with benchmark numbers before and after.
-
-### 2. Give the deprecation policy a mechanism
+### 1. Give the deprecation policy a mechanism
 
 **Why:** `docs/site/stability.md` promises that a public name keeps working for
 one minor release while emitting `DeprecationWarning` and naming its
@@ -105,7 +80,7 @@ written policy exists to prevent.
 **Done when:** deprecating a name is a two-line change with a ready test, and
 the promise on the stability page is executable.
 
-### 3. Extend machine-readable output to the automation commands
+### 2. Extend machine-readable output to the automation commands
 
 **Why:** `--json` exists on six of thirteen commands (`traces`, `show`, `stats`,
 `experiments`, `experiment-show`, `config`) and is missing from the ones written
@@ -126,7 +101,7 @@ which is thin cover for a gap.
 
 **Done when:** every command a CI pipeline would run can be read by one.
 
-### 4. Cover the transport error paths
+### 3. Cover the transport error paths
 
 **Why:** `_sending.py` has the lowest coverage in the package (79.7%), and the
 gap is not in incidental code — it is in HTTP error handling and the
@@ -147,7 +122,7 @@ malformed-input branches.
 **Done when:** both modules clear the package's overall coverage rate, with the
 error paths covered by behavior tests rather than line-touching ones.
 
-### 5. Verify free-threaded builds
+### 4. Verify free-threaded builds
 
 **Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
 release where free-threading became officially supported. Nothing here is known
@@ -169,13 +144,15 @@ and a test backs it.
 
 ## Sequencing
 
-Item 1 is the surviving half of the store-health story: a damaged store is now
-readable, but a large one still costs memory proportional to its size. It shares
-the read paths with the work already done, so it should be picked up while that
-code is fresh.
+Nothing here is P1 any more: the store-health work that was — a damaged store
+being unreadable, and a large one costing memory proportional to its size — has
+shipped. All four remaining items are independent and can be picked up in any
+order. Item 1 is worth doing before the first Beta deprecation rather than
+during it.
 
-Items 2 through 5 are independent and can be picked up in any order. Item 2 is
-worth doing before the first Beta deprecation rather than during it.
+One read path was deliberately left alone. `bir export-otel` still loads whole
+traces because the exporter takes them as a list; bounding it means changing
+that signature, which is a bigger question than the command's memory use.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Two of its entries remain outside this repository's reach: confirming the
@@ -192,6 +169,6 @@ switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, riche
 OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
 the performance benchmark harness, the trace-context decision
-([ADR 0001](adr/0001-distributed-trace-context.md)), and reading a damaged store
-with `--skip-invalid`. Regressions in those areas
+([ADR 0001](adr/0001-distributed-trace-context.md)), reading a damaged store with
+`--skip-invalid`, and streaming the CLI read commands. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.

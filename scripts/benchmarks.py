@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import os
 import platform
@@ -269,6 +270,33 @@ def prepare_experiment_async(workdir: Path, size: int) -> Callable[[], object]:
     return body
 
 
+def prepare_cli_traces(workdir: Path, size: int) -> Callable[[], object]:
+    write_events(size, capture=True)
+    return lambda: _run_cli("traces", "--limit", "20")
+
+
+def prepare_cli_stats(workdir: Path, size: int) -> Callable[[], object]:
+    write_events(size, capture=True)
+    return lambda: _run_cli("stats")
+
+
+def prepare_cli_show(workdir: Path, size: int) -> Callable[[], object]:
+    write_events(size, capture=True)
+    # One trace out of a whole store: the cost should be the trace's, not the
+    # store's, which is what makes this case worth tracking separately.
+    trace_id = bir.load_traces()[0].id
+    return lambda: _run_cli("show", trace_id)
+
+
+def _run_cli(*argv: str) -> int:
+    """Run one CLI command with its output discarded."""
+
+    from bir import cli
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return cli.main(list(argv))
+
+
 @dataclass(frozen=True)
 class Benchmark:
     """One measured case and the work it performs per run."""
@@ -297,6 +325,12 @@ BENCHMARKS: tuple[Benchmark, ...] = (
     Benchmark("load_traces", "storage", prepare_load_traces, size=5_000, smoke_size=200),
     Benchmark("prune_keep_last", "storage", prepare_prune, size=2_000, smoke_size=100),
     Benchmark("send_batched", "transport", prepare_send_batched, size=2_000, smoke_size=100),
+    # The commands a person runs against a store that keeps growing. They read
+    # the same data the storage cases do, so a regression here that the storage
+    # cases miss means the CLI started materializing the store again.
+    Benchmark("cli_traces", "cli", prepare_cli_traces, size=2_000, smoke_size=100),
+    Benchmark("cli_stats", "cli", prepare_cli_stats, size=2_000, smoke_size=100),
+    Benchmark("cli_show", "cli", prepare_cli_show, size=2_000, smoke_size=100),
     Benchmark("experiment_sync", "evals", prepare_experiment_sync, size=500, smoke_size=25),
     Benchmark("experiment_async", "evals", prepare_experiment_async, size=500, smoke_size=25),
 )

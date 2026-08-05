@@ -12,6 +12,8 @@ import argparse
 import math
 import sys
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -32,16 +34,14 @@ from ._cli_present import (
     _print_experiment_detail,
     _print_table,
     _stats_rows,
-    _trace_to_dict,
     _walk_event_tree,
 )
 from ._sdk import (
     LoadedTrace,
     TraceEvent,
-    _load_events_skipping_invalid,
+    _iter_trace_events,
     _load_traces_skipping_invalid,
     _prune_trace_store,
-    load_events,
     load_traces,
     send_events,
 )
@@ -148,7 +148,7 @@ class _SkippedLines:
 
 
 def _read_traces(args: argparse.Namespace) -> list[LoadedTrace]:
-    """Load traces for a display command, honoring ``--skip-invalid``."""
+    """Load whole traces for a command that needs their events."""
 
     if not getattr(args, "skip_invalid", False):
         return load_traces(args.path, include_rotated=args.include_rotated)
@@ -159,25 +159,146 @@ def _read_traces(args: argparse.Namespace) -> list[LoadedTrace]:
     return traces
 
 
-def _read_traces_and_events(args: argparse.Namespace) -> tuple[list[LoadedTrace], list[TraceEvent]]:
-    """Load both views for ``stats``, reporting skipped lines once."""
+@dataclass(frozen=True)
+class _TraceSummary:
+    """One trace's display figures, kept without retaining its events.
+
+    ``traces`` and ``stats`` need a trace's name, timing, status, how many events
+    it holds, and what its generations spent — never the events themselves. A
+    summary is a few scalars, where the events behind it carry captured inputs,
+    outputs, metadata, and a copy of their own raw payload, so summarizing while
+    streaming is what keeps a large store from being read into memory whole.
+    """
+
+    id: str
+    name: str
+    start_time: str
+    end_time: str
+    status: str
+    event_count: int
+    usage: dict[str, int | float]
+    costs: dict[str, dict[str, int | float]]
+
+    @property
+    def duration_ms(self) -> float:
+        return _sdk._duration_ms(self.start_time, self.end_time)
+
+
+@dataclass
+class _StoreSummary:
+    """One streaming pass over a store: per-trace figures and store-wide totals.
+
+    ``totals`` cover every generation event, including those whose trace root is
+    missing (a trace split across an unread rotated file). Unfiltered ``stats``
+    reports those totals, and a filtered run sums the surviving summaries
+    instead, which is the distinction the pre-streaming implementation drew by
+    aggregating either the whole event list or a filtered copy of it.
+    """
+
+    traces: list[_TraceSummary]
+    totals: _UsageTotals
+
+
+@dataclass
+class _UsageTotals:
+    """Token and cost sums accumulated while streaming."""
+
+    input_tokens: int | float = 0
+    output_tokens: int | float = 0
+    total_tokens: int | float = 0
+    costs: dict[str, dict[str, int | float]] = field(default_factory=dict)
+
+    def add(self, event: TraceEvent) -> None:
+        if event.type != "generation":
+            return
+        if event.usage:
+            self.input_tokens += event.usage.get("input_tokens", 0)
+            self.output_tokens += event.usage.get("output_tokens", 0)
+            self.total_tokens += event.usage.get("total_tokens", 0)
+        if event.cost:
+            # Fall back to the SDK's default currency so a cost recorded without
+            # an explicit code still lands in its own bucket rather than nowhere.
+            currency = event.currency or "USD"
+            bucket = self.costs.setdefault(currency, {"input_cost": 0, "output_cost": 0, "total_cost": 0})
+            bucket["input_cost"] += event.cost.get("input_cost", 0)
+            bucket["output_cost"] += event.cost.get("output_cost", 0)
+            bucket["total_cost"] += event.cost.get("total_cost", 0)
+
+    def usage(self) -> dict[str, int | float]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+def _trace_summary_to_dict(trace: _TraceSummary) -> dict[str, Any]:
+    """Render one summary in the same shape ``_trace_to_dict`` emits."""
+
+    return {
+        "id": trace.id,
+        "name": trace.name,
+        "status": trace.status,
+        "start_time": trace.start_time,
+        "duration_ms": trace.duration_ms,
+        "event_count": trace.event_count,
+    }
+
+
+def _summarize_store(args: argparse.Namespace) -> _StoreSummary:
+    """Summarize the store in one pass, retaining nothing per event.
+
+    Peak memory scales with the number of traces rather than the number of
+    events or the size of what they captured.
+    """
+
+    accumulated: dict[str, _UsageTotals] = {}
+    counts: dict[str, int] = {}
+    roots: dict[str, tuple[str, str, str, str]] = {}
+    totals = _UsageTotals()
+
+    for event in _iter_store_events(args):
+        counts[event.trace_id] = counts.get(event.trace_id, 0) + 1
+        totals.add(event)
+        if event.type == "generation" and (event.usage or event.cost):
+            accumulated.setdefault(event.trace_id, _UsageTotals()).add(event)
+        if event.type == "trace" and event.id == event.trace_id:
+            roots[event.trace_id] = (event.name, event.start_time, event.end_time, event.status)
+
+    summaries = [
+        _TraceSummary(
+            id=trace_id,
+            name=name,
+            start_time=start_time,
+            end_time=end_time,
+            status=status,
+            event_count=counts[trace_id],
+            usage=accumulated[trace_id].usage() if trace_id in accumulated else _UsageTotals().usage(),
+            costs=accumulated[trace_id].costs if trace_id in accumulated else {},
+        )
+        for trace_id, (name, start_time, end_time, status) in roots.items()
+    ]
+    # Match the grouped loader's ordering so the two paths agree before any
+    # command applies its own sort.
+    summaries.sort(key=lambda summary: summary.start_time)
+    return _StoreSummary(traces=summaries, totals=totals)
+
+
+def _iter_store_events(args: argparse.Namespace) -> Iterator[TraceEvent]:
+    """Stream the store for a display command, honoring ``--skip-invalid``."""
 
     if not getattr(args, "skip_invalid", False):
-        return (
-            load_traces(args.path, include_rotated=args.include_rotated),
-            load_events(args.path, include_rotated=args.include_rotated),
-        )
+        yield from _iter_trace_events(args.path, include_rotated=args.include_rotated)
+        return
 
     skipped = _SkippedLines()
-    traces = _load_traces_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
-    events = _load_events_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
+    yield from _iter_trace_events(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
     skipped.report()
-    return traces, events
 
 
 def _cmd_traces(args: argparse.Namespace) -> int:
     traces = sorted(
-        _read_traces(args),
+        _summarize_store(args).traces,
         key=lambda trace: trace.start_time,
         reverse=True,
     )
@@ -192,7 +313,7 @@ def _cmd_traces(args: argparse.Namespace) -> int:
         traces = traces[: args.limit]
 
     if args.json:
-        _dump_json([_trace_to_dict(trace) for trace in traces], sys.stdout)
+        _dump_json([_trace_summary_to_dict(trace) for trace in traces], sys.stdout)
         return 0
 
     if not traces:
@@ -204,7 +325,7 @@ def _cmd_traces(args: argparse.Namespace) -> int:
             trace.start_time,
             trace.status,
             _format_ms(trace.duration_ms),
-            str(len(trace.events)),
+            str(trace.event_count),
             trace.name,
         )
         for trace in traces
@@ -214,16 +335,16 @@ def _cmd_traces(args: argparse.Namespace) -> int:
 
 
 def _filter_traces(
-    traces: list[LoadedTrace],
+    traces: list[_TraceSummary],
     *,
     name: str | None,
     status: str | None,
     since: datetime | None,
     until: datetime | None,
-) -> list[LoadedTrace]:
+) -> list[_TraceSummary]:
     """Keep traces matching every supplied filter, preserving order.
 
-    ``name`` matches a case-sensitive substring of ``LoadedTrace.name``; ``status``
+    ``name`` matches a case-sensitive substring of the trace name; ``status``
     matches it exactly; ``since``/``until`` are inclusive bounds compared against the
     trace ``start_time``. Absent filters match everything and the supplied filters
     combine with AND. ``start_time`` and the bounds are normalized to UTC so naive and
@@ -233,7 +354,7 @@ def _filter_traces(
     since = _as_aware_utc(since) if since is not None else None
     until = _as_aware_utc(until) if until is not None else None
 
-    filtered: list[LoadedTrace] = []
+    filtered: list[_TraceSummary] = []
     for trace in traces:
         if name is not None and name not in trace.name:
             continue
@@ -262,10 +383,10 @@ def _as_aware_utc(value: datetime) -> datetime:
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
-    trace = next(
-        (candidate for candidate in _read_traces(args) if candidate.id == args.trace_id),
-        None,
-    )
+    # Only one trace is printed, so only its events are kept: the rest of the
+    # store streams past without being retained.
+    wanted = [event for event in _iter_store_events(args) if event.trace_id == args.trace_id]
+    trace = next(iter(_sdk._traces_from_events(wanted)), None)
     if trace is None:
         print(
             f"bir: trace {args.trace_id!r} not found in {_resolved_trace_path(args.path)}",
@@ -284,7 +405,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
-    traces, events = _read_traces_and_events(args)
+    summary = _summarize_store(args)
+    traces = summary.traces
+    totals = summary.totals
 
     if any(value is not None for value in (args.name, args.status, args.since, args.until)):
         traces = _filter_traces(
@@ -294,14 +417,13 @@ def _cmd_stats(args: argparse.Namespace) -> int:
             since=args.since,
             until=args.until,
         )
-        # Restrict token/cost aggregation to events belonging to the surviving
-        # traces. This branch only runs when a filter was given, so the no-filter
-        # path keeps aggregating the full event list (including events whose trace
-        # root is absent, e.g. split across an unread rotated file) byte for byte.
-        surviving_ids = {trace.id for trace in traces}
-        events = [event for event in events if event.trace_id in surviving_ids]
+        # Restrict token/cost figures to the surviving traces. This branch only
+        # runs when a filter was given, so the no-filter path keeps reporting the
+        # store-wide totals (including events whose trace root is absent, e.g.
+        # split across an unread rotated file) exactly as before.
+        totals = _totals_for(traces)
 
-    stats = _aggregate_stats(traces, events)
+    stats = _aggregate_stats(traces, totals)
 
     if args.json:
         _dump_json(stats, sys.stdout)
@@ -311,39 +433,39 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
-def _aggregate_stats(traces: list[LoadedTrace], events: list[TraceEvent]) -> dict[str, Any]:
-    """Summarize traces and events into a JSON-serializable figures mapping.
+def _totals_for(traces: list[_TraceSummary]) -> _UsageTotals:
+    """Sum the token and cost figures the given traces accumulated."""
+
+    totals = _UsageTotals()
+    for trace in traces:
+        totals.input_tokens += trace.usage["input_tokens"]
+        totals.output_tokens += trace.usage["output_tokens"]
+        totals.total_tokens += trace.usage["total_tokens"]
+        for currency, amounts in trace.costs.items():
+            bucket = totals.costs.setdefault(currency, {"input_cost": 0, "output_cost": 0, "total_cost": 0})
+            for field_name, amount in amounts.items():
+                bucket[field_name] += amount
+    return totals
+
+
+def _aggregate_stats(traces: list[_TraceSummary], totals: _UsageTotals) -> dict[str, Any]:
+    """Summarize traces and totals into a JSON-serializable figures mapping.
 
     Trace-level figures (counts and latency) come from ``traces``; token and cost
-    figures are summed over generation events in ``events``. Costs are grouped by
-    currency code and never summed across currencies, so a store mixing USD and
-    EUR reports one line each. Latency mean and p95 are ``None`` when there are no
-    traces. The same mapping backs both the table and ``--json`` so their figures
-    cannot drift apart.
+    figures come from ``totals``, accumulated while streaming. Costs are grouped
+    by currency code and never summed across currencies, so a store mixing USD
+    and EUR reports one line each. Latency mean and p95 are ``None`` when there
+    are no traces. The same mapping backs both the table and ``--json`` so their
+    figures cannot drift apart.
     """
 
     success = sum(1 for trace in traces if trace.status == "success")
     error = sum(1 for trace in traces if trace.status == "error")
 
-    input_tokens: int | float = 0
-    output_tokens: int | float = 0
-    total_tokens: int | float = 0
-    costs: dict[str, dict[str, int | float]] = {}
-    for event in events:
-        if event.type != "generation":
-            continue
-        if event.usage:
-            input_tokens += event.usage.get("input_tokens", 0)
-            output_tokens += event.usage.get("output_tokens", 0)
-            total_tokens += event.usage.get("total_tokens", 0)
-        if event.cost:
-            # Fall back to the SDK's default currency so a cost recorded without
-            # an explicit code still lands in its own bucket rather than nowhere.
-            currency = event.currency or "USD"
-            bucket = costs.setdefault(currency, {"input_cost": 0, "output_cost": 0, "total_cost": 0})
-            bucket["input_cost"] += event.cost.get("input_cost", 0)
-            bucket["output_cost"] += event.cost.get("output_cost", 0)
-            bucket["total_cost"] += event.cost.get("total_cost", 0)
+    input_tokens = totals.input_tokens
+    output_tokens = totals.output_tokens
+    total_tokens = totals.total_tokens
+    costs = totals.costs
 
     durations = sorted(trace.duration_ms for trace in traces)
     latency: dict[str, Any] = {

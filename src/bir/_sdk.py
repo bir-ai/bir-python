@@ -413,18 +413,22 @@ def _iter_trace_events(
     path: str | Path | None = None,
     *,
     include_rotated: bool = False,
+    on_invalid: Callable[[ValueError], None] | None = None,
 ) -> Iterator[TraceEvent]:
     """Yield validated local events in their original write order.
 
     The iterator keeps only one JSONL line and parsed event live at a time. It is
     the internal streaming primitive for store operations; public loaders still
-    materialize their documented list return types.
+    materialize their documented list return types. ``on_invalid`` skips
+    unreadable lines instead of raising; see the storage iterator for why only
+    display callers pass it.
     """
 
     return _storage_helpers._iter_trace_events(
         path,
         include_rotated=include_rotated,
         default_path=_config.trace_path,
+        on_invalid=on_invalid,
     )
 
 

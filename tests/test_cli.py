@@ -30,7 +30,7 @@ from unittest.mock import patch
 import bir
 from bir import cli
 from bir._sdk import LoadedTrace, TraceEvent, _reset_config_for_tests
-from bir.cli import _aggregate_stats, _percentile
+from bir.cli import _aggregate_stats, _percentile, _TraceSummary, _UsageTotals
 from bir.evals import Dataset, DatasetExample, contains, custom_evaluator, exact_match, run_experiment
 
 
@@ -288,6 +288,32 @@ def make_trace(trace_id: str, duration_ms: float, *, status: str = "success") ->
     end = (datetime.fromisoformat(start) + timedelta(milliseconds=duration_ms)).isoformat()
     root = make_event(id=trace_id, trace_id=trace_id, type="trace", status=status, start_time=start, end_time=end)
     return LoadedTrace(id=trace_id, name="n", start_time=start, end_time=end, status=status, events=[root], root=root)
+
+
+def make_summary(trace_id: str, duration_ms: float, *, status: str = "success") -> _TraceSummary:
+    """Build the streaming summary ``bir stats`` aggregates over."""
+
+    start = "2024-01-01T00:00:00"
+    end = (datetime.fromisoformat(start) + timedelta(milliseconds=duration_ms)).isoformat()
+    return _TraceSummary(
+        id=trace_id,
+        name="n",
+        start_time=start,
+        end_time=end,
+        status=status,
+        event_count=1,
+        usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        costs={},
+    )
+
+
+def totals_from(events: list[TraceEvent]) -> _UsageTotals:
+    """Accumulate token and cost totals the way the streaming pass does."""
+
+    totals = _UsageTotals()
+    for event in events:
+        totals.add(event)
+    return totals
 
 
 def stats_table_map(out: str) -> dict[str, str]:
@@ -894,7 +920,7 @@ class AggregateStatsTests(unittest.TestCase):
             make_generation(),  # generation without usage or cost: contributes nothing
         ]
 
-        stats = _aggregate_stats([], events)
+        stats = _aggregate_stats([], totals_from(events))
 
         self.assertEqual(stats["tokens"], {"input": 15, "output": 27, "total": 42})
         self.assertEqual([entry["currency"] for entry in stats["cost"]], ["EUR", "USD"])
@@ -905,9 +931,9 @@ class AggregateStatsTests(unittest.TestCase):
         self.assertAlmostEqual(by_currency["EUR"]["total_cost"], 0.03)
 
     def test_latency_mean_and_p95_over_trace_durations(self) -> None:
-        traces = [make_trace(f"t{i}", duration) for i, duration in enumerate([100.0, 200.0, 300.0, 400.0])]
+        traces = [make_summary(f"t{i}", duration) for i, duration in enumerate([100.0, 200.0, 300.0, 400.0])]
 
-        stats = _aggregate_stats(traces, [])
+        stats = _aggregate_stats(traces, _UsageTotals())
 
         self.assertEqual(stats["traces"], {"total": 4, "success": 4, "error": 0})
         self.assertEqual(stats["latency_ms"]["count"], 4)
@@ -917,17 +943,17 @@ class AggregateStatsTests(unittest.TestCase):
 
     def test_counts_success_and_error_traces(self) -> None:
         traces = [
-            make_trace("ok1", 10.0),
-            make_trace("ok2", 20.0),
-            make_trace("bad", 30.0, status="error"),
+            make_summary("ok1", 10.0),
+            make_summary("ok2", 20.0),
+            make_summary("bad", 30.0, status="error"),
         ]
 
-        stats = _aggregate_stats(traces, [])
+        stats = _aggregate_stats(traces, _UsageTotals())
 
         self.assertEqual(stats["traces"], {"total": 3, "success": 2, "error": 1})
 
     def test_empty_inputs_yield_zeroed_figures(self) -> None:
-        stats = _aggregate_stats([], [])
+        stats = _aggregate_stats([], _UsageTotals())
 
         self.assertEqual(stats["traces"], {"total": 0, "success": 0, "error": 0})
         self.assertEqual(stats["tokens"], {"input": 0, "output": 0, "total": 0})

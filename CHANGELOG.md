@@ -8,6 +8,28 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Changed
+
+- `bir traces`, `bir show`, and `bir stats` now read the local store in one
+  streaming pass instead of loading every event into memory. They keep a few
+  scalars per trace — name, timing, status, event count, and the tokens and cost
+  its generations recorded — where before they retained every event, each
+  carrying its captured input, output, metadata, and a copy of its own raw
+  payload. `bir show` keeps only the events of the trace it prints.
+
+  Measured on a 3.11 MiB store of 8,000 events across 4,000 traces: `bir stats`
+  peaks at 3.97 MiB instead of 38.70 MiB (9.7×), `bir traces` at 4.13 MiB
+  instead of 20.13 MiB (4.9×), and `bir show` at 0.23 MiB instead of 20.13 MiB
+  (88.9×). What remains scales with the number of traces rather than the number
+  of events or the size of what they captured, and `bir show` no longer scales
+  with the store at all. Three benchmark cases cover these commands so a future
+  change that starts materializing the store again is visible.
+
+  Output is unchanged, including `--json`, filters, `--limit`, and
+  `--skip-invalid`. `load_events()` and `load_traces()` are untouched: they are
+  public API and still return the lists they always have. `bir export-otel`
+  still loads whole traces, because the exporter takes them as a list.
+
 ### Added
 
 - `bir traces`, `bir show`, `bir stats`, and `bir export-otel` accept
