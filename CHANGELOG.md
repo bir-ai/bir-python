@@ -10,6 +10,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir send`, `bir send-experiment`, `bir prune`, and `bir export-otel` accept
+  `--json`, so every command that produces a result can be read by a script
+  rather than by matching English. The shapes mirror the result objects the
+  library returns: `{accepted, attempted, skipped}` for a send,
+  `{accepted, experiment_id}` for an experiment, `{removed_traces, kept_traces,
+  removed_events, bytes_reclaimed, dry_run}` for a prune, and
+  `{traces, spans, endpoint}` for an export. `prune` reporting `dry_run` as a
+  boolean is the point of the exercise: a preview and a write used to differ
+  only by a parenthetical in the summary line.
+
+  The human summary is still the default, and a usage error stays a message on
+  stderr with a non-zero exit code even under `--json`, so a script never parses
+  a failure as a successful result. `eval-gate` was already JSON-only and is
+  unchanged. `tail` and `experiment-report` have no JSON form on purpose: one
+  streams events rather than producing a result, the other renders a document in
+  a format you asked for.
+
 - The deprecation policy on the stability page now has machinery behind it.
   `bir/_deprecation.py` provides one message format, a warning helper that
   blames the caller's line rather than a line inside Bir, a decorator for a

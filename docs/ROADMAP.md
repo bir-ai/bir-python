@@ -52,34 +52,12 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
-| 2 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
-| 3 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
+| 1 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
+| 2 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
 
 ## Work item details
 
-### 1. Extend machine-readable output to the automation commands
-
-**Why:** `--json` exists on six of thirteen commands (`traces`, `show`, `stats`,
-`experiments`, `experiment-show`, `config`) and is missing from the ones written
-for automation. `eval-gate` exists to fail a build, but a pipeline cannot read
-*which* score regressed without parsing prose. `send`, `send-experiment`, and
-`prune` report counts a script would want, and `export-otel` reports what it
-exported. The stability page already tells users to parse JSON "where offered",
-which is thin cover for a gap.
-
-**Scope:**
-
-- Add `--json` to `eval-gate` first: verdict, per-evaluator deltas, and the
-  threshold that decided it.
-- Then `send`, `send-experiment`, `prune`, and `export-otel`, reporting the
-  counts they already print.
-- Keep the human table as the default and the JSON shape covered by tests, since
-  it becomes a parsed contract the moment it ships.
-
-**Done when:** every command a CI pipeline would run can be read by one.
-
-### 2. Cover the transport error paths
+### 1. Cover the transport error paths
 
 **Why:** `_sending.py` has the lowest coverage in the package (79.7%), and the
 gap is not in incidental code — it is in HTTP error handling and the
@@ -100,7 +78,7 @@ malformed-input branches.
 **Done when:** both modules clear the package's overall coverage rate, with the
 error paths covered by behavior tests rather than line-touching ones.
 
-### 3. Verify free-threaded builds
+### 2. Verify free-threaded builds
 
 **Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
 release where free-threading became officially supported. Nothing here is known
@@ -124,8 +102,15 @@ and a test backs it.
 
 Nothing here is P1 any more: the store-health work that was — a damaged store
 being unreadable, and a large one costing memory proportional to its size — has
-shipped, and so has the deprecation machinery a Beta release needs. All three
+shipped, and so has the deprecation machinery a Beta release needs. Both
 remaining items are independent and can be picked up in any order.
+
+One correction from the 2026-08-06 audit: it claimed `eval-gate` could not tell
+a pipeline which score regressed without parsing prose. That was wrong —
+`eval-gate` has always emitted JSON only, carrying the verdict, per-evaluator
+deltas, the reason each one regressed, and the tolerances that decided it. The
+gap was in `send`, `send-experiment`, `prune`, and `export-otel`, which is what
+shipped.
 
 The deprecation mechanism has no first user yet. The likeliest one is the flat
 re-exports in `bir.integrations.__all__`, where `trace_chat` resolves to
@@ -153,6 +138,6 @@ OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
 the performance benchmark harness, the trace-context decision
 ([ADR 0001](adr/0001-distributed-trace-context.md)), reading a damaged store with
-`--skip-invalid`, streaming the CLI read commands, and the deprecation
-mechanism. Regressions in those areas
+`--skip-invalid`, streaming the CLI read commands, the deprecation mechanism, and
+machine-readable output for every command that produces a result. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.

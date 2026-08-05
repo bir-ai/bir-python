@@ -29,6 +29,7 @@ bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 bir eval-gate baseline.jsonl candidate.jsonl \
   --tolerance 0.01 --score-tolerance latency_under=0.05 --missing-score regress
 bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' extra
+bir prune --keep-last 500 --yes --json   # machine-readable result for a script
 bir config                    # print the effective resolved configuration
 bir config --json             # the same fields as machine-readable JSON
 ```
@@ -38,15 +39,15 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json] [--skip-invalid]` | Print one trace as an indented event tree, or a nested JSON tree. |
 | `bir stats [--path P] [--include-rotated] [--json] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
-| `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
+| `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes] [--json]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
 | `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH]` | Render one experiment to a self-contained HTML or Markdown report. |
-| `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result; optionally use bounded groups. |
-| `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
+| `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS] [--json]` | Send local events and print the upload result; optionally use bounded groups. |
+| `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS] [--json]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
-| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--skip-invalid] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
+| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--skip-invalid] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS] [--json]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 | `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
@@ -195,6 +196,40 @@ the same fields as a deterministic, sorted object for scripts.
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
 `stats`, `experiments`, `experiment-show`, and `config` is suitable for scripts.
+
+### Machine-readable output
+
+Every command reports its result as JSON on request, so a script never has to
+match English. `eval-gate` always emits JSON — it exists to be read by a build —
+and the rest print a human summary by default and JSON with `--json`:
+
+| Command | `--json` shape |
+| --- | --- |
+| `traces` | Array of `{id, name, status, start_time, duration_ms, event_count}` |
+| `show` | Nested `{event, children}` tree |
+| `stats` | `{traces, tokens, cost, latency_ms}` |
+| `experiments` | Array of experiment summaries |
+| `experiment-show` | One experiment with its per-example results |
+| `send` | `{accepted, attempted, skipped}` |
+| `send-experiment` | `{accepted, experiment_id}` |
+| `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, dry_run}` |
+| `export-otel` | `{traces, spans, endpoint}` |
+| `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, ...}` (always) |
+| `config` | The effective configuration |
+
+Two commands have no JSON form. `tail` streams events as they arrive rather than
+producing a result, and `experiment-report` renders a document you asked for in
+a named format.
+
+A usage error stays a message on stderr and a non-zero exit code even under
+`--json`, so a script never parses a failure as a successful result:
+
+```bash
+$ bir prune --json          # no selection filter given
+bir: prune requires at least one selection filter (--before, --keep-last, or --status)
+$ echo $?
+1
+```
 
 ### Reading a damaged store
 

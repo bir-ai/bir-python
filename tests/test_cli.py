@@ -1593,6 +1593,134 @@ class SendCommandTests(CliBaseTest):
                     self.assertEqual(raised.exception.code, 2)
 
 
+class AutomationJsonOutputTests(CliBaseTest):
+    """The commands a pipeline runs report their result as JSON on request.
+
+    ``eval-gate`` is absent on purpose: it has always emitted JSON only. These
+    are the four that printed a human summary line with no machine-readable
+    alternative, so a script had to match English to learn what happened.
+    """
+
+    def test_send_reports_counts_as_json(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            response = FakeHttpResponse(json.dumps({"accepted": 2, "event_ids": ["a", "b"]}).encode("utf-8"))
+
+            with patch("urllib.request.urlopen", return_value=response):
+                code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test", "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(set(payload), {"accepted", "attempted", "skipped"})
+            self.assertEqual(payload["accepted"], 2)
+            # ``skipped`` is what the server did not newly accept, so it stays
+            # consistent with the counts either side of it.
+            self.assertEqual(payload["skipped"], payload["attempted"] - payload["accepted"])
+
+    def test_send_experiment_reports_the_accepted_id_as_json(self) -> None:
+        with temporary_workdir() as workdir:
+            run_faq_experiment(workdir)
+            response = FakeHttpResponse(json.dumps({"accepted": 1, "id": "experiment-1"}).encode("utf-8"))
+
+            with patch("urllib.request.urlopen", return_value=response):
+                code, out, err = run_cli(
+                    "send-experiment",
+                    str(workdir / "faq.jsonl"),
+                    "--server",
+                    "http://server.test",
+                    "--json",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(json.loads(out), {"accepted": 1, "experiment_id": "experiment-1"})
+
+    def test_prune_reports_a_dry_run_as_a_field_not_a_sentence(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            code, out, err = run_cli("prune", "--path", str(trace_path), "--keep-last", "1", "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(
+                set(payload),
+                {"removed_traces", "kept_traces", "removed_events", "bytes_reclaimed", "dry_run"},
+            )
+            self.assertEqual(payload["removed_traces"], 1)
+            self.assertEqual(payload["kept_traces"], 1)
+            # Without --yes nothing was written, and a script learns that from a
+            # boolean rather than from a parenthetical in English.
+            self.assertIs(payload["dry_run"], True)
+
+    def test_prune_reports_a_write_as_json(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            code, out, _err = run_cli("prune", "--path", str(trace_path), "--keep-last", "1", "--yes", "--json")
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertIs(payload["dry_run"], False)
+            self.assertGreater(payload["bytes_reclaimed"], 0)
+            self.assertEqual(len(bir.load_traces(str(trace_path))), 1)
+
+    def test_export_otel_reports_what_it_exported_as_json(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+            captured: dict[str, Any] = {}
+
+            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+                code, out, err = run_cli(
+                    "export-otel",
+                    "--path",
+                    str(trace_path),
+                    "--endpoint",
+                    "http://collector.test:4318/v1/traces",
+                    "--json",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(
+                json.loads(out),
+                {"traces": 2, "spans": 6, "endpoint": "http://collector.test:4318/v1/traces"},
+            )
+
+    def test_the_human_summary_is_still_the_default(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            code, out, _err = run_cli("prune", "--path", str(trace_path), "--keep-last", "1")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=1 kept=1", out)
+            self.assertIn("dry run", out)
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(out)
+
+    def test_a_refused_prune_reports_on_stderr_without_json(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            write_two_traces(trace_path)
+
+            # A usage error is not a result, so it stays a message and a exit
+            # code rather than becoming a JSON document a script would parse as
+            # success.
+            code, out, err = run_cli("prune", "--path", str(trace_path), "--json")
+
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("requires at least one selection filter", err)
+
+
 class SendExperimentCommandTests(CliBaseTest):
     def test_send_experiment_reports_accepted_and_id(self) -> None:
         with temporary_workdir() as workdir:

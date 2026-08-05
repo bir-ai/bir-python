@@ -152,9 +152,12 @@ express two providers using the same entry-point name.
 | `prune` | Delete recorded events |
 | `config` | Print the effective configuration |
 
-Command names and their documented flags are public. Human-readable output
-formatting is not: column widths, ordering hints, and phrasing may change. Parse
-the JSON output (`--json`, where offered) rather than the table output.
+Command names and their documented flags are public, and so are the field names
+in their `--json` output. Human-readable output formatting is not: column
+widths, ordering hints, and phrasing may change in any release, so parse the
+JSON rather than the table. Every command that produces a result offers it —
+`eval-gate` always emits JSON, the rest take `--json` — and the shapes are listed
+in the [CLI guide](cli-env.md#machine-readable-output).
 
 ### Environment variables
 

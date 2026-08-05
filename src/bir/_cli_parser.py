@@ -225,6 +225,7 @@ def build_parser(
         metavar="SECONDS",
         help="Per-request HTTP timeout in seconds for each send (default: 10).",
     )
+    send.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a summary line.")
     send.set_defaults(func=handlers["send"])
 
     send_experiment_parser = subparsers.add_parser(
@@ -250,6 +251,11 @@ def build_parser(
         default=0.5,
         metavar="SECONDS",
         help="Base seconds for exponential backoff between retries; the delay is backoff * 2**attempt (default: 0.5).",
+    )
+    send_experiment_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of a summary line.",
     )
     send_experiment_parser.set_defaults(func=handlers["send_experiment"])
 
@@ -346,6 +352,11 @@ def build_parser(
         metavar="SECONDS",
         help="Per-export timeout in seconds forwarded to the OTLP exporter.",
     )
+    export_otel.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of a summary line.",
+    )
     export_otel.set_defaults(func=handlers["export_otel"])
 
     prune = subparsers.add_parser(
@@ -385,6 +396,11 @@ def build_parser(
         "--yes",
         action="store_true",
         help="Actually delete the selected traces; without it (or with --dry-run) prune only previews.",
+    )
+    prune.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of a summary line.",
     )
     prune.set_defaults(func=handlers["prune"])
 

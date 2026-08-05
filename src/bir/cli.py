@@ -602,12 +602,26 @@ def _cmd_send(args: argparse.Namespace) -> int:
         backoff=args.backoff,
         **timeout_kwargs,
     )
+    if args.json:
+        # Mirrors SendEventsResult so the CLI and the library report a send the
+        # same way; the accepted event ids stay out, since a pipeline wanting
+        # them should read the store rather than a command's stdout.
+        _dump_json(
+            {"accepted": result.accepted, "attempted": result.attempted, "skipped": result.skipped},
+            sys.stdout,
+        )
+        return 0
+
     print(f"accepted={result.accepted} attempted={result.attempted} skipped={result.skipped}")
     return 0
 
 
 def _cmd_send_experiment(args: argparse.Namespace) -> int:
     result = send_experiment(args.path, args.server, retries=args.retries, backoff=args.backoff)
+    if args.json:
+        _dump_json({"accepted": result.accepted, "experiment_id": result.experiment_id}, sys.stdout)
+        return 0
+
     print(f"accepted={result.accepted} id={result.experiment_id}")
     return 0
 
@@ -633,6 +647,10 @@ def _cmd_export_otel(args: argparse.Namespace) -> int:
     except ImportError as exc:
         print(f"bir: {exc}", file=sys.stderr)
         return 1
+    if args.json:
+        _dump_json({"traces": len(traces), "spans": exported, "endpoint": args.endpoint}, sys.stdout)
+        return 0
+
     print(f"exported {len(traces)} trace(s) ({exported} spans) to {args.endpoint}")
     return 0
 
@@ -659,6 +677,21 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         status=args.status,
         dry_run=not write,
     )
+    if args.json:
+        # ``dry_run`` is a field rather than a suffix on a sentence, so a script
+        # can tell a preview from a write without matching English.
+        _dump_json(
+            {
+                "removed_traces": result.removed_traces,
+                "kept_traces": result.kept_traces,
+                "removed_events": result.removed_events,
+                "bytes_reclaimed": result.bytes_reclaimed,
+                "dry_run": result.dry_run,
+            },
+            sys.stdout,
+        )
+        return 0
+
     summary = (
         f"removed={result.removed_traces} kept={result.kept_traces} "
         f"events={result.removed_events} bytes={result.bytes_reclaimed}"
