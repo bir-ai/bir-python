@@ -8,6 +8,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Added
+
+- The deprecation policy on the stability page now has machinery behind it.
+  `bir/_deprecation.py` provides one message format, a warning helper that
+  blames the caller's line rather than a line inside Bir, a decorator for a
+  deprecated callable, and a module `__getattr__` builder for a deprecated
+  class, constant, or alias. Deprecating a name is two lines at its definition
+  and the pattern to copy is in `tests/test_deprecation.py`.
+
+  The promised grace period is now arithmetic rather than a judgment call:
+  `_check_removal_release` refuses a removal release sooner than two minor
+  releases out, so a deadline that would shorten a user's migration window fails
+  the build instead of shipping. The stability page states the concrete deadline
+  (a name deprecated against `0.3.0` warns from `0.4.0` and may go in `0.5.0`),
+  and a test keeps that sentence true as the version moves. Nothing in the SDK
+  is deprecated yet, and a test asserts the public API warns about nothing.
+
 ### Changed
 
 - `bir traces`, `bir show`, and `bir stats` now read the local store in one

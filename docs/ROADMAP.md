@@ -52,35 +52,13 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Give the deprecation policy a mechanism | P2 | S | A promised warning is code, not prose | — |
-| 2 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
-| 3 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
-| 4 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
+| 1 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
+| 2 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
+| 3 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
 
 ## Work item details
 
-### 1. Give the deprecation policy a mechanism
-
-**Why:** `docs/site/stability.md` promises that a public name keeps working for
-one minor release while emitting `DeprecationWarning` and naming its
-replacement. There is no such machinery: `DeprecationWarning` and
-`warnings.warn` appear nowhere in `src/` or `tests/`. The first deprecation will
-therefore invent its own approach under time pressure, which is exactly what a
-written policy exists to prevent.
-
-**Scope:**
-
-- Add a small internal helper that emits a `DeprecationWarning` naming the
-  replacement and the release it is removed in.
-- Add the test pattern that proves a deprecated name still works and still
-  warns, so the policy is enforced the way the stability inventory is.
-- Note in the release checklist that a deprecation is announced in the changelog
-  in the same release it starts warning.
-
-**Done when:** deprecating a name is a two-line change with a ready test, and
-the promise on the stability page is executable.
-
-### 2. Extend machine-readable output to the automation commands
+### 1. Extend machine-readable output to the automation commands
 
 **Why:** `--json` exists on six of thirteen commands (`traces`, `show`, `stats`,
 `experiments`, `experiment-show`, `config`) and is missing from the ones written
@@ -101,7 +79,7 @@ which is thin cover for a gap.
 
 **Done when:** every command a CI pipeline would run can be read by one.
 
-### 3. Cover the transport error paths
+### 2. Cover the transport error paths
 
 **Why:** `_sending.py` has the lowest coverage in the package (79.7%), and the
 gap is not in incidental code — it is in HTTP error handling and the
@@ -122,7 +100,7 @@ malformed-input branches.
 **Done when:** both modules clear the package's overall coverage rate, with the
 error paths covered by behavior tests rather than line-touching ones.
 
-### 4. Verify free-threaded builds
+### 3. Verify free-threaded builds
 
 **Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
 release where free-threading became officially supported. Nothing here is known
@@ -146,9 +124,14 @@ and a test backs it.
 
 Nothing here is P1 any more: the store-health work that was — a damaged store
 being unreadable, and a large one costing memory proportional to its size — has
-shipped. All four remaining items are independent and can be picked up in any
-order. Item 1 is worth doing before the first Beta deprecation rather than
-during it.
+shipped, and so has the deprecation machinery a Beta release needs. All three
+remaining items are independent and can be picked up in any order.
+
+The deprecation mechanism has no first user yet. The likeliest one is the flat
+re-exports in `bir.integrations.__all__`, where `trace_chat` resolves to
+whichever provider the package imported last and the stability page already
+tells users to import from the module instead. Retiring those is a product
+decision, not a mechanical one, so it belongs in a new issue rather than here.
 
 One read path was deliberately left alone. `bir export-otel` still loads whole
 traces because the exporter takes them as a list; bounding it means changing
@@ -170,5 +153,6 @@ OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
 the performance benchmark harness, the trace-context decision
 ([ADR 0001](adr/0001-distributed-trace-context.md)), reading a damaged store with
-`--skip-invalid`, and streaming the CLI read commands. Regressions in those areas
+`--skip-invalid`, streaming the CLI read commands, and the deprecation
+mechanism. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.

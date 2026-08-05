@@ -167,6 +167,46 @@ assert event.output == {"documents": [{"id": "doc-1", "text": "local context"}]}
 PY
 ```
 
+## Deprecations
+
+`docs/site/stability.md` promises a public name keeps working for one minor
+release while warning, and may only be removed in the release after that.
+`bir/_deprecation.py` implements that; deprecating a name is two lines at its
+definition:
+
+```python
+from ._deprecation import _deprecated
+
+@_deprecated(replacement="bir.new_name()", removed_in="0.5.0")
+def old_name(...): ...
+```
+
+For a name a decorator cannot wrap — a class, a constant, an alias — give the
+module a `__getattr__`:
+
+```python
+from ._deprecation import _Deprecation, _deprecated_attribute_getter
+
+__getattr__ = _deprecated_attribute_getter(
+    __name__,
+    {"OldName": _Deprecation(NewName, replacement="bir.NewName", removed_in="0.5.0")},
+)
+```
+
+A CLI command or environment variable being retired prints
+`_deprecation_message(...)` to stderr instead, because `DeprecationWarning` is
+hidden by default outside `__main__`.
+
+When a deprecation lands:
+
+- Pick `removed_in` at or after `_earliest_removal(current_version)` — two minor
+  releases out. `_check_removal_release` refuses anything sooner.
+- Announce it in `CHANGELOG.md` in the same release it starts warning, naming the
+  replacement, under `Changed`.
+- Keep the deprecated name's own tests passing; it still works until it is
+  removed. `tests/test_deprecation.py` holds the pattern to copy.
+- Remove it only in a release at or after `removed_in`, under `Removed`.
+
 ## Performance Baseline
 
 Record a baseline on the release machine, then compare the release commit

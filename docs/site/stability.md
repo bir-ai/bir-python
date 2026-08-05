@@ -206,8 +206,20 @@ name.
 **Deprecation.** A public name is not deleted outright. It is first kept working
 for one minor release while emitting `DeprecationWarning` and naming its
 replacement in the message and the changelog; only the release after that may
-remove it. This applies to everything on this page, including CLI commands and
-environment variables.
+remove it. A name deprecated today, against `0.3.0`, starts warning in `0.4.0`
+and may be removed no earlier than `0.5.0`. This applies to everything on this
+page, including CLI commands and environment variables — a retiring command or
+variable prints the same notice on stderr, since `DeprecationWarning` is hidden
+by default outside `__main__`.
+
+The warning always names both the replacement and the release it disappears in:
+
+```
+bir.old_name() is deprecated and will be removed in 0.5.0; use bir.new_name() instead.
+```
+
+Deprecated names are still tested and still work. If you want them to fail your
+build early, run your test suite with `-W error::DeprecationWarning`.
 
 **Supported Python.** The package supports every CPython version upstream still
 supports, currently **3.10 through 3.14**, and every one of them is tested on
