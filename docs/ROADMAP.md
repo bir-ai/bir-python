@@ -62,42 +62,27 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|-------------|----------|------|-----------------|------------|
-| 1 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
+None. Every item from the 2026-07-31 audit has shipped or been decided; the last
+of them, distributed trace-context propagation, is recorded in
+[ADR 0001](adr/0001-distributed-trace-context.md).
 
-## Work item details
+Beta readiness is tracked on the checklist in `docs/site/stability.md`, not
+here. Two of its open entries are deliberately not roadmap work:
 
-### 1. Decide distributed trace-context propagation
+- Confirming the event-schema `1.0` contract against the current `bir-app`
+  release, including the event-tree shape the framework bridges now record and
+  the `metadata.remote_parent` shape ADR 0001 proposes. This cannot be verified
+  from this repository.
+- The release mechanics of raising the version and the `Development Status`
+  classifier, and writing the migration note for the public changes since
+  `0.3.0`.
 
-**Why:** trace/span IDs are intentionally read-only and cannot currently be
-injected across process or service boundaries. That is safe and simple for local
-tracing, but prevents a single trace from following queue workers or HTTP calls.
+Implementing ADR 0001's public API is also checklist-gated rather than roadmap
+work: the decision is made, and shipping it waits on the `bir-app` confirmation
+above plus a security review of any future enabled-by-default mode.
 
-**Scope:**
-
-- Write an ADR comparing no propagation, Bir-specific headers, and W3C Trace
-  Context interoperability.
-- Define trust boundaries, validation, sampling inheritance, collision behavior,
-  and interaction with OTLP export before exposing setters.
-- Prototype extraction/injection as an opt-in API with strict validation.
-- Do not change schema `1.0` until server/dashboard compatibility is agreed.
-
-**Done when:** the repository records an explicit decision; implementation ships
-only if the security and cross-repository contract are approved.
-
-## Sequencing
-
-Beta readiness is tracked on the checklist in `docs/site/stability.md`, and the
-one item above is on it: a Beta release should not claim trace context is stable
-before the propagation question is decided. The bridges' in-process parent
-mapping is prior art for the trust boundary it has to draw for parents arriving
-from another process.
-
-Two checklist items are not roadmap work and are not tracked here: confirming
-the event-schema `1.0` contract — including the event-tree shape the framework
-bridges now record — against the current `bir-app` release, and the release
-mechanics of raising the version and the `Development Status` classifier.
+The next audit should re-derive priorities from the current code rather than
+extending this list.
 
 ## Explicitly not on the backlog
 
@@ -106,5 +91,5 @@ in an older generated roadmap: sdist verification, stats filters, the master kil
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
 OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
-and the performance benchmark harness. Regressions in those areas are bugs; new
-scope requires a new issue with current evidence.
+the performance benchmark harness, and the trace-context decision. Regressions in
+those areas are bugs; new scope requires a new issue with current evidence.

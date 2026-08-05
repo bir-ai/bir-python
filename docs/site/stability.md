@@ -189,6 +189,13 @@ The *shape* of the event tree is not frozen by the schema. Which events an
 integration emits, and which event a `parent_id` points at, can change to record
 a framework's structure more accurately; such changes are release-noted.
 
+Trace and span ids are generated locally and read-only: there is no setter and
+no way to inject an id from another process, so a trace ends at the process
+boundary. The design for changing that — W3C Trace Context, opt-in, with the
+remote context recorded rather than obeyed — is decided and recorded in
+[ADR 0001](https://github.com/bir-ai/bir-python/blob/main/docs/adr/0001-distributed-trace-context.md),
+but no API for it ships yet.
+
 ## Compatibility policy
 
 **Versioning.** The SDK is `0.x`. Breaking changes land in a minor release

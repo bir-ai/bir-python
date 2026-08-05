@@ -10,6 +10,24 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Distributed trace-context propagation now has a recorded decision:
+  `docs/adr/0001-distributed-trace-context.md` adopts W3C Trace Context over a
+  Bir-specific header or no propagation at all, with the remote context recorded
+  rather than obeyed — an incoming trace id is adopted so events join one trace,
+  the remote span id is kept as trace-root metadata because `parent_id` must
+  resolve inside the store, and the remote sampled flag is recorded but never
+  applied, since honoring it would let any caller force full recording on a
+  service it calls. Extraction is opt-in per call; there is no ambient switch
+  that starts trusting headers.
+
+  Only the validated primitive ships: an internal `traceparent` parser and
+  formatter with strict, size-capped, hex-only validation, exported from no
+  public module and called by no recording path. Building it first was the
+  point — the first implementation accepted a trace id with a trailing newline,
+  because Python's `$` matches before one, and that id would have reached the
+  JSONL store. The public API waits on `bir-app` confirming how it renders a
+  trace whose events arrive from two processes. Schema `1.0` is unchanged.
+
 - `scripts/benchmarks.py` measures SDK performance on fixed synthetic data:
   disabled, sampled-out, and recorded tracing; capture redaction; store append
   with rotation; `load_events`/`load_traces`; prune selection; batched sending
