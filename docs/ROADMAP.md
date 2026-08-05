@@ -52,33 +52,11 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
-| 2 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
+| 1 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
 
 ## Work item details
 
-### 1. Cover the transport error paths
-
-**Why:** `_sending.py` has the lowest coverage in the package (79.7%), and the
-gap is not in incidental code — it is in HTTP error handling and the
-single-event fallback used against a server without a batch endpoint
-(`_post_event`, `_accepted_count_from_response`). That is the code that runs
-when a server misbehaves, which is when a user most needs it to behave
-predictably. `_eval_persistence.py` (79.2%) is second and has the same shape:
-malformed-input branches.
-
-**Scope:**
-
-- Test the fallback path's retryable and permanent HTTP statuses, `URLError`,
-  socket timeout, non-2xx bodies, and malformed accepted-count responses.
-- Do the same for the experiment-loading validation branches.
-- Prefer tests that assert the user-visible message and whether a retry happened,
-  not just that a line executed.
-
-**Done when:** both modules clear the package's overall coverage rate, with the
-error paths covered by behavior tests rather than line-touching ones.
-
-### 2. Verify free-threaded builds
+### 1. Verify free-threaded builds
 
 **Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
 release where free-threading became officially supported. Nothing here is known
@@ -102,8 +80,8 @@ and a test backs it.
 
 Nothing here is P1 any more: the store-health work that was — a damaged store
 being unreadable, and a large one costing memory proportional to its size — has
-shipped, and so has the deprecation machinery a Beta release needs. Both
-remaining items are independent and can be picked up in any order.
+shipped, and so has the deprecation machinery a Beta release needs. One item
+remains, and it is the lowest priority of the audit.
 
 One correction from the 2026-08-06 audit: it claimed `eval-gate` could not tell
 a pipeline which score regressed without parsing prose. That was wrong —
@@ -138,6 +116,7 @@ OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
 the performance benchmark harness, the trace-context decision
 ([ADR 0001](adr/0001-distributed-trace-context.md)), reading a damaged store with
-`--skip-invalid`, streaming the CLI read commands, the deprecation mechanism, and
-machine-readable output for every command that produces a result. Regressions in those areas
+`--skip-invalid`, streaming the CLI read commands, the deprecation mechanism,
+machine-readable output for every command that produces a result, and coverage of
+the transport and experiment-loading error paths. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.

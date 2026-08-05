@@ -10,6 +10,24 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- The transport and experiment-loading error paths are now covered by behavior
+  tests. `bir/_sending.py` rose from 79.7% to 98.7% and
+  `bir/_eval_persistence.py` from 79.2% to 99.2%, both from the package's least
+  covered code to among its best, and the package total from 92.5% to 93.3%.
+
+  The new tests drive `send_events` and `send_experiment` against a stubbed
+  socket and assert what a user experiences when a server misbehaves: the
+  message they read, and whether the SDK retried. Both request paths are
+  covered, including the per-event fallback an older server without a batch
+  endpoint forces, across server errors, rejections, network failures, read
+  timeouts, non-2xx bodies, and malformed success responses. A rejection is
+  asserted not to be retried, since asking a 4xx again only delays the error.
+  Experiment loading is covered the same way — every field rejection is checked
+  for naming the path, line, and field — along with the sanitizing that stops an
+  experiment name carrying path syntax from writing outside the store.
+
+  No behavior changed; this is test coverage of code that already worked.
+
 - `bir send`, `bir send-experiment`, `bir prune`, and `bir export-otel` accept
   `--json`, so every command that produces a result can be read by a script
   rather than by matching English. The shapes mirror the result objects the
