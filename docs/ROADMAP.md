@@ -74,6 +74,19 @@ line. After that, `load_events`, `load_traces`, `bir traces`, `bir show`,
 store, and the only recovery is hand-editing JSONL. A local-first tool should
 not lose a week of local traces to one interrupted process.
 
+Reproduced at this audit: write three traces (six events), truncate the last
+line, and every read command answers `Invalid JSON in trace file
+.bir/traces.jsonl at line 6` — while five of the six events sit intact in the
+file, unreachable because of the sixth. Nothing is corrupted; reading is.
+
+How often it bites depends on payload size. One event is a few hundred bytes and
+the file is opened and closed around it, so the kill window is usually narrow.
+It widens considerably once input/output capture is on, where a single event can
+span several buffer flushes, and it is not a window at all when the disk fills:
+`ENOSPC` truncates deterministically. A crash is also not the only cause — an
+interrupted copy, another tool appending to the file, or a hand edit produces the
+same unreadable store.
+
 **Scope:**
 
 - Decide the default: strict is right for `load_events`/`load_traces` as a
