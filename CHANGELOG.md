@@ -10,6 +10,20 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `bir traces`, `bir show`, `bir stats`, and `bir export-otel` accept
+  `--skip-invalid`, which reads past lines they cannot parse and reports how
+  many were skipped instead of refusing the store. An event is appended with one
+  buffered write, so a killed process, an OOM kill, or a full disk can leave a
+  truncated final line — and until now that one line made every recorded event
+  before it unreachable, recoverable only by hand-editing JSONL. The report is
+  written to stderr, so `--json` output stays parseable.
+
+  Nothing became lenient by default. `load_events()` and `load_traces()` still
+  refuse a store they cannot read completely, because a program building on them
+  should not receive a silently partial list. `bir send` and `bir prune` have no
+  such flag either: skipping a line there would fail to upload recorded data or
+  delete traces the command could not account for.
+
 - Distributed trace-context propagation now has a recorded decision:
   `docs/adr/0001-distributed-trace-context.md` adopts W3C Trace Context over a
   Bir-specific header or no propagation at all, with the remote context recorded

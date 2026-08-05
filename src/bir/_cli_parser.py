@@ -38,6 +38,13 @@ def build_parser(
     traces.add_argument("--limit", type=_positive_int, metavar="N", help="Show at most N most recent traces.")
     traces.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
     traces.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip lines that cannot be read instead of refusing the whole store, reporting how many were skipped. Use after an interrupted write left a damaged line."
+        ),
+    )
+    traces.add_argument(
         "--include-rotated",
         action="store_true",
         help="Also read size-rotated trace files (oldest first) alongside the active file.",
@@ -70,6 +77,13 @@ def build_parser(
     show.add_argument("trace_id", help="ID of the trace to show.")
     show.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
     show.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip lines that cannot be read instead of refusing the whole store, reporting how many were skipped. Use after an interrupted write left a damaged line."
+        ),
+    )
+    show.add_argument(
         "--include-rotated",
         action="store_true",
         help="Also read size-rotated trace files (oldest first) alongside the active file.",
@@ -82,6 +96,13 @@ def build_parser(
         help="Summarize local traces: counts, token usage, cost, and latency.",
     )
     stats.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
+    stats.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip lines that cannot be read instead of refusing the whole store, reporting how many were skipped. Use after an interrupted write left a damaged line."
+        ),
+    )
     stats.add_argument(
         "--include-rotated",
         action="store_true",
@@ -282,6 +303,13 @@ def build_parser(
         help="Export local traces to an OTLP endpoint (requires the 'otel' extra).",
     )
     export_otel.add_argument("--path", help="Trace JSONL file to read (default: .bir/traces.jsonl).")
+    export_otel.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip lines that cannot be read instead of refusing the whole store, reporting how many were skipped. Use after an interrupted write left a damaged line."
+        ),
+    )
     export_otel.add_argument(
         "--include-rotated",
         action="store_true",

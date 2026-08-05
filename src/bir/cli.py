@@ -38,6 +38,8 @@ from ._cli_present import (
 from ._sdk import (
     LoadedTrace,
     TraceEvent,
+    _load_events_skipping_invalid,
+    _load_traces_skipping_invalid,
     _prune_trace_store,
     load_events,
     load_traces,
@@ -119,9 +121,63 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
 
+class _SkippedLines:
+    """Collects the lines a lenient read could not parse, for one report.
+
+    Messages are de-duplicated because a command may read the store more than
+    once — ``stats`` loads traces and events separately — and one damaged line
+    is one damaged line however many passes see it.
+    """
+
+    def __init__(self) -> None:
+        self._messages: dict[str, None] = {}
+
+    def __call__(self, error: ValueError) -> None:
+        self._messages.setdefault(str(error), None)
+
+    def report(self) -> None:
+        """Tell the user the view is partial, and why."""
+
+        if not self._messages:
+            return
+        count = len(self._messages)
+        noun = "line" if count == 1 else "lines"
+        first = next(iter(self._messages))
+        # stderr, so a --json run still writes only JSON to stdout.
+        print(f"bir: skipped {count} unreadable {noun}; first: {first}", file=sys.stderr)
+
+
+def _read_traces(args: argparse.Namespace) -> list[LoadedTrace]:
+    """Load traces for a display command, honoring ``--skip-invalid``."""
+
+    if not getattr(args, "skip_invalid", False):
+        return load_traces(args.path, include_rotated=args.include_rotated)
+
+    skipped = _SkippedLines()
+    traces = _load_traces_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
+    skipped.report()
+    return traces
+
+
+def _read_traces_and_events(args: argparse.Namespace) -> tuple[list[LoadedTrace], list[TraceEvent]]:
+    """Load both views for ``stats``, reporting skipped lines once."""
+
+    if not getattr(args, "skip_invalid", False):
+        return (
+            load_traces(args.path, include_rotated=args.include_rotated),
+            load_events(args.path, include_rotated=args.include_rotated),
+        )
+
+    skipped = _SkippedLines()
+    traces = _load_traces_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
+    events = _load_events_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
+    skipped.report()
+    return traces, events
+
+
 def _cmd_traces(args: argparse.Namespace) -> int:
     traces = sorted(
-        load_traces(args.path, include_rotated=args.include_rotated),
+        _read_traces(args),
         key=lambda trace: trace.start_time,
         reverse=True,
     )
@@ -207,11 +263,7 @@ def _as_aware_utc(value: datetime) -> datetime:
 
 def _cmd_show(args: argparse.Namespace) -> int:
     trace = next(
-        (
-            candidate
-            for candidate in load_traces(args.path, include_rotated=args.include_rotated)
-            if candidate.id == args.trace_id
-        ),
+        (candidate for candidate in _read_traces(args) if candidate.id == args.trace_id),
         None,
     )
     if trace is None:
@@ -232,8 +284,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
-    traces = load_traces(args.path, include_rotated=args.include_rotated)
-    events = load_events(args.path, include_rotated=args.include_rotated)
+    traces, events = _read_traces_and_events(args)
 
     if any(value is not None for value in (args.name, args.status, args.since, args.until)):
         traces = _filter_traces(
@@ -440,7 +491,7 @@ def _cmd_send_experiment(args: argparse.Namespace) -> int:
 
 
 def _cmd_export_otel(args: argparse.Namespace) -> int:
-    traces = load_traces(args.path, include_rotated=args.include_rotated)
+    traces = _read_traces(args)
     headers = dict(args.headers) if args.headers else None
     try:
         # Imported lazily so the CLI keeps importing without the optional 'otel'

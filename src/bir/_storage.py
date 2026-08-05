@@ -171,6 +171,7 @@ def load_events(
     *,
     include_rotated: bool = False,
     default_path: Path,
+    on_invalid: Callable[[ValueError], None] | None = None,
 ) -> list[TraceEvent]:
     """Load local JSONL trace events.
 
@@ -178,7 +179,14 @@ def load_events(
     explicit prevents this module from depending on active SDK configuration.
     """
 
-    return list(_iter_trace_events(path, include_rotated=include_rotated, default_path=default_path))
+    return list(
+        _iter_trace_events(
+            path,
+            include_rotated=include_rotated,
+            default_path=default_path,
+            on_invalid=on_invalid,
+        )
+    )
 
 
 def _iter_trace_events(
@@ -186,21 +194,34 @@ def _iter_trace_events(
     *,
     include_rotated: bool = False,
     default_path: Path,
+    on_invalid: Callable[[ValueError], None] | None = None,
 ) -> Iterator[TraceEvent]:
     """Yield validated local events in their original write order.
 
     The iterator keeps only one JSONL line and parsed event live at a time. It is
     the internal streaming primitive for store operations; public loaders still
     materialize their documented list return types.
+
+    ``on_invalid`` decides what an unreadable line means. Left ``None``, the
+    first one raises and nothing is read, which is the contract every caller has
+    always had. Supplied, the line is handed to the callback and skipped, so a
+    store damaged by an interrupted write is still readable and the caller can
+    tell the user what it could not read. Only callers that merely display
+    events pass it: skipping a line while sending or pruning would silently drop
+    or duplicate recorded data.
     """
 
     trace_path = Path(path) if path is not None else default_path
     trace_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
     for file_path in trace_files:
-        yield from _iter_trace_events_from_file(file_path)
+        yield from _iter_trace_events_from_file(file_path, on_invalid=on_invalid)
 
 
-def _iter_trace_events_from_file(trace_path: Path) -> Iterator[TraceEvent]:
+def _iter_trace_events_from_file(
+    trace_path: Path,
+    *,
+    on_invalid: Callable[[ValueError], None] | None = None,
+) -> Iterator[TraceEvent]:
     """Yield validated events from one JSONL file."""
 
     if not trace_path.exists():
@@ -212,12 +233,25 @@ def _iter_trace_events_from_file(trace_path: Path) -> Iterator[TraceEvent]:
             if not stripped:
                 continue
             try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in trace file {trace_path} at line {line_number}") from exc
-            if not isinstance(payload, dict):
-                raise ValueError(f"Trace file {trace_path} line {line_number} must contain a JSON object")
-            yield _trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number)
+                event = _trace_event_from_line(stripped, trace_path=trace_path, line_number=line_number)
+            except ValueError as exc:
+                if on_invalid is None:
+                    raise
+                on_invalid(exc)
+                continue
+            yield event
+
+
+def _trace_event_from_line(line: str, *, trace_path: Path, line_number: int) -> TraceEvent:
+    """Parse and validate one JSONL line, raising ``ValueError`` if it cannot be."""
+
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in trace file {trace_path} at line {line_number}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Trace file {trace_path} line {line_number} must contain a JSON object")
+    return _trace_event_from_payload(payload, trace_path=trace_path, line_number=line_number)
 
 
 def _trace_files_oldest_first(trace_path: Path) -> list[Path]:
@@ -249,10 +283,16 @@ def load_traces(
     *,
     include_rotated: bool = False,
     default_path: Path,
+    on_invalid: Callable[[ValueError], None] | None = None,
 ) -> list[LoadedTrace]:
     """Load local traces grouped by trace_id."""
 
-    events = _iter_trace_events(path, include_rotated=include_rotated, default_path=default_path)
+    events = _iter_trace_events(
+        path,
+        include_rotated=include_rotated,
+        default_path=default_path,
+        on_invalid=on_invalid,
+    )
     return _traces_from_events(events)
 
 

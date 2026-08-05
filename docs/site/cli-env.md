@@ -9,6 +9,7 @@ local data and sending it to a server.
 bir traces                    # list local traces, newest first
 bir traces --limit 20 --json  # machine-readable output
 bir traces --name checkout --status error --since 2026-01-01  # filter the listing
+bir traces --skip-invalid     # read a store an interrupted write damaged
 bir show <trace-id>           # print one trace as an indented event tree
 bir show <trace-id> --json    # nested {event, children} JSON tree
 bir stats                     # summarize counts, tokens, cost, and latency
@@ -34,9 +35,9 @@ bir config --json             # the same fields as machine-readable JSON
 
 | Command | What it does |
 | --- | --- |
-| `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
-| `bir show TRACE_ID [--path P] [--include-rotated] [--json]` | Print one trace as an indented event tree, or a nested JSON tree. |
-| `bir stats [--path P] [--include-rotated] [--json] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
+| `bir traces [--path P] [--limit N] [--json] [--include-rotated] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | List trace time, status, duration, event count, and name; optionally filtered. |
+| `bir show TRACE_ID [--path P] [--include-rotated] [--json] [--skip-invalid]` | Print one trace as an indented event tree, or a nested JSON tree. |
+| `bir stats [--path P] [--include-rotated] [--json] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
 | `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
 | `bir experiments [--dir D] [--json]` | List local experiment summaries. |
@@ -45,7 +46,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS]` | Send local events and print the upload result; optionally use bounded groups. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
-| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
+| `bir export-otel --endpoint URL [--path P] [--include-rotated] [--skip-invalid] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 | `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
 Every command accepts `--help`. Trace commands use `.bir/traces.jsonl` by
@@ -194,6 +195,43 @@ the same fields as a deterministic, sorted object for scripts.
 Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
 `stats`, `experiments`, `experiment-show`, and `config` is suitable for scripts.
+
+### Reading a damaged store
+
+Bir appends each event as one JSON line. If a process is killed, runs out of
+disk, or is otherwise interrupted part-way through a write, the file can end
+with a half-written line. Every reader validates line by line and refuses a
+store it cannot read completely, so one damaged line makes the whole store
+unreadable even though the events before it are intact:
+
+```
+$ bir traces
+bir: Invalid JSON in trace file .bir/traces.jsonl at line 6
+```
+
+`--skip-invalid` reads past those lines and tells you what it skipped:
+
+```
+$ bir traces --skip-invalid
+bir: skipped 1 unreadable line; first: Invalid JSON in trace file .bir/traces.jsonl at line 6
+START                             STATUS   DURATION  EVENTS  NAME
+2026-08-05T22:48:00.911001+00:00  success  0.1ms     2       request-1
+2026-08-05T22:48:00.910221+00:00  success  0.6ms     2       request-0
+```
+
+The report goes to stderr, so `--json` still writes only JSON to stdout. The
+flag is available on `traces`, `show`, `stats`, and `export-otel` — the commands
+that only display what they read.
+
+`send` and `prune` deliberately have no such flag. Skipping a line while
+uploading would silently fail to send recorded data, and skipping one while
+pruning would delete traces the command could not fully account for; both keep
+refusing a store they cannot read completely. Once you have recovered what you
+need, remove the damaged line from the JSONL file to make the store whole again.
+
+`load_events()` and `load_traces()` are likewise strict and unchanged: a program
+building on them gets all the recorded events or an error, never a silently
+partial list.
 
 ## Environment configuration
 

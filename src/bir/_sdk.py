@@ -442,6 +442,45 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
     )
 
 
+def _load_events_skipping_invalid(
+    path: str | Path | None,
+    *,
+    include_rotated: bool,
+    on_invalid: Callable[[ValueError], None],
+) -> list[TraceEvent]:
+    """Load events, handing each unreadable line to ``on_invalid`` and skipping it.
+
+    The public loaders stay strict: refusing a store they cannot fully read is
+    the contract a program building on them relies on. A person running the CLI
+    against a store an interrupted write damaged needs the opposite — the events
+    that are still intact, and a note about what could not be read — so the
+    commands that only display events use this instead.
+    """
+
+    return _storage_helpers.load_events(
+        path,
+        include_rotated=include_rotated,
+        default_path=_config.trace_path,
+        on_invalid=on_invalid,
+    )
+
+
+def _load_traces_skipping_invalid(
+    path: str | Path | None,
+    *,
+    include_rotated: bool,
+    on_invalid: Callable[[ValueError], None],
+) -> list[LoadedTrace]:
+    """Group traces, handing each unreadable line to ``on_invalid`` and skipping it."""
+
+    return _storage_helpers.load_traces(
+        path,
+        include_rotated=include_rotated,
+        default_path=_config.trace_path,
+        on_invalid=on_invalid,
+    )
+
+
 def send_events(
     server_url: str = "http://127.0.0.1:8000",
     *,

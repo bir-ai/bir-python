@@ -52,56 +52,15 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Survive a damaged trace file | P1 | M | One bad line stops being a total loss of the local store | — |
-| 2 | Bound memory in the read paths | P1 | M | Inspecting a large store costs what streaming it costs | — |
-| 3 | Give the deprecation policy a mechanism | P2 | S | A promised warning is code, not prose | — |
-| 4 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
-| 5 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
-| 6 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
+| 1 | Bound memory in the read paths | P1 | M | Inspecting a large store costs what streaming it costs | — |
+| 2 | Give the deprecation policy a mechanism | P2 | S | A promised warning is code, not prose | — |
+| 3 | Extend machine-readable output to the automation commands | P2 | S | A CI pipeline can read what `eval-gate`, `send`, and `prune` did | — |
+| 4 | Cover the transport error paths | P2 | S | The code that runs when a server misbehaves is tested | — |
+| 5 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
 
 ## Work item details
 
-### 1. Survive a damaged trace file
-
-**Why:** every read path refuses a store containing one unreadable line.
-`_storage.py` raises `ValueError` on invalid JSON, a non-object line, a missing
-required field, or a bad timestamp, and nothing anywhere accepts a
-`skip_invalid`-style option. The failure is not hypothetical: an event is
-appended with a single buffered `write()` (`_storage.py:582-583`), so a
-`SIGKILL`, an OOM kill, or `ENOSPC` part-way through can leave a truncated final
-line. After that, `load_events`, `load_traces`, `bir traces`, `bir show`,
-`bir stats`, `bir export-otel`, `bir send`, and `bir prune` all fail on the whole
-store, and the only recovery is hand-editing JSONL. A local-first tool should
-not lose a week of local traces to one interrupted process.
-
-Reproduced at this audit: write three traces (six events), truncate the last
-line, and every read command answers `Invalid JSON in trace file
-.bir/traces.jsonl at line 6` — while five of the six events sit intact in the
-file, unreachable because of the sixth. Nothing is corrupted; reading is.
-
-How often it bites depends on payload size. One event is a few hundred bytes and
-the file is opened and closed around it, so the kill window is usually narrow.
-It widens considerably once input/output capture is on, where a single event can
-span several buffer flushes, and it is not a window at all when the disk fills:
-`ENOSPC` truncates deterministically. A crash is also not the only cause — an
-interrupted copy, another tool appending to the file, or a hand edit produces the
-same unreadable store.
-
-**Scope:**
-
-- Decide the default: strict is right for `load_events`/`load_traces` as a
-  library contract, but a CLI that cannot show anything is the wrong answer.
-- Add an opt-in lenient read that skips unreadable lines and reports how many it
-  skipped, so a user knows the view is partial.
-- Consider a `bir repair`-style command, or a `bir traces --skip-invalid` flag,
-  over changing existing defaults silently.
-- Keep the strict path exactly as it is for the send/prune writers, where
-  skipping a line would risk dropping or duplicating data.
-
-**Done when:** a store with a truncated last line is still readable, the user is
-told what was skipped, and no existing strict behavior changed by default.
-
-### 2. Bound memory in the read paths
+### 1. Bound memory in the read paths
 
 **Why:** the prune and send paths were made bounded-memory; the read paths were
 not, and they are what a user runs against the same growing store. Measured with
@@ -125,7 +84,7 @@ without the user doing anything unusual.
 **Done when:** `bir stats` and `bir traces` on a large store have a peak that
 does not grow with the store, with benchmark numbers before and after.
 
-### 3. Give the deprecation policy a mechanism
+### 2. Give the deprecation policy a mechanism
 
 **Why:** `docs/site/stability.md` promises that a public name keeps working for
 one minor release while emitting `DeprecationWarning` and naming its
@@ -146,7 +105,7 @@ written policy exists to prevent.
 **Done when:** deprecating a name is a two-line change with a ready test, and
 the promise on the stability page is executable.
 
-### 4. Extend machine-readable output to the automation commands
+### 3. Extend machine-readable output to the automation commands
 
 **Why:** `--json` exists on six of thirteen commands (`traces`, `show`, `stats`,
 `experiments`, `experiment-show`, `config`) and is missing from the ones written
@@ -167,7 +126,7 @@ which is thin cover for a gap.
 
 **Done when:** every command a CI pipeline would run can be read by one.
 
-### 5. Cover the transport error paths
+### 4. Cover the transport error paths
 
 **Why:** `_sending.py` has the lowest coverage in the package (79.7%), and the
 gap is not in incidental code — it is in HTTP error handling and the
@@ -188,7 +147,7 @@ malformed-input branches.
 **Done when:** both modules clear the package's overall coverage rate, with the
 error paths covered by behavior tests rather than line-touching ones.
 
-### 6. Verify free-threaded builds
+### 5. Verify free-threaded builds
 
 **Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
 release where free-threading became officially supported. Nothing here is known
@@ -210,12 +169,12 @@ and a test backs it.
 
 ## Sequencing
 
-Items 1 and 2 are the same story from two directions — a local store that grows
-or gets damaged degrades the tools you would use to look at it — and item 1 is
-the one that loses data, so it goes first. Both touch the read paths, so doing
-them together avoids reworking the same code twice.
+Item 1 is the surviving half of the store-health story: a damaged store is now
+readable, but a large one still costs memory proportional to its size. It shares
+the read paths with the work already done, so it should be picked up while that
+code is fresh.
 
-Items 3 through 6 are independent and can be picked up in any order. Item 3 is
+Items 2 through 5 are independent and can be picked up in any order. Item 2 is
 worth doing before the first Beta deprecation rather than during it.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
@@ -232,6 +191,7 @@ in an older generated roadmap: sdist verification, stats filters, the master kil
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
 OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
 parenting from the framework's own run ids, the published API stability policy,
-the performance benchmark harness, and the trace-context decision
-([ADR 0001](adr/0001-distributed-trace-context.md)). Regressions in those areas
+the performance benchmark harness, the trace-context decision
+([ADR 0001](adr/0001-distributed-trace-context.md)), and reading a damaged store
+with `--skip-invalid`. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.
