@@ -34,7 +34,7 @@ from typing import Any, ClassVar
 
 from integration_contract import REDACTED_TEXT, SECRET_TEXT, temporary_workdir
 
-from bir import TraceEvent, configure, load_events, trace
+from bir import TraceEvent, configure, load_events, span, trace
 from bir._sdk import _reset_config_for_tests
 
 # Capture options every handler accepts, each defaulting to ``None`` so an unset
@@ -258,7 +258,7 @@ class BridgeContractTestCase(unittest.TestCase):
             self.assertIsNone(event.input)
             self.assertIsNone(event.output)
 
-    def test_overlapping_runs_are_all_recorded_inside_one_trace(self) -> None:
+    def test_overlapping_runs_stay_siblings_under_their_reported_parent(self) -> None:
         with temporary_workdir():
             handler = self.build_handler()
 
@@ -272,18 +272,53 @@ class BridgeContractTestCase(unittest.TestCase):
             self.contract.generation.end(handler, "run-b")
             self.contract.root.end(handler, ROOT_KEY)
 
+            # Both runs named the root as their parent, so both are its
+            # children. Parenting follows the tree the framework reported, not
+            # the order the handler happened to open its Bir contexts in.
             root = self.single("trace")
             generations = self.events("generation")
             self.assertEqual(len(generations), 2)
             for event in generations:
                 self.assertEqual(event.status, "success")
                 self.assertEqual(event.trace_id, root.trace_id)
+                self.assertEqual(event.parent_id, root.id)
 
-            # Parenting follows Bir's active-context stack rather than the
-            # parent ids the framework supplies, so two runs that overlap end up
-            # nested instead of siblings. Both are still recorded inside the
-            # trace and neither callback raises; whether the handlers should
-            # parent from the framework's own ids is roadmap item 5.
+    def test_application_events_inside_a_run_nest_under_it(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.generation.start(handler, CHILD_KEY, ROOT_KEY)
+            # An application's own work inside a framework callback — a provider
+            # wrapper called from a tool, a nested @observe() function — still
+            # belongs to the run that is executing, so a handler run stays the
+            # surrounding parent even though it records its own parent from the
+            # framework's tree.
+            with span("application-work"):
+                pass
+            self.contract.generation.end(handler, CHILD_KEY)
+            self.contract.root.end(handler, ROOT_KEY)
+
+            generation = self.single("generation")
+            inner = self.single("span")
+            self.assertEqual(inner.name, "application-work")
+            self.assertEqual(inner.parent_id, generation.id)
+
+    def test_run_reporting_an_unknown_parent_falls_back_to_the_open_context(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            with trace("app"):
+                # The named parent was never started here (a handler attached
+                # mid-run, or a parent the handler chose not to record), so the
+                # event belongs to whatever is open around it rather than
+                # pointing at an id that was never written.
+                self.record_generation(handler, parent="run-never-started")
+
+            root = self.single("trace")
+            event = self.single("generation")
+            self.assertEqual(event.trace_id, root.trace_id)
+            self.assertEqual(event.parent_id, root.id)
 
     def test_one_handler_keeps_sequential_runs_apart(self) -> None:
         with temporary_workdir():

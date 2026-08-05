@@ -68,7 +68,6 @@ breaking release says otherwise:
 | 2 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
 | 3 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1 |
 | 4 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
-| 5 | Decide how event bridges parent overlapping runs | P2 | S | Parallel framework runs record the shape the framework reported | 1 |
 
 ## Work item details
 
@@ -145,45 +144,29 @@ operations and concurrent eval runners have no tracked performance baseline.
 **Done when:** representative regressions are visible before release and results
 are comparable across commits.
 
-### 5. Decide how event bridges parent overlapping runs
-
-**Why:** the bridge conformance matrix surfaced a uniform behavior none of the
-handlers document. They parent every event from Bir's active-context stack
-rather than from the parent id the framework supplies, so two runs that overlap
-— a framework running two model calls in parallel under one parent — are
-recorded nested inside each other instead of as siblings. Nothing is lost and
-nothing raises: both events land in the right trace, and the shared matrix pins
-that much. Only the shape is wrong, and it is wrong the same way in all four
-declared handlers.
-
-**Scope:**
-
-- Decide whether handlers should parent from the framework's own run/span ids
-  (LangChain `parent_run_id`, LlamaIndex `parent_id`, Agents/OTel span parents)
-  instead of the ambient context, and what to do when that id names a run the
-  handler never saw or has already ended.
-- Check the dashboard's tree rendering before changing recorded parent ids;
-  this changes the shape of `1.0` events without changing the schema.
-- Tighten the matrix case from "recorded inside one trace" to the decided
-  parenting once it is agreed.
-
-**Done when:** parallel framework runs record the shape the framework reported,
-or the repository records why ambient parenting is the intended behavior.
-
 ## Sequencing
 
 1. Finish item 1 one handler at a time, in small, behavior-preserving changes.
-2. Decide item 5 before extending the bridge matrix further; the answer changes
-   what the shared nesting cases should assert.
-3. Use the evidence from that work to decide items 2–4 and Beta readiness. The
+   The three remaining handlers must parent from their framework's own ids the
+   way the four declared ones now do; the shared matrix asserts it.
+2. Use the evidence from that work to decide items 2–4 and Beta readiness. The
    call-wrapper contract is already the inventory item 3 needs for the wrapper
-   surface.
+   surface, and the bridges' in-process parent mapping is prior art for the
+   trust boundary item 2 has to draw for cross-process parents.
 
 ## Explicitly not on the backlog
 
 The following shipped features must not be reopened merely because they appeared
 in an older generated roadmap: sdist verification, stats filters, the master kill
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
-OTLP attributes, experiment timeouts, and the call-wrapper conformance matrix.
-Regressions in those areas are bugs; new scope requires a new issue with current
-evidence.
+OTLP attributes, experiment timeouts, the call-wrapper conformance matrix, and
+event-bridge parenting from the framework's own run ids. Regressions in those
+areas are bugs; new scope requires a new issue with current evidence.
+
+One open cross-repository check belongs with the last of those: the declared
+handlers now record a `parent_id` taken from the framework's tree rather than
+from whichever event happened to be open, so parallel framework runs arrive as
+siblings instead of nested. No schema field changed and every `parent_id` still
+names an event in the same trace, so `bir-app` needs no contract change — but
+the dashboard's tree rendering should be looked at once against real parallel
+agent traces, since the previous shape could only ever produce chains.

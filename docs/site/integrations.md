@@ -481,10 +481,14 @@ share these rules:
 - A failed run is recorded with error status and a redacted message.
 - A handler instance can be reused across runs.
 
-Nesting follows the currently open Bir event, not the parent id the framework
-reports. Sequential runs nest as you would expect; runs a framework executes in
-parallel under one parent are recorded nested inside each other rather than as
-siblings. Every event still lands in the correct trace.
+Nesting follows the tree the framework reports, so runs it executes in parallel
+under one parent are recorded as siblings rather than nested inside each other.
+A run whose reported parent the handler never saw — it attached mid-run, or the
+parent already finished — falls back to the Bir event open around it.
+
+Your own tracing still nests by execution: a `@observe()` function or a provider
+wrapper you call inside a framework callback is recorded under the framework
+event that is running it.
 
 ## LangChain
 

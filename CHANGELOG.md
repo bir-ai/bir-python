@@ -8,6 +8,27 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Fixed
+
+- The LangChain, LlamaIndex, OpenAI Agents, and Pydantic AI handlers now record
+  each event's parent from the tree the framework reports (LangChain's
+  `parent_run_id`, LlamaIndex's `parent_id` or callback trace, and the Agents and
+  OpenTelemetry span parents) instead of from whichever Bir event happened to be
+  open. Runs a framework executes in parallel under one parent are recorded as
+  siblings rather than nested inside each other; sequentially nested runs are
+  unchanged, because there the two agree. A parent the handler never started or
+  has already ended still falls back to the surrounding context, so no event
+  points at an id that was never written, and an Agents span with no parent span
+  resolves to the root opened for its trace. An event opened by a handler is
+  still the surrounding parent while it is open, so an application's own
+  `@observe()` functions and provider wrappers running inside a framework
+  callback keep nesting under it.
+
+  No public API, schema field, or event type changed: the recorded `parent_id`
+  still names an event in the same trace. Consumers that rebuild the event tree
+  from `parent_id` will see parallel work as siblings, which the previous
+  behavior could not express.
+
 ### Added
 
 - Four framework handlers — the LangChain callback handler, the LlamaIndex

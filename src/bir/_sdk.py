@@ -1269,6 +1269,31 @@ def _record_score_event(
     )
 
 
+def _set_event_parent(context: Any, parent_id: str | None) -> None:
+    """Record ``parent_id`` as this event's parent instead of the ambient one.
+
+    ``context`` is an un-entered ``span()``, ``generation()``, ``tool_call()``, or
+    ``retrieval()`` context. Bir normally parents an event to whichever event is
+    open around it, which is right for code that nests by execution. The
+    framework bridges do not nest that way: a framework announces its runs
+    through callbacks and names each run's parent itself, so two runs it
+    executes in parallel arrive interleaved and the open-context stack no longer
+    describes the tree. A bridge maps the framework's parent id back to the Bir
+    event id it recorded for that run and passes it here.
+
+    Only the recorded ``parent_id`` changes. The event still becomes the ambient
+    parent while it is open, so a provider wrapper or ``@observe()`` function the
+    application runs inside a framework callback keeps nesting under it. Passing
+    ``None`` (a run whose parent the bridge never saw, or has already ended)
+    leaves the ambient parent in place. The id is written to the event as-is, so
+    it must be an event id this process created in the same trace: this is
+    internal to the bridges, not a way to inject a parent from outside.
+    """
+
+    if parent_id is not None:
+        context._parent_override = parent_id
+
+
 def _merge_metadata(target: dict[str, Any], metadata: Mapping[str, Any]) -> None:
     """Merge user-supplied metadata into an event's pending metadata dict.
 
@@ -1386,6 +1411,7 @@ class _Span:
         self.trace_id: str | None = None
         self.parent_id: str | None = None
         self.start_time: str | None = None
+        self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
     def __enter__(self) -> _Span:
@@ -1396,7 +1422,7 @@ class _Span:
 
         self.id = _new_id()
         self.trace_id = trace_id
-        self.parent_id = parent_id
+        self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
         self._parent_token = _current_parent_id.set(self.id)
         return self
@@ -1479,6 +1505,7 @@ class _Generation:
         self.usage: dict[str, int | float] | None = None
         self.cost: dict[str, int | float] | None = None
         self.currency: str | None = None
+        self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
     def __enter__(self) -> _Generation:
@@ -1489,7 +1516,7 @@ class _Generation:
 
         self.id = _new_id()
         self.trace_id = trace_id
-        self.parent_id = parent_id
+        self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
         self._parent_token = _current_parent_id.set(self.id)
         return self
@@ -1669,6 +1696,7 @@ class _ToolCall:
         self.parent_id: str | None = None
         self.start_time: str | None = None
         self.output: Any = None
+        self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
     def __enter__(self) -> _ToolCall:
@@ -1679,7 +1707,7 @@ class _ToolCall:
 
         self.id = _new_id()
         self.trace_id = trace_id
-        self.parent_id = parent_id
+        self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
         self._parent_token = _current_parent_id.set(self.id)
         return self

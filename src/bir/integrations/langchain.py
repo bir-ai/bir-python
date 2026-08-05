@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from bir import generation, retrieval, tool_call
-from bir._sdk import _current_trace_id, _trace_context
+from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 
 
 class BirCallbackHandler:
@@ -62,6 +62,7 @@ class BirCallbackHandler:
             return
 
         context = _span_context(name)
+        _set_event_parent(context, self._parent_event_id(parent_run_id))
         context.__enter__()
         self._active_runs[_run_key(run_id)] = _ActiveRun("span", context)
 
@@ -124,6 +125,7 @@ class BirCallbackHandler:
             capture_output=self.capture_outputs,
         )
         implicit_trace = _implicit_trace_context(context.name, parent_run_id)
+        _set_event_parent(context, self._parent_event_id(parent_run_id))
         context.__enter__()
         self._active_runs[_run_key(run_id)] = _ActiveRun("tool_call", context, implicit_trace=implicit_trace)
 
@@ -155,6 +157,7 @@ class BirCallbackHandler:
             capture_output=self.capture_outputs,
         )
         implicit_trace = _implicit_trace_context(context.name, parent_run_id)
+        _set_event_parent(context, self._parent_event_id(parent_run_id))
         context.__enter__()
         self._active_runs[_run_key(run_id)] = _ActiveRun("retrieval", context, implicit_trace=implicit_trace)
 
@@ -187,8 +190,25 @@ class BirCallbackHandler:
             capture_output=self.capture_outputs,
         )
         implicit_trace = _implicit_trace_context(context.name, parent_run_id)
+        _set_event_parent(context, self._parent_event_id(parent_run_id))
         context.__enter__()
         self._active_runs[_run_key(run_id)] = _ActiveRun("generation", context, implicit_trace=implicit_trace)
+
+    def _parent_event_id(self, parent_run_id: Any) -> str | None:
+        """Return the Bir event id recorded for ``parent_run_id``, if it is open.
+
+        LangChain names each run's parent, so the tree it reports is authoritative
+        even when runs overlap and the open-context stack no longer matches it. A
+        parent this handler never started, or one that already ended, maps to
+        ``None`` and leaves the surrounding context as the parent.
+        """
+
+        if parent_run_id is None:
+            return None
+        active_run = self._active_runs.get(_run_key(parent_run_id))
+        if active_run is None:
+            return None
+        return getattr(active_run.context, "id", None)
 
     def _end_run(self, run_id: Any, *, error: BaseException | None = None) -> None:
         active_run = self._active_runs.pop(_run_key(run_id), None)

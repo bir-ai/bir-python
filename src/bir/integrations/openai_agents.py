@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from bir import generation, tool_call
-from bir._sdk import _current_trace_id, _trace_context
+from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 from bir.integrations._common import _response_output, _string_or_none, _usage_tokens, _value
 
 # Agents ``span_data.type`` values mapped to Bir generation events (LLM calls
@@ -63,6 +63,7 @@ class BirAgentsTracingProcessor:
         span_data, span_type = _span_data_and_type(span)
         metadata = _base_metadata(span, span_type)
         implicit_trace = _implicit_trace_context(span)
+        parent_event_id = self._parent_event_id(span)
 
         if span_type in _GENERATION_TYPES:
             context = generation(
@@ -73,6 +74,7 @@ class BirAgentsTracingProcessor:
                 capture_input=self.capture_inputs,
                 capture_output=self.capture_outputs,
             )
+            _set_event_parent(context, parent_event_id)
             context.__enter__()
             self._active_runs[_span_key(span)] = _ActiveRun("generation", context, implicit_trace=implicit_trace)
             return
@@ -85,14 +87,42 @@ class BirAgentsTracingProcessor:
                 capture_input=self.capture_inputs,
                 capture_output=self.capture_outputs,
             )
+            _set_event_parent(context, parent_event_id)
             context.__enter__()
             self._active_runs[_span_key(span)] = _ActiveRun("tool_call", context, implicit_trace=implicit_trace)
             return
 
         context = _span_context(_span_name(span_data, span_type))
+        _set_event_parent(context, parent_event_id)
         context.__enter__()
         context.set_metadata(metadata)
         self._active_runs[_span_key(span)] = _ActiveRun("span", context, implicit_trace=implicit_trace)
+
+    def _parent_event_id(self, span: Any) -> str | None:
+        """Return the Bir event id recorded for this span's parent, if it is open.
+
+        The Agents SDK names each span's parent, so its tree is authoritative
+        even when the agent runs spans in parallel and the open-context stack no
+        longer matches it. A span with no parent span belongs directly to its
+        trace, so it falls back to the root this processor opened for that trace
+        rather than to whichever sibling span happens to be open. A parent this
+        processor never started, or one that already ended, maps to ``None`` and
+        leaves the surrounding context as the parent.
+        """
+
+        parent_id = _value(span, "parent_id")
+        if parent_id is not None:
+            active_run = self._active_runs.get(f"span:{parent_id}")
+            if active_run is not None:
+                return getattr(active_run.context, "id", None)
+
+        trace_id = _value(span, "trace_id")
+        if trace_id is None:
+            return None
+        active_trace = self._active_runs.get(f"trace:{trace_id}")
+        if active_trace is None:
+            return None
+        return getattr(active_trace.context, "id", None)
 
     def on_span_end(self, span: Any) -> None:
         active_run = self._active_runs.get(_span_key(span))

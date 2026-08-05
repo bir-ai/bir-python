@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from bir import generation, retrieval
-from bir._sdk import _current_trace_id, _trace_context
+from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 from bir.integrations._common import _response_output, _usage_tokens
 
 
@@ -70,6 +70,7 @@ class BirLlamaIndexHandler:
                 capture_output=self.capture_outputs,
             )
             implicit_trace = _implicit_trace_context(context.name, parent_id)
+            _set_event_parent(context, self._parent_event_id(parent_id))
             context.__enter__()
             self._active_runs[run_id] = _ActiveRun("generation", context, implicit_trace=implicit_trace)
             return run_id
@@ -82,9 +83,29 @@ class BirLlamaIndexHandler:
             capture_output=self.capture_outputs,
         )
         implicit_trace = _implicit_trace_context(context.name, parent_id)
+        _set_event_parent(context, self._parent_event_id(parent_id))
         context.__enter__()
         self._active_runs[run_id] = _ActiveRun("retrieval", context, implicit_trace=implicit_trace)
         return run_id
+
+    def _parent_event_id(self, parent_id: Any) -> str | None:
+        """Return the Bir event id recorded for ``parent_id``, if it is open.
+
+        LlamaIndex names each event's parent, so its tree is authoritative even
+        when events overlap and the open-context stack no longer matches it. The
+        parent is normally another event, but a top-level event can name the
+        callback trace instead, so both keys are tried. A parent this handler
+        never started, one that already ended, or the root-level sentinel maps to
+        ``None`` and leaves the surrounding context as the parent.
+        """
+
+        if parent_id in (None, ""):
+            return None
+        for key in (_run_key(parent_id), _trace_run_key(parent_id)):
+            active_run = self._active_runs.get(key)
+            if active_run is not None:
+                return getattr(active_run.context, "id", None)
+        return None
 
     def on_event_end(
         self,

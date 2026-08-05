@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from bir import generation, tool_call
-from bir._sdk import _current_trace_id, _trace_context
+from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 from bir.integrations._common import _string_or_none, _usage_tokens, _value
 
 # ``gen_ai.operation.name`` values (and span-name prefixes for older Pydantic AI
@@ -76,6 +76,8 @@ class BirPydanticAIHandler:
 
         implicit_trace = _implicit_trace_context(span)
 
+        parent_event_id = self._parent_event_id(span)
+
         if kind == "generation":
             context = generation(
                 _event_name(span, "pydantic_ai.chat"),
@@ -85,6 +87,7 @@ class BirPydanticAIHandler:
                 capture_input=self.capture_inputs,
                 capture_output=self.capture_outputs,
             )
+            _set_event_parent(context, parent_event_id)
             context.__enter__()
             self._active_runs[_span_key(span)] = _ActiveRun("generation", context, implicit_trace=implicit_trace)
             return
@@ -97,14 +100,35 @@ class BirPydanticAIHandler:
                 capture_input=self.capture_inputs,
                 capture_output=self.capture_outputs,
             )
+            _set_event_parent(context, parent_event_id)
             context.__enter__()
             self._active_runs[_span_key(span)] = _ActiveRun("tool_call", context, implicit_trace=implicit_trace)
             return
 
         context = _span_context(_event_name(span, "pydantic_ai.span"))
+        _set_event_parent(context, parent_event_id)
         context.__enter__()
         context.set_metadata(metadata)
         self._active_runs[_span_key(span)] = _ActiveRun("span", context, implicit_trace=implicit_trace)
+
+    def _parent_event_id(self, span: Any) -> str | None:
+        """Return the Bir event id recorded for this span's parent, if it is open.
+
+        OpenTelemetry names each span's parent, so Pydantic AI's tree is
+        authoritative even when an agent runs spans in parallel and the
+        open-context stack no longer matches it. A parent this handler never
+        started, or one that already ended, maps to ``None`` and leaves the
+        surrounding context as the parent — including the agent-run span's own
+        children, whose parent is the trace root that context already points at.
+        """
+
+        parent_id = _parent_span_id(span)
+        if parent_id is None:
+            return None
+        active_run = self._active_runs.get(f"span:{parent_id}")
+        if active_run is None:
+            return None
+        return getattr(active_run.context, "id", None)
 
     def on_end(self, span: Any) -> None:
         active_run = self._active_runs.get(_span_key(span))

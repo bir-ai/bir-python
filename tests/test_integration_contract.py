@@ -617,7 +617,9 @@ def agents_span(key: str, parent: str | None = None, *, error: BaseException | N
     return {
         "span_id": key,
         "parent_id": parent,
-        "trace_id": "agents-trace",
+        # Spans belong to the trace the root driver opened, so a span with no
+        # parent span still resolves to that trace's root.
+        "trace_id": ROOT_KEY,
         "span_data": {
             "type": "generation",
             "model": "gpt-4o-mini",
