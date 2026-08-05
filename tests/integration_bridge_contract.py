@@ -84,6 +84,11 @@ class BridgeContract:
     implicit_root_name: str
     model: str | None = None
     usage: dict[str, int | float] | None = None
+    # Whether the framework names each run's parent, and correlates a run's end
+    # callback with its start. A framework that does neither (CrewAI emits its
+    # LLM-call and tool-usage events with no correlation id at all) can only pair
+    # and nest by the order events arrive, which the matrix asserts instead.
+    reports_parents: bool = True
 
 
 class BridgeContractTestCase(unittest.TestCase):
@@ -258,6 +263,53 @@ class BridgeContractTestCase(unittest.TestCase):
             self.assertIsNone(event.input)
             self.assertIsNone(event.output)
 
+    def test_application_events_inside_a_run_nest_under_it(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.generation.start(handler, CHILD_KEY, ROOT_KEY)
+            # An application's own work inside a framework callback — a provider
+            # wrapper called from a tool, a nested @observe() function — still
+            # belongs to the run that is executing, so a handler run stays the
+            # surrounding parent even though it records its own parent from the
+            # framework's tree.
+            with span("application-work"):
+                pass
+            self.contract.generation.end(handler, CHILD_KEY)
+            self.contract.root.end(handler, ROOT_KEY)
+
+            generation = self.single("generation")
+            inner = self.single("span")
+            self.assertEqual(inner.name, "application-work")
+            self.assertEqual(inner.parent_id, generation.id)
+
+    def test_one_handler_keeps_sequential_runs_apart(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            for suffix in ("a", "b"):
+                root_key = f"{ROOT_KEY}-{suffix}"
+                self.contract.root.start(handler, root_key, None)
+                self.contract.generation.start(handler, f"{CHILD_KEY}-{suffix}", root_key)
+                self.contract.generation.end(handler, f"{CHILD_KEY}-{suffix}")
+                self.contract.root.end(handler, root_key)
+
+            # A reused handler must not carry state between runs: two roots,
+            # two generations, and no crossed parent links.
+            roots = self.events("trace")
+            generations = self.events("generation")
+            self.assertEqual(len(roots), 2)
+            self.assertEqual(len(generations), 2)
+            self.assertEqual(len({root.trace_id for root in roots}), 2)
+            for root, event in zip(roots, generations):
+                self.assertEqual(event.trace_id, root.trace_id)
+                self.assertEqual(event.parent_id, root.id)
+
+
+class ReportedParentTests(BridgeContractTestCase):
+    """Handlers whose framework names each run's parent follow that tree."""
+
     def test_overlapping_runs_stay_siblings_under_their_reported_parent(self) -> None:
         with temporary_workdir():
             handler = self.build_handler()
@@ -283,27 +335,6 @@ class BridgeContractTestCase(unittest.TestCase):
                 self.assertEqual(event.trace_id, root.trace_id)
                 self.assertEqual(event.parent_id, root.id)
 
-    def test_application_events_inside_a_run_nest_under_it(self) -> None:
-        with temporary_workdir():
-            handler = self.build_handler()
-
-            self.contract.root.start(handler, ROOT_KEY, None)
-            self.contract.generation.start(handler, CHILD_KEY, ROOT_KEY)
-            # An application's own work inside a framework callback — a provider
-            # wrapper called from a tool, a nested @observe() function — still
-            # belongs to the run that is executing, so a handler run stays the
-            # surrounding parent even though it records its own parent from the
-            # framework's tree.
-            with span("application-work"):
-                pass
-            self.contract.generation.end(handler, CHILD_KEY)
-            self.contract.root.end(handler, ROOT_KEY)
-
-            generation = self.single("generation")
-            inner = self.single("span")
-            self.assertEqual(inner.name, "application-work")
-            self.assertEqual(inner.parent_id, generation.id)
-
     def test_run_reporting_an_unknown_parent_falls_back_to_the_open_context(self) -> None:
         with temporary_workdir():
             handler = self.build_handler()
@@ -320,31 +351,42 @@ class BridgeContractTestCase(unittest.TestCase):
             self.assertEqual(event.trace_id, root.trace_id)
             self.assertEqual(event.parent_id, root.id)
 
-    def test_one_handler_keeps_sequential_runs_apart(self) -> None:
+
+class OrderedPairingTests(BridgeContractTestCase):
+    """Handlers whose framework reports no parent pair runs by arrival order."""
+
+    def test_overlapping_runs_pair_and_nest_in_arrival_order(self) -> None:
         with temporary_workdir():
             handler = self.build_handler()
 
-            for suffix in ("a", "b"):
-                root_key = f"{ROOT_KEY}-{suffix}"
-                self.contract.root.start(handler, root_key, None)
-                self.contract.generation.start(handler, f"{CHILD_KEY}-{suffix}", root_key)
-                self.contract.generation.end(handler, f"{CHILD_KEY}-{suffix}")
-                self.contract.root.end(handler, root_key)
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.generation.start(handler, "run-a", ROOT_KEY)
+            self.contract.generation.start(handler, "run-b", ROOT_KEY)
+            self.contract.generation.end(handler, "run-a")
+            self.contract.generation.end(handler, "run-b")
+            self.contract.root.end(handler, ROOT_KEY)
 
-            # A reused handler must not carry state between runs: two roots,
-            # two generations, and no crossed parent links.
-            roots = self.events("trace")
+            # The framework supplies nothing to correlate or parent by, so the
+            # handler can only pair each end with the most recent open run and
+            # nest by arrival. Both runs are still recorded, inside the trace,
+            # and neither callback raises.
+            root = self.single("trace")
             generations = self.events("generation")
-            self.assertEqual(len(roots), 2)
             self.assertEqual(len(generations), 2)
-            self.assertEqual(len({root.trace_id for root in roots}), 2)
-            for root, event in zip(roots, generations):
+            for event in generations:
+                self.assertEqual(event.status, "success")
                 self.assertEqual(event.trace_id, root.trace_id)
-                self.assertEqual(event.parent_id, root.id)
 
 
 def build_bridge_test_case(contract: BridgeContract) -> type[BridgeContractTestCase]:
-    """Return the conformance test case for one event-bridge handler."""
+    """Return the conformance test case for one event-bridge handler.
 
+    The case composes the parenting cases the framework can actually support, so
+    a handler is never asked to reconstruct a tree its framework never reported.
+    """
+
+    bases: list[type[BridgeContractTestCase]] = [
+        ReportedParentTests if contract.reports_parents else OrderedPairingTests
+    ]
     class_name = "".join(part.title() for part in contract.id.replace(".", "_").split("_")) + "BridgeTests"
-    return type(class_name, (BridgeContractTestCase,), {"contract": contract})
+    return type(class_name, tuple(bases), {"contract": contract})

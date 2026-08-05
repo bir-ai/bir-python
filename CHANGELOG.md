@@ -31,10 +31,18 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
-- Four framework handlers — the LangChain callback handler, the LlamaIndex
-  handler, the OpenAI Agents tracing processor, and the Pydantic AI span handler
-  — now share a second conformance contract covering what a bridge owes Bir's
-  event tree: a framework root recorded as a trace, nested runs linked to the
+- The CrewAI event-bus handler now passes the same bridge contract. Its
+  declaration records what CrewAI cannot supply: the bus emits LLM-call and
+  tool-usage events with no correlation id and no parent reference, so the
+  handler pairs each end with the most recent open call on the thread and nests
+  by arrival order. The matrix asserts that behavior for such a framework
+  instead of the reported-parent cases, so a declaration states which shape its
+  framework can support rather than quietly skipping the question.
+
+- Five framework handlers — the CrewAI event-bus handler, the LangChain callback
+  handler, the LlamaIndex handler, the OpenAI Agents tracing processor, and the
+  Pydantic AI span handler — now share a second conformance contract covering
+  what a bridge owes Bir's event tree: a framework root recorded as a trace, nested runs linked to the
   run that owns them, attachment to an application's own `bir.trace(...)`, an
   implicit root when a run arrives with no trace at all, end callbacks for
   unknown runs ignored, repeated end callbacks recorded once, failures recorded

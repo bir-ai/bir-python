@@ -36,6 +36,7 @@ from bir.integrations import (
     anthropic,
     bedrock,
     cohere,
+    crewai,
     dspy,
     google,
     instructor,
@@ -516,7 +517,6 @@ CONTRACTS: tuple[WrapperContract, ...] = (
 # are declared here so the fresh-import guard still covers them.
 UNDECLARED_PROVIDER_ROOTS: Mapping[str, tuple[str, ...]] = {
     "autogen": ("ag2", "autogen"),
-    "crewai": ("crewai",),
     "haystack": ("haystack",),
     "otel": ("opentelemetry",),
 }
@@ -715,7 +715,80 @@ PYDANTIC_AI = BridgeContract(
     usage=RECORDED_USAGE,
 )
 
+
+def crewai_crew(key: str) -> dict[str, Any]:
+    """Build the ``source`` object the CrewAI bus passes with a crew event."""
+
+    return {"id": key, "name": "contract-crew"}
+
+
+def crewai_event(event_type: str, **fields: Any) -> dict[str, Any]:
+    """Build one typed CrewAI bus event."""
+
+    return {"type": event_type, **fields}
+
+
+CREWAI = BridgeContract(
+    id="crewai.event_bus",
+    module="crewai",
+    integration="crewai",
+    provider_roots=("crewai",),
+    handler=crewai.BirCrewAIHandler,
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.on_event(
+            crewai_crew(key),
+            crewai_event("crew_kickoff_started"),
+        ),
+        end=lambda handler, key: handler.on_event(
+            crewai_crew(key),
+            crewai_event("crew_kickoff_completed"),
+        ),
+        fail=lambda handler, key, error: handler.on_event(
+            crewai_crew(key),
+            crewai_event("crew_kickoff_failed", error=str(error)),
+        ),
+    ),
+    # The crew's own name titles its trace root.
+    root_name="contract-crew",
+    generation=RunDriver(
+        # CrewAI emits LLM-call events with no correlation id, so the run key
+        # never reaches the framework: the handler pairs each end with the most
+        # recent open call on the thread.
+        start=lambda handler, key, parent: handler.on_event(
+            None,
+            crewai_event(
+                "llm_call_started",
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "hello"}],
+            ),
+        ),
+        end=lambda handler, key: handler.on_event(
+            None,
+            crewai_event(
+                "llm_call_completed",
+                response={
+                    "content": "hi",
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+                },
+            ),
+        ),
+        fail=lambda handler, key, error: handler.on_event(
+            None,
+            crewai_event("llm_call_failed", error=str(error)),
+        ),
+    ),
+    generation_name="crewai.llm_call",
+    implicit_root_name="crewai.crew",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+    # CrewAI's bus events carry no parent reference and its LLM-call and
+    # tool-usage events carry no correlation id, so the handler can only pair and
+    # nest by arrival order.
+    reports_parents=False,
+)
+
 BRIDGES: tuple[BridgeContract, ...] = (
+    CREWAI,
     LANGCHAIN,
     LLAMAINDEX,
     OPENAI_AGENTS,

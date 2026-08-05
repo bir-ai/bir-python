@@ -74,19 +74,21 @@ breaking release says otherwise:
 ### 1. Bring the remaining event bridges under the contract
 
 **Why:** both contract matrices now exist. Every `trace_*` wrapper family and
-four of the seven framework handlers (LangChain, LlamaIndex, OpenAI Agents,
-Pydantic AI) declare their capabilities and pass a shared matrix, and the
-registry check refuses an undeclared integration module. CrewAI, AutoGen, and
-Haystack are still exempt because none of them is driven by the
-start/end/error-per-run shape the bridge matrix assumes: CrewAI consumes an
-event bus, AutoGen implements AG2's logger protocol with an agent-turn stack,
-and Haystack is a context-manager tracer with its own span stack.
+five of the seven framework handlers (CrewAI, LangChain, LlamaIndex, OpenAI
+Agents, Pydantic AI) declare their capabilities and pass a shared matrix, and the
+registry check refuses an undeclared integration module. AutoGen and Haystack are
+still exempt because neither is driven by the start/end-per-run shape the bridge
+matrix assumes: AutoGen implements AG2's logger protocol, where `log_chat_completion`
+opens and closes an event in one call and agent turns are tracked on a stack, and
+Haystack is a context-manager tracer whose spans open and close through `with`.
 
 **Scope:**
 
-- Extend `RunDriver` (or add a sibling driver) so an event-bus, logger-protocol,
-  or context-manager handler can be driven by the same cases.
-- Declare the three handlers and move them out of `UNDECLARED_PROVIDER_ROOTS` in
+- Add a driver shape for handlers that record an event in one call
+  (AutoGen) and for handlers driven by a context manager (Haystack), and decide
+  per case which obligations still apply — an end callback that cannot arrive
+  separately cannot be unmatched, repeated, or missing.
+- Declare the two handlers and move them out of `UNDECLARED_PROVIDER_ROOTS` in
   `tests/test_integration_contract.py` as each one lands.
 - Keep framework-specific payload parsing beside each integration.
 
@@ -147,8 +149,10 @@ are comparable across commits.
 ## Sequencing
 
 1. Finish item 1 one handler at a time, in small, behavior-preserving changes.
-   The three remaining handlers must parent from their framework's own ids the
-   way the four declared ones now do; the shared matrix asserts it.
+   A handler whose framework reports a tree must parent from its ids the way the
+   declared ones do; the shared matrix asserts that, and asserts arrival-order
+   pairing instead for a framework that reports neither parents nor correlation
+   ids (CrewAI's LLM-call and tool-usage events).
 2. Use the evidence from that work to decide items 2–4 and Beta readiness. The
    call-wrapper contract is already the inventory item 3 needs for the wrapper
    surface, and the bridges' in-process parent mapping is prior art for the
