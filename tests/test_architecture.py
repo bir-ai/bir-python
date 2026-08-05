@@ -25,6 +25,7 @@ import bir
 import bir._sdk as sdk
 import bir.cli as cli
 import bir.evals as evals
+import bir.integrations as integrations
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -84,6 +85,44 @@ EVALS_ALL = [
     "run_experiment_async",
     "send_experiment",
     "similarity_above",
+]
+
+INTEGRATIONS_ALL = [
+    "cohere",
+    "export_traces_to_otlp",
+    "trace_lm",
+    "trace_lm_async",
+    "trace_create",
+    "trace_create_async",
+    "trace_messages",
+    "trace_messages_async",
+    "trace_converse",
+    "trace_converse_async",
+    "trace_converse_stream",
+    "trace_converse_stream_async",
+    "trace_generate_content",
+    "trace_generate_content_async",
+    "trace_vertex_generate_content",
+    "trace_vertex_generate_content_async",
+    "BirHaystackTracer",
+    "BirCallbackHandler",
+    "BirLlamaIndexHandler",
+    "BirAgentsTracingProcessor",
+    "BirPydanticAIHandler",
+    "BirCrewAIHandler",
+    "BirAutoGenHandler",
+    "trace_completion",
+    "trace_completion_async",
+    "trace_chat",
+    "trace_chat_async",
+    "trace_ollama_chat",
+    "trace_ollama_chat_async",
+    "trace_ollama_generate",
+    "trace_ollama_generate_async",
+    "trace_chat_completion",
+    "trace_chat_completion_async",
+    "trace_response",
+    "trace_response_async",
 ]
 
 OPTIONAL_PROVIDER_ROOTS = (
@@ -167,6 +206,10 @@ class PublicSurfaceTests(unittest.TestCase):
     def test_exact_public_exports(self) -> None:
         self.assertEqual(bir.__all__, BIR_ALL)
         self.assertEqual(evals.__all__, EVALS_ALL)
+        # The flat integration re-exports include aliases that exist only here
+        # (``trace_vertex_generate_content``), so renaming one would go unnoticed
+        # by the per-module checks in the stability suite.
+        self.assertEqual(integrations.__all__, INTEGRATIONS_ALL)
 
     def test_top_level_sdk_re_exports_keep_identity(self) -> None:
         for name in BIR_ALL:

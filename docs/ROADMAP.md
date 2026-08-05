@@ -65,8 +65,7 @@ breaking release says otherwise:
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
 | 1 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
-| 2 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | — |
-| 3 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
+| 2 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
 
 ## Work item details
 
@@ -88,24 +87,7 @@ tracing, but prevents a single trace from following queue workers or HTTP calls.
 **Done when:** the repository records an explicit decision; implementation ships
 only if the security and cross-repository contract are approved.
 
-### 2. Define beta API and compatibility policy
-
-**Why:** package metadata still marks the SDK Alpha while the public surface and
-integration count are substantial. Consumers need to know which names, event
-fields, Python versions, and provider versions are stable.
-
-**Scope:**
-
-- Inventory and classify the public API and CLI commands.
-- Publish deprecation and supported-Python policies.
-- Add an integration compatibility table with last-verified provider versions.
-- Define Beta entry criteria: quality gates, documentation, migration notes, and
-  contract compatibility with `bir-app`.
-
-**Done when:** a Beta release can be evaluated against a finite checklist instead
-of a subjective readiness call.
-
-### 3. Add performance regression benchmarks
+### 2. Add performance regression benchmarks
 
 **Why:** local-first usefulness depends on low tracing overhead, while large-store
 operations and concurrent eval runners have no tracked performance baseline.
@@ -123,27 +105,23 @@ are comparable across commits.
 
 ## Sequencing
 
-1. Item 2 can start now: both contract matrices are the inventory a beta API
-   policy needs for the integration surface, and every integration already
-   declares what it supports.
-2. Item 1 should follow, not lead. The bridges' in-process parent mapping is
-   prior art for the trust boundary it has to draw for parents arriving from
-   another process, and its answer decides whether item 2 can call trace context
-   stable.
+Both remaining items are now entries on the Beta checklist in
+`docs/site/stability.md`, which is where readiness is tracked. Item 2 is the
+larger unknown and gates nothing else, so it can run in parallel; item 1 should
+be decided before a Beta release claims trace context is stable, and the
+bridges' in-process parent mapping is prior art for the trust boundary it has to
+draw for parents arriving from another process.
+
+The checklist also carries one item neither of these covers: confirming the
+event-schema `1.0` contract, including the event-tree shape the framework
+bridges now record, against the current `bir-app` release.
 
 ## Explicitly not on the backlog
 
 The following shipped features must not be reopened merely because they appeared
 in an older generated roadmap: sdist verification, stats filters, the master kill
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
-OTLP attributes, experiment timeouts, both conformance matrices, and
-event-bridge parenting from the framework's own run ids. Regressions in those
-areas are bugs; new scope requires a new issue with current evidence.
-
-One open cross-repository check belongs with the last of those: the declared
-handlers now record a `parent_id` taken from the framework's tree rather than
-from whichever event happened to be open, so parallel framework runs arrive as
-siblings instead of nested. No schema field changed and every `parent_id` still
-names an event in the same trace, so `bir-app` needs no contract change — but
-the dashboard's tree rendering should be looked at once against real parallel
-agent traces, since the previous shape could only ever produce chains.
+OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
+parenting from the framework's own run ids, and the published API stability
+policy. Regressions in those areas are bugs; new scope requires a new issue with
+current evidence.

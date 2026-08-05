@@ -33,6 +33,7 @@ nav:
   - Integrations: integrations.md
   - Evals & Experiments: evals-experiments.md
   - CLI & Environment Config: cli-env.md
+  - API Stability: stability.md
   - API Reference: api-reference.md
 
 markdown_extensions:

@@ -8,6 +8,25 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Added
+
+- The SDK now publishes an API stability and compatibility policy
+  (`docs/site/stability.md`). It inventories everything the package treats as
+  public — the core and evaluation APIs, the test and logging helpers, every
+  integration module with its entry points, the 13 CLI commands, the 10 `BIR_*`
+  environment variables, and the `1.0` event schema — and states the rules
+  around them: `0.x` versioning, one minor release of `DeprecationWarning`
+  before any public name is removed, support for every CPython version upstream
+  still supports, and no runtime dependencies. It also explains what
+  "supported" means for integrations that never import a provider package, and
+  ends with a finite Beta entry checklist so readiness is a list to run rather
+  than a judgment call.
+
+  The page cannot drift: every inventory on it is compared against the running
+  package in both directions, so an undocumented export and a documented name
+  that does not exist both fail the build. The flat integration re-exports are
+  pinned alongside the existing `bir` and `bir.evals` export pins.
+
 ### Fixed
 
 - The LangChain, LlamaIndex, OpenAI Agents, and Pydantic AI handlers now record
