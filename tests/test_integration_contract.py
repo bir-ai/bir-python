@@ -22,7 +22,13 @@ import unittest
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from integration_bridge_contract import ROOT_KEY, BridgeContract, RunDriver, build_bridge_test_case
+from integration_bridge_contract import (
+    ROOT_KEY,
+    BridgeContract,
+    PointDriver,
+    RunDriver,
+    build_bridge_test_case,
+)
 from integration_contract import (
     ResponseShape,
     StreamCapability,
@@ -34,11 +40,13 @@ from test_architecture import OPTIONAL_PROVIDER_ROOTS
 
 from bir.integrations import (
     anthropic,
+    autogen,
     bedrock,
     cohere,
     crewai,
     dspy,
     google,
+    haystack,
     instructor,
     langchain,
     litellm,
@@ -516,8 +524,6 @@ CONTRACTS: tuple[WrapperContract, ...] = (
 # reads finished traces instead of recording them. Their provider import roots
 # are declared here so the fresh-import guard still covers them.
 UNDECLARED_PROVIDER_ROOTS: Mapping[str, tuple[str, ...]] = {
-    "autogen": ("ag2", "autogen"),
-    "haystack": ("haystack",),
     "otel": ("opentelemetry",),
 }
 
@@ -787,8 +793,153 @@ CREWAI = BridgeContract(
     reports_parents=False,
 )
 
+# Haystack's tracer is a context manager rather than a callback pair, so the
+# driver holds each open run's manager and span between a case's start and end.
+HAYSTACK_RUNS: dict[str, tuple[Any, Any]] = {}
+
+HAYSTACK_PIPELINE_RUN = "haystack.pipeline.run"
+HAYSTACK_COMPONENT_RUN = "haystack.component.run"
+
+HAYSTACK_COMPONENT_TAGS = {
+    "haystack.component.name": "llm",
+    "haystack.component.type": "OpenAIGenerator",
+}
+
+HAYSTACK_RESULT_TAGS = {
+    "haystack.component.input": {"prompt": "hello"},
+    "haystack.component.output": {
+        "replies": ["hi"],
+        "meta": [
+            {
+                "model": "gpt-4o-mini",
+                "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+            }
+        ],
+    },
+}
+
+
+def haystack_start(handler: Any, key: str, operation: str, tags: dict[str, Any]) -> None:
+    """Enter one Haystack tracing scope and hold it open under ``key``."""
+
+    manager = handler.trace(operation, dict(tags))
+    HAYSTACK_RUNS[key] = (manager, manager.__enter__())
+
+
+def haystack_end(handler: Any, key: str, tags: dict[str, Any] | None = None) -> None:
+    """Tag the open scope the way a component does, then leave it."""
+
+    manager, span = HAYSTACK_RUNS.pop(key)
+    if tags:
+        span.set_tags(dict(tags))
+    manager.__exit__(None, None, None)
+
+
+def haystack_fail(handler: Any, key: str, error: BaseException) -> None:
+    """Leave the open scope through an exception, as the pipeline would."""
+
+    manager, _span = HAYSTACK_RUNS.pop(key)
+    # The tracer records the failure and re-raises it to its caller, so the
+    # generator-based context manager reports the exception as unsuppressed
+    # rather than raising again here.
+    manager.__exit__(type(error), error, None)
+
+
+HAYSTACK = BridgeContract(
+    id="haystack.tracer",
+    module="haystack",
+    integration="haystack",
+    provider_roots=("haystack",),
+    handler=haystack.BirHaystackTracer,
+    root=RunDriver(
+        start=lambda handler, key, parent: haystack_start(handler, key, HAYSTACK_PIPELINE_RUN, {}),
+        end=lambda handler, key: haystack_end(handler, key),
+        fail=haystack_fail,
+    ),
+    root_name=HAYSTACK_PIPELINE_RUN,
+    generation=RunDriver(
+        start=lambda handler, key, parent: haystack_start(
+            handler,
+            key,
+            HAYSTACK_COMPONENT_RUN,
+            HAYSTACK_COMPONENT_TAGS,
+        ),
+        # A component writes its input and output as tags during the run; the
+        # tracer reads them when the scope closes.
+        end=lambda handler, key: haystack_end(handler, key, HAYSTACK_RESULT_TAGS),
+        fail=haystack_fail,
+    ),
+    # The component's own name titles its event.
+    generation_name="llm",
+    implicit_root_name=HAYSTACK_PIPELINE_RUN,
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+    # Haystack passes a ``parent_span`` the tracer deliberately ignores, deriving
+    # parenting from the scope it is nested in instead.
+    reports_parents=False,
+    # A ``with`` block cannot leave a scope unclosed, closed twice, or closed
+    # without being opened, so the unpaired-callback cases cannot arise.
+    guarantees_paired_callbacks=True,
+)
+
+AUTOGEN_AGENT = "assistant"
+
+AUTOGEN_REQUEST = {"model": "gpt-4o-mini", "messages": MESSAGES}
+
+
+def autogen_response(error: BaseException | None = None) -> dict[str, Any]:
+    """Build the AG2 chat-completion response, optionally reporting a failure."""
+
+    if error is not None:
+        # AG2 reports a failed call on the response it logs rather than raising.
+        return {"error": str(error)}
+    return {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"content": "hi"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+    }
+
+
+AUTOGEN = BridgeContract(
+    id="autogen.logger",
+    module="autogen",
+    integration="autogen",
+    provider_roots=("ag2", "autogen"),
+    handler=autogen.BirAutoGenHandler,
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.start(),
+        end=lambda handler, key: handler.stop(),
+        fail=lambda handler, key, error: handler.stop(),
+    ),
+    root_name="autogen.run",
+    # AG2's logger protocol hands over a finished call, so the run has no
+    # observable middle: there is no start callback to pair an end with.
+    generation=PointDriver(
+        log=lambda handler, key, parent: handler.log_chat_completion(
+            source=AUTOGEN_AGENT,
+            request=AUTOGEN_REQUEST,
+            response=autogen_response(),
+        ),
+        fail=lambda handler, key, error: handler.log_chat_completion(
+            source=AUTOGEN_AGENT,
+            request=AUTOGEN_REQUEST,
+            response=autogen_response(error),
+        ),
+    ),
+    generation_name="autogen.chat_completion",
+    implicit_root_name="autogen.run",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+    reports_parents=False,
+    guarantees_paired_callbacks=True,
+    # Inside a run, every AG2 event belongs to the speaking agent's turn.
+    intermediate_run_name=AUTOGEN_AGENT,
+)
+
 BRIDGES: tuple[BridgeContract, ...] = (
+    AUTOGEN,
     CREWAI,
+    HAYSTACK,
     LANGCHAIN,
     LLAMAINDEX,
     OPENAI_AGENTS,

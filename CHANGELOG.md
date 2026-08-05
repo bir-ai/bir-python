@@ -31,6 +31,17 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- The Haystack tracer and the AutoGen (AG2) logger handler complete the bridge
+  contract: every integration Bir ships is now declared and covered by one of the
+  two matrices, and `UNDECLARED_PROVIDER_ROOTS` holds only the OTLP exporter,
+  which reads finished traces rather than recording them. Neither handler is
+  driven by a callback stream, so the matrix composes the cases their shape can
+  actually produce: Haystack's runs open and close through a `with` block, and
+  AG2 hands over a finished LLM call in a single `log_chat_completion`, so a run
+  cannot be left open, closed twice, closed without being opened, or overlapped.
+  AG2's declaration also records that it nests every event under the speaking
+  agent's turn span rather than directly under the run root.
+
 - The CrewAI event-bus handler now passes the same bridge contract. Its
   declaration records what CrewAI cannot supply: the bus emits LLM-call and
   tool-usage events with no correlation id and no parent reference, so the

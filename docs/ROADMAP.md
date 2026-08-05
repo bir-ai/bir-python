@@ -64,38 +64,13 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Bring the remaining event bridges under the contract | P1 | M | Every framework handler obeys one tested event-tree contract | — |
-| 2 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
-| 3 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1 |
-| 4 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
+| 1 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
+| 2 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | — |
+| 3 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
 
 ## Work item details
 
-### 1. Bring the remaining event bridges under the contract
-
-**Why:** both contract matrices now exist. Every `trace_*` wrapper family and
-five of the seven framework handlers (CrewAI, LangChain, LlamaIndex, OpenAI
-Agents, Pydantic AI) declare their capabilities and pass a shared matrix, and the
-registry check refuses an undeclared integration module. AutoGen and Haystack are
-still exempt because neither is driven by the start/end-per-run shape the bridge
-matrix assumes: AutoGen implements AG2's logger protocol, where `log_chat_completion`
-opens and closes an event in one call and agent turns are tracked on a stack, and
-Haystack is a context-manager tracer whose spans open and close through `with`.
-
-**Scope:**
-
-- Add a driver shape for handlers that record an event in one call
-  (AutoGen) and for handlers driven by a context manager (Haystack), and decide
-  per case which obligations still apply — an end callback that cannot arrive
-  separately cannot be unmatched, repeated, or missing.
-- Declare the two handlers and move them out of `UNDECLARED_PROVIDER_ROOTS` in
-  `tests/test_integration_contract.py` as each one lands.
-- Keep framework-specific payload parsing beside each integration.
-
-**Done when:** adding any integration, wrapper or bridge, requires passing a
-common contract matrix plus its framework-specific cases.
-
-### 2. Decide distributed trace-context propagation
+### 1. Decide distributed trace-context propagation
 
 **Why:** trace/span IDs are intentionally read-only and cannot currently be
 injected across process or service boundaries. That is safe and simple for local
@@ -113,7 +88,7 @@ tracing, but prevents a single trace from following queue workers or HTTP calls.
 **Done when:** the repository records an explicit decision; implementation ships
 only if the security and cross-repository contract are approved.
 
-### 3. Define beta API and compatibility policy
+### 2. Define beta API and compatibility policy
 
 **Why:** package metadata still marks the SDK Alpha while the public surface and
 integration count are substantial. Consumers need to know which names, event
@@ -130,7 +105,7 @@ fields, Python versions, and provider versions are stable.
 **Done when:** a Beta release can be evaluated against a finite checklist instead
 of a subjective readiness call.
 
-### 4. Add performance regression benchmarks
+### 3. Add performance regression benchmarks
 
 **Why:** local-first usefulness depends on low tracing overhead, while large-store
 operations and concurrent eval runners have no tracked performance baseline.
@@ -148,22 +123,20 @@ are comparable across commits.
 
 ## Sequencing
 
-1. Finish item 1 one handler at a time, in small, behavior-preserving changes.
-   A handler whose framework reports a tree must parent from its ids the way the
-   declared ones do; the shared matrix asserts that, and asserts arrival-order
-   pairing instead for a framework that reports neither parents nor correlation
-   ids (CrewAI's LLM-call and tool-usage events).
-2. Use the evidence from that work to decide items 2–4 and Beta readiness. The
-   call-wrapper contract is already the inventory item 3 needs for the wrapper
-   surface, and the bridges' in-process parent mapping is prior art for the
-   trust boundary item 2 has to draw for cross-process parents.
+1. Item 2 can start now: both contract matrices are the inventory a beta API
+   policy needs for the integration surface, and every integration already
+   declares what it supports.
+2. Item 1 should follow, not lead. The bridges' in-process parent mapping is
+   prior art for the trust boundary it has to draw for parents arriving from
+   another process, and its answer decides whether item 2 can call trace context
+   stable.
 
 ## Explicitly not on the backlog
 
 The following shipped features must not be reopened merely because they appeared
 in an older generated roadmap: sdist verification, stats filters, the master kill
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
-OTLP attributes, experiment timeouts, the call-wrapper conformance matrix, and
+OTLP attributes, experiment timeouts, both conformance matrices, and
 event-bridge parenting from the framework's own run ids. Regressions in those
 areas are bugs; new scope requires a new issue with current evidence.
 
