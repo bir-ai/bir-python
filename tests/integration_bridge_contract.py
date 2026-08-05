@@ -1,0 +1,315 @@
+"""Shared conformance contract for Bir's event-bridge integrations.
+
+The framework handlers solve one recurring problem: a framework announces runs
+through start/end/error callbacks, and the handler has to turn that stream into
+Bir's event tree. The callback vocabularies differ — LangChain passes run ids,
+LlamaIndex passes event ids, the OpenAI Agents and Pydantic AI processors pass
+span objects — but the obligations do not: open a root when nothing else did,
+nest children under the run that owns them, finalize on the matching end
+callback, record failures with a redacted message, and stay quiet when a
+callback arrives for a run the handler never saw.
+
+This module holds those obligations. A handler declares how to drive one run of
+each kind as a :class:`BridgeContract`, and :func:`build_bridge_test_case` turns
+the declaration into the shared cases; the declarations live in
+``test_integration_contract.py`` beside the call-wrapper contracts. Framework
+payload parsing — which attribute carries the model, how usage is spelled, which
+span types map to tool calls — stays in the per-framework test module.
+
+The drivers build the framework's own objects from plain mappings, which the
+handlers read through the same accessors they use for real provider objects.
+:class:`RunDriver` hides where a failure is reported: LangChain and LlamaIndex
+have error callbacks, while the span processors report a failure on the span
+handed to the ordinary end callback.
+"""
+
+from __future__ import annotations
+
+import contextvars
+import inspect
+import unittest
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, ClassVar
+
+from integration_contract import REDACTED_TEXT, SECRET_TEXT, temporary_workdir
+
+from bir import TraceEvent, configure, load_events, trace
+from bir._sdk import _reset_config_for_tests
+
+# Capture options every handler accepts, each defaulting to ``None`` so an unset
+# option leaves the configured capture settings in charge.
+HANDLER_CAPTURE_OPTIONS = ("capture_inputs", "capture_outputs")
+
+ROOT_KEY = "run-root"
+CHILD_KEY = "run-child"
+
+
+@dataclass(frozen=True)
+class RunDriver:
+    """Drive one framework run through its start, end, and failure callbacks.
+
+    Each callable receives the handler and the run's key; ``start`` also
+    receives the key of the run that owns it, or ``None`` at the top level. The
+    key is whatever the framework identifies a run by — a run id, an event id,
+    or a span id — so the driver can rebuild an equivalent callback payload for
+    every step of the same run.
+    """
+
+    start: Callable[[Any, str, str | None], None]
+    end: Callable[[Any, str], None]
+    fail: Callable[[Any, str, BaseException], None]
+
+
+@dataclass(frozen=True)
+class BridgeContract:
+    """One event-bridge handler's declared conformance capabilities.
+
+    ``root`` drives the framework's own trace-level run and ``generation``
+    drives a nested run the handler records as a generation. The declared names
+    are what Bir must record for those runs, including ``implicit_root_name``
+    for the root the handler opens when a nested run arrives with no trace at
+    all.
+    """
+
+    id: str
+    module: str
+    integration: str
+    provider_roots: tuple[str, ...]
+    handler: Callable[..., Any]
+    root: RunDriver
+    root_name: str
+    generation: RunDriver
+    generation_name: str
+    implicit_root_name: str
+    model: str | None = None
+    usage: dict[str, int | float] | None = None
+
+
+class BridgeContractTestCase(unittest.TestCase):
+    """The obligations every event-bridge handler shares."""
+
+    contract: ClassVar[BridgeContract]
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def build_handler(self, **options: Any) -> Any:
+        return self.contract.handler(**options)
+
+    def events(self, event_type: str) -> list[TraceEvent]:
+        return [event for event in load_events() if event.type == event_type]
+
+    def single(self, event_type: str) -> TraceEvent:
+        found = self.events(event_type)
+        self.assertEqual(len(found), 1, f"expected exactly one {event_type} event, recorded {len(found)}")
+        return found[0]
+
+    def record_generation(self, handler: Any, *, parent: str | None = None) -> None:
+        """Run one nested generation from start to end."""
+
+        self.contract.generation.start(handler, CHILD_KEY, parent)
+        self.contract.generation.end(handler, CHILD_KEY)
+
+    def test_handler_declares_the_shared_capture_options(self) -> None:
+        parameters = inspect.signature(self.contract.handler).parameters
+
+        for name in HANDLER_CAPTURE_OPTIONS:
+            with self.subTest(option=name):
+                parameter = parameters[name]
+                # Keyword-only so the options cannot be confused with the
+                # framework arguments a handler may later accept positionally.
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertIsNone(parameter.default)
+
+    def test_framework_root_records_a_trace(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.root.end(handler, ROOT_KEY)
+
+            event = self.single("trace")
+            self.assertEqual(event.name, self.contract.root_name)
+            self.assertEqual(event.status, "success")
+            self.assertEqual(event.metadata["integration"], self.contract.integration)
+            self.assertIsNone(event.parent_id)
+
+    def test_generation_nests_under_the_framework_root(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.record_generation(handler, parent=ROOT_KEY)
+            self.contract.root.end(handler, ROOT_KEY)
+
+            root = self.single("trace")
+            event = self.single("generation")
+            self.assertEqual(event.name, self.contract.generation_name)
+            self.assertEqual(event.status, "success")
+            self.assertEqual(event.trace_id, root.trace_id)
+            self.assertEqual(event.parent_id, root.id)
+            self.assertEqual(event.model, self.contract.model)
+            self.assertEqual(event.usage, self.contract.usage)
+
+    def test_generation_attaches_to_an_active_bir_trace(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            with trace("app"):
+                self.record_generation(handler)
+
+            # The application already owns a root, so the handler adds no second
+            # one and its event lands inside the caller's trace.
+            root = self.single("trace")
+            self.assertEqual(root.name, "app")
+            event = self.single("generation")
+            self.assertEqual(event.trace_id, root.trace_id)
+            self.assertEqual(event.parent_id, root.id)
+
+    def test_generation_opens_an_implicit_root_when_no_trace_is_active(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.record_generation(handler)
+
+            # Without a framework root or an application trace the handler still
+            # opens a root, so a nested run is never dropped for lack of one.
+            root = self.single("trace")
+            self.assertEqual(root.name, self.contract.implicit_root_name)
+            self.assertEqual(root.metadata["integration"], self.contract.integration)
+            self.assertEqual(root.metadata["kind"], "implicit_root")
+            event = self.single("generation")
+            self.assertEqual(event.trace_id, root.trace_id)
+            self.assertEqual(event.parent_id, root.id)
+
+    def test_end_callback_for_an_unknown_run_is_ignored(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            # Frameworks emit end callbacks the handler never saw a start for
+            # (a handler attached mid-run, a run the handler chose to skip).
+            self.contract.generation.end(handler, CHILD_KEY)
+
+            self.assertEqual(load_events(), [])
+
+    def test_repeated_end_callback_records_one_event(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.record_generation(handler)
+            self.contract.generation.end(handler, CHILD_KEY)
+
+            self.assertEqual(len(self.events("generation")), 1)
+
+    def test_failed_run_records_a_redacted_error(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.generation.start(handler, CHILD_KEY, None)
+            self.contract.generation.fail(handler, CHILD_KEY, RuntimeError(f"run failed {SECRET_TEXT}"))
+
+            event = self.single("generation")
+            self.assertEqual(event.status, "error")
+            error = event.error or ""
+            self.assertIn(REDACTED_TEXT, error)
+            self.assertNotIn(SECRET_TEXT, error)
+
+    def test_unfinished_run_records_nothing(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            # A run that never ends leaves its context open, so nothing is
+            # written. Drive it in a copied context so the unbalanced context
+            # variables cannot leak into the rest of the suite.
+            contextvars.copy_context().run(self.contract.generation.start, handler, CHILD_KEY, None)
+
+            self.assertEqual(load_events(), [])
+
+    def test_capture_is_off_by_default(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.record_generation(handler)
+
+            event = self.single("generation")
+            self.assertIsNone(event.input)
+            self.assertIsNone(event.output)
+
+    def test_handler_capture_options_override_the_configuration(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=False, capture_outputs=False)
+            handler = self.build_handler(capture_inputs=True, capture_outputs=True)
+
+            self.record_generation(handler)
+
+            event = self.single("generation")
+            self.assertIsNotNone(event.input)
+            self.assertIsNotNone(event.output)
+
+    def test_handler_capture_options_can_disable_a_configured_capture(self) -> None:
+        with temporary_workdir():
+            configure(capture_inputs=True, capture_outputs=True)
+            handler = self.build_handler(capture_inputs=False, capture_outputs=False)
+
+            self.record_generation(handler)
+
+            event = self.single("generation")
+            self.assertIsNone(event.input)
+            self.assertIsNone(event.output)
+
+    def test_overlapping_runs_are_all_recorded_inside_one_trace(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.generation.start(handler, "run-a", ROOT_KEY)
+            self.contract.generation.start(handler, "run-b", ROOT_KEY)
+            # End them in start order, the reverse of the order their Bir
+            # contexts were opened, as a framework running two calls in parallel
+            # under one parent would.
+            self.contract.generation.end(handler, "run-a")
+            self.contract.generation.end(handler, "run-b")
+            self.contract.root.end(handler, ROOT_KEY)
+
+            root = self.single("trace")
+            generations = self.events("generation")
+            self.assertEqual(len(generations), 2)
+            for event in generations:
+                self.assertEqual(event.status, "success")
+                self.assertEqual(event.trace_id, root.trace_id)
+
+            # Parenting follows Bir's active-context stack rather than the
+            # parent ids the framework supplies, so two runs that overlap end up
+            # nested instead of siblings. Both are still recorded inside the
+            # trace and neither callback raises; whether the handlers should
+            # parent from the framework's own ids is roadmap item 5.
+
+    def test_one_handler_keeps_sequential_runs_apart(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            for suffix in ("a", "b"):
+                root_key = f"{ROOT_KEY}-{suffix}"
+                self.contract.root.start(handler, root_key, None)
+                self.contract.generation.start(handler, f"{CHILD_KEY}-{suffix}", root_key)
+                self.contract.generation.end(handler, f"{CHILD_KEY}-{suffix}")
+                self.contract.root.end(handler, root_key)
+
+            # A reused handler must not carry state between runs: two roots,
+            # two generations, and no crossed parent links.
+            roots = self.events("trace")
+            generations = self.events("generation")
+            self.assertEqual(len(roots), 2)
+            self.assertEqual(len(generations), 2)
+            self.assertEqual(len({root.trace_id for root in roots}), 2)
+            for root, event in zip(roots, generations):
+                self.assertEqual(event.trace_id, root.trace_id)
+                self.assertEqual(event.parent_id, root.id)
+
+
+def build_bridge_test_case(contract: BridgeContract) -> type[BridgeContractTestCase]:
+    """Return the conformance test case for one event-bridge handler."""
+
+    class_name = "".join(part.title() for part in contract.id.replace(".", "_").split("_")) + "BridgeTests"
+    return type(class_name, (BridgeContractTestCase,), {"contract": contract})

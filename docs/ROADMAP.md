@@ -64,30 +64,31 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Extend the conformance contract to event-bridge integrations | P1 | M | Framework handlers obey one tested event-tree contract | — |
+| 1 | Bring the remaining event bridges under the contract | P1 | M | Every framework handler obeys one tested event-tree contract | — |
 | 2 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
 | 3 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1 |
 | 4 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
+| 5 | Decide how event bridges parent overlapping runs | P2 | S | Parallel framework runs record the shape the framework reported | 1 |
 
 ## Work item details
 
-### 1. Extend the conformance contract to event-bridge integrations
+### 1. Bring the remaining event bridges under the contract
 
-**Why:** the call-wrapper half of this work has shipped: every `trace_*` family
-declares its capabilities and passes one shared lifecycle matrix, and the
-registry check refuses an undeclared integration module. The seven framework
-handlers (LangChain, LlamaIndex, OpenAI Agents, Pydantic AI, CrewAI, AutoGen,
-Haystack) are still exempt. They implement their own recurring problem —
-mapping a framework's start/end/error callbacks onto Bir's event tree — and
-their tests can drift the same way the wrapper tests did.
+**Why:** both contract matrices now exist. Every `trace_*` wrapper family and
+four of the seven framework handlers (LangChain, LlamaIndex, OpenAI Agents,
+Pydantic AI) declare their capabilities and pass a shared matrix, and the
+registry check refuses an undeclared integration module. CrewAI, AutoGen, and
+Haystack are still exempt because none of them is driven by the
+start/end/error-per-run shape the bridge matrix assumes: CrewAI consumes an
+event bus, AutoGen implements AG2's logger protocol with an agent-turn stack,
+and Haystack is a context-manager tracer with its own span stack.
 
 **Scope:**
 
-- Define reusable contract cases for event bridges: run/span nesting and parent
-  linkage, unmatched or duplicated end callbacks, error callbacks, orphaned runs
-  at teardown, and handler reuse across concurrent runs.
-- Move the handlers out of `EVENT_BRIDGE_PROVIDER_ROOTS` in
-  `tests/test_integration_contract.py` as each one is declared.
+- Extend `RunDriver` (or add a sibling driver) so an event-bus, logger-protocol,
+  or context-manager handler can be driven by the same cases.
+- Declare the three handlers and move them out of `UNDECLARED_PROVIDER_ROOTS` in
+  `tests/test_integration_contract.py` as each one lands.
 - Keep framework-specific payload parsing beside each integration.
 
 **Done when:** adding any integration, wrapper or bridge, requires passing a
@@ -144,10 +145,37 @@ operations and concurrent eval runners have no tracked performance baseline.
 **Done when:** representative regressions are visible before release and results
 are comparable across commits.
 
+### 5. Decide how event bridges parent overlapping runs
+
+**Why:** the bridge conformance matrix surfaced a uniform behavior none of the
+handlers document. They parent every event from Bir's active-context stack
+rather than from the parent id the framework supplies, so two runs that overlap
+— a framework running two model calls in parallel under one parent — are
+recorded nested inside each other instead of as siblings. Nothing is lost and
+nothing raises: both events land in the right trace, and the shared matrix pins
+that much. Only the shape is wrong, and it is wrong the same way in all four
+declared handlers.
+
+**Scope:**
+
+- Decide whether handlers should parent from the framework's own run/span ids
+  (LangChain `parent_run_id`, LlamaIndex `parent_id`, Agents/OTel span parents)
+  instead of the ambient context, and what to do when that id names a run the
+  handler never saw or has already ended.
+- Check the dashboard's tree rendering before changing recorded parent ids;
+  this changes the shape of `1.0` events without changing the schema.
+- Tighten the matrix case from "recorded inside one trace" to the decided
+  parenting once it is agreed.
+
+**Done when:** parallel framework runs record the shape the framework reported,
+or the repository records why ambient parenting is the intended behavior.
+
 ## Sequencing
 
 1. Finish item 1 one handler at a time, in small, behavior-preserving changes.
-2. Use the evidence from that work to decide items 2–4 and Beta readiness. The
+2. Decide item 5 before extending the bridge matrix further; the answer changes
+   what the shared nesting cases should assert.
+3. Use the evidence from that work to decide items 2–4 and Beta readiness. The
    call-wrapper contract is already the inventory item 3 needs for the wrapper
    surface.
 

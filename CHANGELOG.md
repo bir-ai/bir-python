@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- Four framework handlers — the LangChain callback handler, the LlamaIndex
+  handler, the OpenAI Agents tracing processor, and the Pydantic AI span handler
+  — now share a second conformance contract covering what a bridge owes Bir's
+  event tree: a framework root recorded as a trace, nested runs linked to the
+  run that owns them, attachment to an application's own `bir.trace(...)`, an
+  implicit root when a run arrives with no trace at all, end callbacks for
+  unknown runs ignored, repeated end callbacks recorded once, failures recorded
+  with a redacted message, unfinished runs writing nothing, capture defaults and
+  handler overrides, and reused handlers keeping sequential runs apart. Handler
+  behavior is unchanged. The matrix did surface one shared trait worth naming:
+  every handler parents from Bir's active-context stack rather than the parent
+  id the framework supplies, so overlapping parallel runs record nested rather
+  than as siblings. Both events still land in the right trace and no callback
+  raises, which is what the shared case asserts; changing the recorded shape is
+  a tracked roadmap decision, not part of this change.
+
 - Provider call wrappers now share one conformance contract. Each `trace_*`
   sync/async family declares its capabilities — request shape, response shape,
   streaming entry point, chunk shape, provider import roots — and a shared

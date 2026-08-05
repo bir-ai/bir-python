@@ -22,6 +22,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from integration_bridge_contract import ROOT_KEY, BridgeContract, RunDriver, build_bridge_test_case
 from integration_contract import (
     ResponseShape,
     StreamCapability,
@@ -38,10 +39,14 @@ from bir.integrations import (
     dspy,
     google,
     instructor,
+    langchain,
     litellm,
+    llamaindex,
     mistral,
     ollama,
     openai,
+    openai_agents,
+    pydantic_ai,
     vertexai,
 )
 
@@ -504,21 +509,216 @@ CONTRACTS: tuple[WrapperContract, ...] = (
     VERTEXAI_GENERATE_CONTENT,
 )
 
-# Integrations that bridge a framework's own events into Bir instead of wrapping
-# one provider call. They record whole event trees driven by the framework, so
-# the call-wrapper lifecycle does not apply and their handler tests stay
-# framework-specific. Their provider import roots are declared here so the
-# fresh-import guard still covers them.
-EVENT_BRIDGE_PROVIDER_ROOTS: Mapping[str, tuple[str, ...]] = {
+# Integrations that neither wrap one provider call nor bridge framework events:
+# handlers driven by a shape the bridge matrix does not yet cover (an event bus,
+# a logger protocol, a context-manager tracer) and the OTLP exporter, which
+# reads finished traces instead of recording them. Their provider import roots
+# are declared here so the fresh-import guard still covers them.
+UNDECLARED_PROVIDER_ROOTS: Mapping[str, tuple[str, ...]] = {
     "autogen": ("ag2", "autogen"),
     "crewai": ("crewai",),
     "haystack": ("haystack",),
-    "langchain": ("langchain", "langchain_core"),
-    "llamaindex": ("llama_index", "llamaindex"),
-    "openai_agents": ("agents", "openai"),
     "otel": ("opentelemetry",),
-    "pydantic_ai": ("pydantic_ai",),
 }
+
+
+def langchain_serialized(name: str | None = None) -> dict[str, Any]:
+    """Build the ``serialized`` mapping LangChain passes to every callback."""
+
+    return {"name": name} if name is not None else {}
+
+
+LANGCHAIN = BridgeContract(
+    id="langchain.callbacks",
+    module="langchain",
+    integration="langchain",
+    provider_roots=("langchain", "langchain_core"),
+    handler=langchain.BirCallbackHandler,
+    # A chain start with no parent run is LangChain's own root.
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.on_chain_start(
+            langchain_serialized(),
+            {"question": "hello"},
+            run_id=key,
+            parent_run_id=parent,
+        ),
+        end=lambda handler, key: handler.on_chain_end({"answer": "hi"}, run_id=key),
+        fail=lambda handler, key, error: handler.on_chain_error(error, run_id=key),
+    ),
+    root_name="langchain.chain",
+    generation=RunDriver(
+        start=lambda handler, key, parent: handler.on_llm_start(
+            langchain_serialized(),
+            ["hello"],
+            run_id=key,
+            parent_run_id=parent,
+            invocation_params={"model": "gpt-4o-mini"},
+        ),
+        end=lambda handler, key: handler.on_llm_end(
+            {"llm_output": {"token_usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}}},
+            run_id=key,
+        ),
+        fail=lambda handler, key, error: handler.on_llm_error(error, run_id=key),
+    ),
+    generation_name="langchain.llm",
+    # LangChain's implicit root borrows the name of the event that needed it.
+    implicit_root_name="langchain.llm",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+)
+
+LLAMAINDEX_RESPONSE = {
+    "response": {
+        "text": "hi",
+        "raw": {"usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}},
+    }
+}
+
+LLAMAINDEX = BridgeContract(
+    id="llamaindex.callbacks",
+    module="llamaindex",
+    integration="llamaindex",
+    provider_roots=("llama_index", "llamaindex"),
+    handler=llamaindex.BirLlamaIndexHandler,
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.start_trace(key),
+        end=lambda handler, key: handler.end_trace(key),
+        # LlamaIndex has no failing trace callback; a failed run ends normally.
+        fail=lambda handler, key, error: handler.end_trace(key),
+    ),
+    # LlamaIndex names its trace root after the trace id it was given.
+    root_name=ROOT_KEY,
+    generation=RunDriver(
+        start=lambda handler, key, parent: handler.on_event_start(
+            "llm",
+            {"messages": [{"role": "user", "content": "hello"}], "model": "gpt-4o-mini"},
+            event_id=key,
+            parent_id=parent or "",
+        ),
+        end=lambda handler, key: handler.on_event_end("llm", LLAMAINDEX_RESPONSE, event_id=key),
+        fail=lambda handler, key, error: handler.on_event_end("llm", LLAMAINDEX_RESPONSE, event_id=key, error=error),
+    ),
+    generation_name="llamaindex.llm",
+    implicit_root_name="llamaindex.llm",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+)
+
+
+def agents_trace(key: str) -> dict[str, Any]:
+    """Build the Agents SDK trace object handed to the trace callbacks."""
+
+    return {"trace_id": key}
+
+
+def agents_span(key: str, parent: str | None = None, *, error: BaseException | None = None) -> dict[str, Any]:
+    """Build an Agents SDK generation span, optionally carrying a span error."""
+
+    return {
+        "span_id": key,
+        "parent_id": parent,
+        "trace_id": "agents-trace",
+        "span_data": {
+            "type": "generation",
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": "hello"}],
+            "output": [{"role": "assistant", "content": "hi"}],
+            "usage": {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15},
+        },
+        # The Agents SDK reports a failure as a SpanError mapping on the span
+        # handed to the ordinary end callback, not as a raised exception.
+        "error": {"message": str(error)} if error is not None else None,
+    }
+
+
+OPENAI_AGENTS = BridgeContract(
+    id="openai_agents.processor",
+    module="openai_agents",
+    integration="openai_agents",
+    provider_roots=("agents", "openai"),
+    handler=openai_agents.BirAgentsTracingProcessor,
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.on_trace_start(agents_trace(key)),
+        end=lambda handler, key: handler.on_trace_end(agents_trace(key)),
+        fail=lambda handler, key, error: handler.on_trace_end(agents_trace(key)),
+    ),
+    root_name="openai_agents.trace",
+    generation=RunDriver(
+        start=lambda handler, key, parent: handler.on_span_start(agents_span(key, parent)),
+        end=lambda handler, key: handler.on_span_end(agents_span(key)),
+        fail=lambda handler, key, error: handler.on_span_end(agents_span(key, error=error)),
+    ),
+    generation_name="openai_agents.generation",
+    implicit_root_name="openai_agents.trace",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+)
+
+
+def pydantic_ai_agent_span(key: str) -> dict[str, Any]:
+    """Build the agent-run span Pydantic AI opens around a whole agent call."""
+
+    return {"name": "agent run", "context": {"span_id": key, "trace_id": "otel-trace"}, "attributes": {}}
+
+
+def pydantic_ai_chat_span(
+    key: str,
+    parent: str | None = None,
+    *,
+    error: BaseException | None = None,
+) -> dict[str, Any]:
+    """Build a Pydantic AI chat span, optionally carrying an exception event."""
+
+    span: dict[str, Any] = {
+        "name": "chat gpt-4o-mini",
+        "context": {"span_id": key, "trace_id": "otel-trace"},
+        "parent": {"span_id": parent} if parent is not None else None,
+        "attributes": {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": "gpt-4o-mini",
+            "gen_ai.input.messages": [{"role": "user", "content": "hello"}],
+            "gen_ai.output.messages": [{"role": "assistant", "content": "hi"}],
+            "gen_ai.usage.input_tokens": 11,
+            "gen_ai.usage.output_tokens": 4,
+            "gen_ai.usage.total_tokens": 15,
+        },
+    }
+    if error is not None:
+        # OpenTelemetry reports a failure as an ``exception`` span event on the
+        # span handed to the ordinary end callback.
+        span["events"] = [{"name": "exception", "attributes": {"exception.message": str(error)}}]
+    return span
+
+
+PYDANTIC_AI = BridgeContract(
+    id="pydantic_ai.processor",
+    module="pydantic_ai",
+    integration="pydantic_ai",
+    provider_roots=("pydantic_ai",),
+    handler=pydantic_ai.BirPydanticAIHandler,
+    root=RunDriver(
+        start=lambda handler, key, parent: handler.on_start(pydantic_ai_agent_span(key)),
+        end=lambda handler, key: handler.on_end(pydantic_ai_agent_span(key)),
+        fail=lambda handler, key, error: handler.on_end(pydantic_ai_agent_span(key)),
+    ),
+    root_name="agent run",
+    generation=RunDriver(
+        start=lambda handler, key, parent: handler.on_start(pydantic_ai_chat_span(key, parent)),
+        end=lambda handler, key: handler.on_end(pydantic_ai_chat_span(key)),
+        fail=lambda handler, key, error: handler.on_end(pydantic_ai_chat_span(key, error=error)),
+    ),
+    generation_name="chat gpt-4o-mini",
+    implicit_root_name="pydantic_ai.agent_run",
+    model="gpt-4o-mini",
+    usage=RECORDED_USAGE,
+)
+
+BRIDGES: tuple[BridgeContract, ...] = (
+    LANGCHAIN,
+    LLAMAINDEX,
+    OPENAI_AGENTS,
+    PYDANTIC_AI,
+)
 
 
 class IntegrationRegistryTests(unittest.TestCase):
@@ -533,14 +733,18 @@ class IntegrationRegistryTests(unittest.TestCase):
         return {module.name for module in pkgutil.iter_modules(search_locations) if not module.name.startswith("_")}
 
     def test_every_integration_module_is_declared(self) -> None:
-        declared = {contract.module for contract in CONTRACTS} | set(EVENT_BRIDGE_PROVIDER_ROOTS)
+        declared = (
+            {contract.module for contract in CONTRACTS}
+            | {bridge.module for bridge in BRIDGES}
+            | set(UNDECLARED_PROVIDER_ROOTS)
+        )
 
-        # A new integration must either pass the call-wrapper matrix or say in
-        # EVENT_BRIDGE_PROVIDER_ROOTS why the matrix does not apply to it.
+        # A new integration must either pass one of the contract matrices or say
+        # in UNDECLARED_PROVIDER_ROOTS why neither matrix applies to it.
         self.assertEqual(self.integration_modules(), declared)
 
     def test_contract_ids_and_wrapper_pairs_are_unique(self) -> None:
-        ids = [contract.id for contract in CONTRACTS]
+        ids = [contract.id for contract in CONTRACTS] + [bridge.id for bridge in BRIDGES]
         self.assertEqual(sorted(ids), sorted(set(ids)))
 
         names = [(contract.module, contract.default_name) for contract in CONTRACTS]
@@ -553,11 +757,17 @@ class IntegrationRegistryTests(unittest.TestCase):
                 for wrapper in contract.wrappers():
                     self.assertEqual(wrapper.__module__, expected_module)
 
+        for bridge in BRIDGES:
+            with self.subTest(bridge=bridge.id):
+                self.assertEqual(bridge.handler.__module__, f"bir.integrations.{bridge.module}")
+
     def test_declared_provider_roots_match_the_fresh_import_guard(self) -> None:
         declared: set[str] = set()
         for contract in CONTRACTS:
             declared.update(contract.provider_roots)
-        for roots in EVENT_BRIDGE_PROVIDER_ROOTS.values():
+        for bridge in BRIDGES:
+            declared.update(bridge.provider_roots)
+        for roots in UNDECLARED_PROVIDER_ROOTS.values():
             declared.update(roots)
 
         # The architecture suite asserts that importing Bir pulls in none of
@@ -570,8 +780,10 @@ class IntegrationRegistryTests(unittest.TestCase):
 def _register_contract_cases() -> None:
     """Publish one generated case per declaration for test discovery."""
 
-    for contract in CONTRACTS:
-        case = build_contract_test_case(contract)
+    generated: list[type[unittest.TestCase]] = [build_contract_test_case(contract) for contract in CONTRACTS]
+    generated.extend(build_bridge_test_case(bridge) for bridge in BRIDGES)
+
+    for case in generated:
         # Report the generated cases under this module so a failure names the
         # declaration that produced it, not the harness that assembled it.
         case.__module__ = __name__

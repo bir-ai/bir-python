@@ -462,6 +462,30 @@ The request model is read from the bound `LM` instance (`lm.model`) or an explic
 one back. For DSPy's async request method use `trace_lm_async` with `lm.aforward`.
 `dspy` is never imported.
 
+## Shared handler behavior
+
+The framework handlers (LangChain, LlamaIndex, OpenAI Agents, Pydantic AI,
+CrewAI, AutoGen, Haystack) turn a framework's own callbacks into Bir events and
+share these rules:
+
+- `capture_inputs` and `capture_outputs` on the handler override the configured
+  [capture settings](capture-privacy.md) for the events it records; capture
+  stays off unless something turns it on.
+- Events land inside your `bir.trace(...)` or `@observe()` when one is active.
+  When none is, the handler opens its own trace root (tagged
+  `metadata["kind"] = "implicit_root"`) so a recorded run is never dropped for
+  lack of a root.
+- An end callback for a run the handler never started is ignored, and a repeated
+  end callback records the event once. A run whose end callback never arrives
+  records nothing.
+- A failed run is recorded with error status and a redacted message.
+- A handler instance can be reused across runs.
+
+Nesting follows the currently open Bir event, not the parent id the framework
+reports. Sequential runs nest as you would expect; runs a framework executes in
+parallel under one parent are recorded nested inside each other rather than as
+siblings. Every event still lands in the correct trace.
+
 ## LangChain
 
 ```python
