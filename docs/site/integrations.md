@@ -8,6 +8,32 @@ Provider wrappers forward arguments unchanged, return the provider response
 unchanged, and record a generation inside an active Bir trace. Input and output
 payloads still follow Bir's [opt-in capture settings](capture-privacy.md).
 
+## Shared wrapper behavior
+
+Every provider wrapper — sync and async — honors the same rules, so what you
+learn from one applies to the rest:
+
+- Positional and keyword arguments reach the provider untouched. The wrapper's
+  own options are `bir_`-prefixed and never forwarded, so they cannot collide
+  with a provider argument such as `metadata`.
+- The provider's return value is passed back to you unchanged.
+- Exactly one `generation` event is recorded per call, tagged with
+  `metadata["integration"]`, named after the provider surface unless you pass
+  `bir_name`, and merged with any `bir_metadata` you supply.
+- A wrapper requires an active trace. Without one it raises before calling the
+  provider, so a missing trace never sends a request.
+- A provider error is recorded as a failed generation with a redacted message
+  and then re-raised unchanged.
+- Streaming wrappers are lazy: the provider is not called until you start
+  iterating. The accumulated output and final usage are recorded when the
+  stream is exhausted, closed (`close()`/`aclose()`), cancelled, or raises — a
+  partially consumed stream still records what it produced.
+- If a provider answers a streaming request with a single whole response, the
+  wrapper records that response in one piece instead of losing it.
+- `bir_capture_input` and `bir_capture_output` override the configured
+  [capture settings](capture-privacy.md) for one call in either direction;
+  capture stays off unless something turns it on.
+
 ## Async clients
 
 Every dependency-free provider wrapper has an asynchronous counterpart named with

@@ -64,30 +64,34 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Introduce shared integration conformance tests | P1 | M | Provider wrappers obey one tested sync/async/streaming contract | — |
+| 1 | Extend the conformance contract to event-bridge integrations | P1 | M | Framework handlers obey one tested event-tree contract | — |
 | 2 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
 | 3 | Define beta API and compatibility policy | P2 | M | A documented path from Alpha to Beta with predictable deprecations | 1 |
 | 4 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
 
 ## Work item details
 
-### 1. Introduce shared integration conformance tests
+### 1. Extend the conformance contract to event-bridge integrations
 
-**Why:** provider wrappers independently implement the same difficult lifecycle:
-argument forwarding, `bir_` option stripping, sync/async calls, lazy streams,
-usage/model extraction, close handling, and redacted errors. Copy-specific tests
-are thorough but can still drift in which guarantees they assert.
+**Why:** the call-wrapper half of this work has shipped: every `trace_*` family
+declares its capabilities and passes one shared lifecycle matrix, and the
+registry check refuses an undeclared integration module. The seven framework
+handlers (LangChain, LlamaIndex, OpenAI Agents, Pydantic AI, CrewAI, AutoGen,
+Haystack) are still exempt. They implement their own recurring problem —
+mapping a framework's start/end/error callbacks onto Bir's event tree — and
+their tests can drift the same way the wrapper tests did.
 
 **Scope:**
 
-- Define reusable contract cases for call wrappers and event-bridge integrations.
-- Require every applicable integration to declare supported capabilities.
-- Cover normal return, provider error, partially consumed stream, explicit close,
-  async cancellation, capture overrides, and no-provider-import behavior.
-- Keep provider-specific parsing tests beside each integration.
+- Define reusable contract cases for event bridges: run/span nesting and parent
+  linkage, unmatched or duplicated end callbacks, error callbacks, orphaned runs
+  at teardown, and handler reuse across concurrent runs.
+- Move the handlers out of `EVENT_BRIDGE_PROVIDER_ROOTS` in
+  `tests/test_integration_contract.py` as each one is declared.
+- Keep framework-specific payload parsing beside each integration.
 
-**Done when:** adding an integration requires passing the common contract matrix
-plus its provider-specific cases.
+**Done when:** adding any integration, wrapper or bridge, requires passing a
+common contract matrix plus its framework-specific cases.
 
 ### 2. Decide distributed trace-context propagation
 
@@ -142,13 +146,16 @@ are comparable across commits.
 
 ## Sequencing
 
-1. Implement item 1 in small, behavior-preserving changes.
-2. Use the evidence from that work to decide items 2–4 and Beta readiness.
+1. Finish item 1 one handler at a time, in small, behavior-preserving changes.
+2. Use the evidence from that work to decide items 2–4 and Beta readiness. The
+   call-wrapper contract is already the inventory item 3 needs for the wrapper
+   surface.
 
 ## Explicitly not on the backlog
 
 The following shipped features must not be reopened merely because they appeared
 in an older generated roadmap: sdist verification, stats filters, the master kill
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
-OTLP attributes, and experiment timeouts. Regressions in those areas are bugs;
-new scope requires a new issue with current evidence.
+OTLP attributes, experiment timeouts, and the call-wrapper conformance matrix.
+Regressions in those areas are bugs; new scope requires a new issue with current
+evidence.

@@ -8,6 +8,25 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Added
+
+- Provider call wrappers now share one conformance contract. Each `trace_*`
+  sync/async family declares its capabilities — request shape, response shape,
+  streaming entry point, chunk shape, provider import roots — and a shared
+  matrix runs the same lifecycle cases against every declaration: argument
+  forwarding with `bir_` options stripped, one generation per call with the
+  declared name and metadata, redacted provider errors, the active-trace
+  requirement, capture defaults and per-call overrides, lazy streams, chunks
+  yielded unchanged, finalization on early close, mid-stream error, and consumer
+  cancellation, and the whole-response fallback when a provider ignores a
+  streaming request. A registry check refuses to let a new integration module
+  land undeclared, and the declared provider roots must match the fresh-import
+  guard so a newly added provider is covered by it. This closes gaps the
+  per-provider suites had left uneven — sync early close, cancellation, and the
+  whole-response fallback were previously asserted for only some wrappers.
+  Wrapper behavior is unchanged; the shared guarantees are now documented in the
+  integrations guide.
+
 ### Changed
 
 - The large SDK, evaluation, and CLI implementations are now split into focused
