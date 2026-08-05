@@ -10,6 +10,22 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- `scripts/benchmarks.py` measures SDK performance on fixed synthetic data:
+  disabled, sampled-out, and recorded tracing; capture redaction; store append
+  with rotation; `load_events`/`load_traces`; prune selection; batched sending
+  against a stubbed transport; and sync and async experiment runs. Time and peak
+  memory are measured in separate passes so `tracemalloc` never distorts a
+  timing, and every case rebuilds its store before each repeat so runs do not
+  inherit a file a previous repeat grew.
+
+  `--json` records a run, `--baseline` compares against one and exits non-zero
+  past a tolerance, refusing to compare runs that measured different amounts of
+  work or were recorded under a different result schema. Memory growth must be
+  visible in absolute terms as well as percentage terms, so the cheapest cases
+  cannot fail on kilobyte-scale noise. CI runs `--smoke` as a canary that the
+  harness still works; the release checklist records when to take a real
+  baseline, since only one machine's numbers are comparable.
+
 - The SDK now publishes an API stability and compatibility policy
   (`docs/site/stability.md`). It inventories everything the package treats as
   public — the core and evaluation APIs, the test and logging helpers, every

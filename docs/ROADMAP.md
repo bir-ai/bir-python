@@ -65,7 +65,6 @@ breaking release says otherwise:
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
 | 1 | Decide distributed trace-context propagation | P2 | M | An explicit, security-reviewed answer for process/service boundaries | — |
-| 2 | Add performance regression benchmarks | P2 | M | Trace write, load, prune, send, and eval costs are tracked over time | — |
 
 ## Work item details
 
@@ -87,34 +86,18 @@ tracing, but prevents a single trace from following queue workers or HTTP calls.
 **Done when:** the repository records an explicit decision; implementation ships
 only if the security and cross-repository contract are approved.
 
-### 2. Add performance regression benchmarks
-
-**Why:** local-first usefulness depends on low tracing overhead, while large-store
-operations and concurrent eval runners have no tracked performance baseline.
-
-**Scope:**
-
-- Benchmark disabled, sampled-out, and recorded trace overhead.
-- Benchmark append/rotation, load/group, prune, send batching, redaction, and
-  sync/async experiment execution on fixed synthetic datasets.
-- Record time and peak memory separately; keep network/provider calls mocked.
-- Run a stable smoke subset in CI and the full suite manually or on a schedule.
-
-**Done when:** representative regressions are visible before release and results
-are comparable across commits.
-
 ## Sequencing
 
-Both remaining items are now entries on the Beta checklist in
-`docs/site/stability.md`, which is where readiness is tracked. Item 2 is the
-larger unknown and gates nothing else, so it can run in parallel; item 1 should
-be decided before a Beta release claims trace context is stable, and the
-bridges' in-process parent mapping is prior art for the trust boundary it has to
-draw for parents arriving from another process.
+Beta readiness is tracked on the checklist in `docs/site/stability.md`, and the
+one item above is on it: a Beta release should not claim trace context is stable
+before the propagation question is decided. The bridges' in-process parent
+mapping is prior art for the trust boundary it has to draw for parents arriving
+from another process.
 
-The checklist also carries one item neither of these covers: confirming the
-event-schema `1.0` contract, including the event-tree shape the framework
-bridges now record, against the current `bir-app` release.
+Two checklist items are not roadmap work and are not tracked here: confirming
+the event-schema `1.0` contract — including the event-tree shape the framework
+bridges now record — against the current `bir-app` release, and the release
+mechanics of raising the version and the `Development Status` classifier.
 
 ## Explicitly not on the backlog
 
@@ -122,6 +105,6 @@ The following shipped features must not be reopened merely because they appeared
 in an older generated roadmap: sdist verification, stats filters, the master kill
 switch, Ollama, prune, fuzzy similarity, config inspection, `SECURITY.md`, richer
 OTLP attributes, experiment timeouts, both conformance matrices, event-bridge
-parenting from the framework's own run ids, and the published API stability
-policy. Regressions in those areas are bugs; new scope requires a new issue with
-current evidence.
+parenting from the framework's own run ids, the published API stability policy,
+and the performance benchmark harness. Regressions in those areas are bugs; new
+scope requires a new issue with current evidence.

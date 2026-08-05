@@ -167,6 +167,30 @@ assert event.output == {"documents": [{"id": "doc-1", "text": "local context"}]}
 PY
 ```
 
+## Performance Baseline
+
+Record a baseline on the release machine, then compare the release commit
+against the previous release's baseline. Timings are only comparable within one
+machine and interpreter, so keep the file next to the release notes rather than
+in the repository:
+
+```bash
+./.venv/bin/python scripts/benchmarks.py --json ~/bir-baselines/0.3.0.json
+```
+
+On the next release, compare before publishing:
+
+```bash
+./.venv/bin/python scripts/benchmarks.py --baseline ~/bir-baselines/0.3.0.json
+```
+
+The command exits non-zero when a case is more than 25% slower or uses more
+peak memory than the baseline, and refuses to compare runs that measured
+different amounts of work. Investigate a regression before publishing; a
+deliberate trade-off belongs in the changelog entry. CI runs
+`scripts/benchmarks.py --smoke` on every push, which only proves the harness
+still runs — a shared runner is too noisy to judge timings.
+
 ## Manual Package Review
 
 - Inspect `pyproject.toml` metadata.

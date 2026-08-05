@@ -69,6 +69,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: pyright
 
+      # A canary that every benchmark still runs and measures something, not a
+      # performance gate: a shared runner is too noisy to compare timings
+      # against a recorded baseline. Baselines are recorded on a stable machine
+      # before a release; see docs/SDK_RELEASE_CHECKLIST.md.
+      - name: Run benchmark smoke subset
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python scripts/benchmarks.py --smoke
+
       - name: Verify SDK release package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: python scripts/verify_release.py

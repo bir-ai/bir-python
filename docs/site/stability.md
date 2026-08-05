@@ -256,8 +256,9 @@ call.
 - [x] Capture is opt-in and redaction cannot be disabled.
 - [ ] The event-schema `1.0` contract is confirmed against the current `bir-app`
       release, including the event-tree shape the framework bridges now record.
-- [ ] Performance baselines exist for trace write, load, prune, send, and
-      evaluation runs, so a release can be checked for regressions.
+- [x] A benchmark harness measures trace write, load, prune, send, and
+      evaluation cost in time and peak memory, runs a smoke subset in CI, and
+      fails a release run that regresses against a recorded baseline.
 - [ ] A migration note documents every public change made since `0.3.0`.
 - [ ] The version is `0.4.0` or later with the `Development Status` classifier
       raised to `4 - Beta`.
