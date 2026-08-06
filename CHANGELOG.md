@@ -8,6 +8,38 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Changed
+
+- `bir export-otel` streams the store instead of loading it. It was the last read
+  path that materialized whole traces: on a 1.54 MiB store of 4,000 events across
+  2,000 traces it peaked at 18.95 MiB, nine times `bir stats` and twelve times the
+  store on disk, because the exporter walked the traces twice — once to resolve
+  the Resource-level environment and source, once to emit — and so had to hold
+  them.
+
+  Both passes now read the store directly. The first reads only trace roots, which
+  is all the Resource attributes come from, and counts each trace's events on the
+  way; the second groups events into traces and releases each one as soon as its
+  count is reached. Bir's own share of the peak fell from 10.05 MiB to 0.35 MiB,
+  and the command as a whole from 18.95 MiB to 9.50 MiB — the remainder is the
+  OpenTelemetry SDK's span objects and its OTLP encoder, which this change does
+  not touch. `scripts/benchmarks.py` gained an `export_otel` case beside the other
+  CLI cases so the ceiling stays visible; it sits outside the CI smoke subset
+  because it needs the optional `otel` extra.
+
+  Counting events is what makes releasing a trace early safe. The obvious signal —
+  a trace is complete when its root arrives — holds for a store this SDK wrote,
+  since the root event is written when the trace closes, but not for one where the
+  root comes first, and the shared `tests/fixtures` store is written that way.
+
+  Exported spans, their attributes, and the reported counts are unchanged, and a
+  test pins that a path and the equivalent loaded traces export the same thing.
+  What changed is the order traces are exported in: completion order rather than
+  sorted by start time, which is what lets them be released one at a time. The
+  events inside a trace are ordered exactly as before. `export_traces_to_otlp()`
+  keeps its signature and its `int` return; passing already-loaded traces still
+  exports them as given, since they have already been read.
+
 ### Fixed
 
 - The `--mark-sent` upload sidecar is now bounded by the store instead of by

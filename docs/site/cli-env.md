@@ -136,6 +136,12 @@ prints how many traces and spans were exported and exits non-zero with an instal
 hint when the extra is missing. The export only reads the local JSONL; it never
 writes to or alters it.
 
+Like the other read commands, it streams: the store is read in two passes and one
+trace is held at a time, so peak memory scales with a trace rather than with the
+store. Traces are exported in completion order rather than sorted by start time,
+which is what allows each to be released as soon as it is built; the events
+inside a trace are ordered exactly as before.
+
 `--include-rotated` on `bir traces`, `bir show`, `bir stats`, `bir send`, and
 `bir export-otel` also reads
 size-rotated trace files (`traces.jsonl.1` ..) created by

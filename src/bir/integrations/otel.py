@@ -31,13 +31,14 @@ The exporter only reads traces; it never writes to or mutates the local JSONL.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bir import LoadedTrace, TraceEvent, load_traces
+from bir import LoadedTrace, TraceEvent
+from bir._sdk import _count_events_per_trace, _iter_trace_events, _iter_traces_from_events
 
 # Event types recorded as ``CLIENT`` spans because they represent a call out to
 # an external system (a model provider, a tool, a retrieval backend). Everything
@@ -62,9 +63,16 @@ def export_traces_to_otlp(
     """Convert loaded Bir traces to OpenTelemetry spans and export them via OTLP.
 
     ``traces`` accepts an already-loaded :class:`~bir.LoadedTrace`, an iterable of
-    them, or a path (``str``/``Path``) to a trace file, which is loaded with
-    :func:`bir.load_traces`. Loading only reads the local JSONL; this function
-    never writes to or alters it.
+    them, or a path (``str``/``Path``) to a trace file. Reading only touches the
+    local JSONL; this function never writes to or alters it.
+
+    A path is read in two streaming passes and only one trace is held at a time,
+    so exporting a large store costs memory proportional to a trace rather than
+    to the store. An already-loaded argument is exported as given — it was
+    already read by whoever loaded it — so pass the path when the store is large.
+    Traces read from a path arrive in completion order rather than sorted by
+    start time, which is what lets them be released one at a time; each trace's
+    own events are ordered exactly as :func:`bir.load_traces` orders them.
 
     ``endpoint`` is the OTLP/HTTP traces endpoint (for example
     ``"http://localhost:4318/v1/traces"``). When ``None`` the underlying exporter
@@ -99,9 +107,55 @@ def export_traces_to_otlp(
     is not installed.
     """
 
-    loaded = _resolve_traces(traces)
+    return _export_traces(
+        traces,
+        endpoint=endpoint,
+        service_name=service_name,
+        environment=environment,
+        headers=headers,
+        timeout=timeout,
+        span_exporter=span_exporter,
+    ).spans
+
+
+@dataclass(frozen=True)
+class _ExportCounts:
+    """How much one export covered: whole traces read, and spans emitted.
+
+    :func:`export_traces_to_otlp` returns the span count alone, which is its
+    documented contract. The CLI reports both, and counting the traces itself
+    would mean a third pass over the store, so the internal entry point returns
+    the pair.
+    """
+
+    traces: int
+    spans: int
+
+
+def _export_traces(
+    traces: LoadedTrace | Iterable[LoadedTrace] | str | Path,
+    *,
+    endpoint: str | None = None,
+    service_name: str = "bir",
+    environment: str | None = None,
+    headers: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    span_exporter: Any | None = None,
+    include_rotated: bool = False,
+    on_invalid: Callable[[ValueError], None] | None = None,
+) -> _ExportCounts:
+    """Export in two passes, holding no more of the store than one trace at a time.
+
+    ``include_rotated`` and ``on_invalid`` are the store-reading options the CLI
+    needs and are meaningful only when ``traces`` is a path; an already-loaded
+    argument was read by whoever loaded it.
+    """
+
+    reader = _TraceReader(traces, include_rotated=include_rotated, on_invalid=on_invalid)
     api = _import_otel_api()
-    context = _resolve_resource_context(loaded, environment)
+    # First pass: only the trace roots, because that is all the Resource-level
+    # environment and source are read from.
+    context = _resolve_resource_context(reader.roots(), environment)
 
     owns_exporter = span_exporter is None
     exporter = span_exporter if span_exporter is not None else _build_default_exporter(endpoint, headers, timeout)
@@ -118,12 +172,16 @@ def export_traces_to_otlp(
 
     try:
         exported = 0
-        for trace in loaded:
+        trace_count = 0
+        # Second pass: each trace is built, exported, and released before the
+        # next one is read.
+        for trace in reader.traces():
+            trace_count += 1
             # Per-span environment/source are only filled in when the export spans
             # more than one value, so a single-environment export keeps them on the
             # Resource and adds nothing to the spans themselves.
-            span_environment = _trace_environment(trace) if context.per_span_environment else None
-            span_source = _trace_source(trace) if context.per_span_source else None
+            span_environment = _trace_environment(trace.root) if context.per_span_environment else None
+            span_source = _trace_source(trace.root) if context.per_span_source else None
             exported += _export_one_trace(
                 trace,
                 tracer=tracer,
@@ -138,7 +196,77 @@ def export_traces_to_otlp(
         # caller, so we leave it open for them to reuse or shut down.
         if owns_exporter:
             provider.shutdown()
-    return exported
+    return _ExportCounts(traces=trace_count, spans=exported)
+
+
+class _TraceReader:
+    """The export's traces, readable once per pass.
+
+    A path is read again for each pass, so nothing is carried between them: the
+    Resource pass needs only trace roots, and the export pass groups events into
+    traces as they complete. That is what keeps a large store from being held in
+    memory whole.
+
+    An already-loaded argument is a list, a single trace, or an arbitrary
+    iterable. An iterable can only be walked once, so it is materialized — the
+    caller chose that representation, and nothing here can read it twice
+    otherwise.
+    """
+
+    def __init__(
+        self,
+        traces: LoadedTrace | Iterable[LoadedTrace] | str | Path,
+        *,
+        include_rotated: bool,
+        on_invalid: Callable[[ValueError], None] | None,
+    ) -> None:
+        self._path: str | Path | None = None
+        self._loaded: list[LoadedTrace] | None = None
+        if isinstance(traces, (str, Path)):
+            self._path = traces
+        elif isinstance(traces, LoadedTrace):
+            self._loaded = [traces]
+        else:
+            self._loaded = list(traces)
+        self._include_rotated = include_rotated
+        self._on_invalid = on_invalid
+        self._event_counts: dict[str, int] | None = None
+
+    def roots(self) -> Iterator[TraceEvent]:
+        """Yield each trace's root event, counting every trace's events on the way.
+
+        The counts are what lets :meth:`traces` release a trace as soon as it is
+        complete, so the pass that has to read the whole store anyway pays for
+        both.
+        """
+
+        if self._loaded is not None:
+            for trace in self._loaded:
+                yield trace.root
+            return
+        counts: dict[str, int] = {}
+        for event in self._events():
+            counts[event.trace_id] = counts.get(event.trace_id, 0) + 1
+            if event.type == "trace" and event.id == event.trace_id:
+                yield event
+        self._event_counts = counts
+
+    def traces(self) -> Iterator[LoadedTrace]:
+        """Yield whole traces, one at a time."""
+
+        if self._loaded is not None:
+            yield from self._loaded
+            return
+        counts = self._event_counts
+        if counts is None:
+            # Reading the traces without the Resource pass having run first: take
+            # the counting pass on its own rather than assume anything.
+            counts = _count_events_per_trace(self._events())
+        yield from _iter_traces_from_events(self._events(), event_counts=counts)
+
+    def _events(self) -> Iterator[TraceEvent]:
+        assert self._path is not None
+        return _iter_trace_events(self._path, include_rotated=self._include_rotated, on_invalid=self._on_invalid)
 
 
 def _export_one_trace(
@@ -323,14 +451,16 @@ def _gen_ai_system(event: TraceEvent) -> str | None:
     return None
 
 
-def _trace_environment(trace: LoadedTrace) -> str | None:
+def _trace_environment(root: TraceEvent) -> str | None:
     """Return the deployment environment recorded on a trace root, if any.
 
     Bir records it under ``metadata.service.environment`` on the trace root (see
     ``configure(environment=...)``); a trace without it contributes nothing.
+    Taking the root rather than the whole trace lets the Resource pass read a
+    store without grouping it into traces.
     """
 
-    service = trace.root.metadata.get("service")
+    service = root.metadata.get("service")
     if isinstance(service, Mapping):
         environment = service.get("environment")
         if isinstance(environment, str) and environment:
@@ -338,16 +468,16 @@ def _trace_environment(trace: LoadedTrace) -> str | None:
     return None
 
 
-def _trace_source(trace: LoadedTrace) -> str | None:
+def _trace_source(root: TraceEvent) -> str | None:
     """Return the trace source recorded on a trace root, if any (``metadata.source``)."""
 
-    source = trace.root.metadata.get("source")
+    source = root.metadata.get("source")
     if isinstance(source, str) and source:
         return source
     return None
 
 
-def _resolve_resource_context(loaded: list[LoadedTrace], environment: str | None) -> _ResourceContext:
+def _resolve_resource_context(roots: Iterable[TraceEvent], environment: str | None) -> _ResourceContext:
     """Decide the Resource-level environment/source and any per-span fallbacks.
 
     ``deployment.environment`` and ``bir.source`` describe the whole exported
@@ -363,11 +493,11 @@ def _resolve_resource_context(loaded: list[LoadedTrace], environment: str | None
 
     environments: list[str] = []
     sources: list[str] = []
-    for trace in loaded:
-        env = _trace_environment(trace)
+    for root in roots:
+        env = _trace_environment(root)
         if env is not None and env not in environments:
             environments.append(env)
-        src = _trace_source(trace)
+        src = _trace_source(root)
         if src is not None and src not in sources:
             sources.append(src)
 
@@ -405,16 +535,6 @@ def _iso_to_unix_nano(timestamp: str) -> int:
     """
 
     return int(round(datetime.fromisoformat(timestamp).timestamp() * 1_000_000_000))
-
-
-def _resolve_traces(traces: LoadedTrace | Iterable[LoadedTrace] | str | Path) -> list[LoadedTrace]:
-    """Normalize the ``traces`` argument into a list of :class:`~bir.LoadedTrace`."""
-
-    if isinstance(traces, (str, Path)):
-        return load_traces(traces)
-    if isinstance(traces, LoadedTrace):
-        return [traces]
-    return list(traces)
 
 
 @dataclass(frozen=True)

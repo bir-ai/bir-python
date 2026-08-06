@@ -12,21 +12,55 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import bir
 from bir import LoadedTrace, TraceEvent, load_traces
+from bir._sdk import _count_events_per_trace, _iter_trace_events, _iter_traces_from_events, _reset_config_for_tests
 from bir.integrations.otel import (
     _event_attributes,
+    _export_traces,
     _iso_to_unix_nano,
-    _resolve_traces,
+    _TraceReader,
     export_traces_to_otlp,
 )
+
+
+@contextmanager
+def temporary_workdir() -> Iterator[Path]:
+    previous = Path.cwd()
+    with tempfile.TemporaryDirectory() as directory:
+        workdir = Path(directory)
+        os.chdir(workdir)
+        try:
+            yield workdir
+        finally:
+            os.chdir(previous)
+            _reset_config_for_tests()
+
+
+def _record_interleaved_traces(trace_path: Path) -> None:
+    """Record traces that overlap, so grouping cannot rely on contiguity."""
+
+    bir.configure(trace_path=str(trace_path))
+    outer = [bir.trace(f"request-{index}") for index in range(3)]
+    for context in outer:
+        context.__enter__()
+    for context in reversed(outer):
+        with bir.span("step"):
+            pass
+        context.__exit__(None, None, None)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "valid-events.jsonl"
@@ -310,16 +344,30 @@ class PureMappingTests(unittest.TestCase):
         self.assertNotIn("bir.score.value", attributes)
         self.assertEqual(set(attributes), {"bir.event_type", "bir.event_id", "bir.trace_id"})
 
-    def test_resolve_traces_accepts_single_iterable_and_path(self) -> None:
+    def test_trace_reader_accepts_single_iterable_and_path(self) -> None:
         loaded = load_traces(str(FIXTURE))
         single = loaded[0]
 
-        self.assertEqual(_resolve_traces(single), [single])
-        self.assertEqual(_resolve_traces(loaded), loaded)
-        self.assertEqual(_resolve_traces(iter(loaded)), loaded)
-        # A path is loaded via ``load_traces``.
-        self.assertEqual(len(_resolve_traces(str(FIXTURE))), 1)
-        self.assertEqual(len(_resolve_traces(FIXTURE)), 1)
+        def read(traces: LoadedTrace | Iterable[LoadedTrace] | str | Path) -> list[LoadedTrace]:
+            return list(_TraceReader(traces, include_rotated=False, on_invalid=None).traces())
+
+        self.assertEqual(read(single), [single])
+        self.assertEqual(read(loaded), loaded)
+        self.assertEqual(read(iter(loaded)), loaded)
+        # A path is streamed from the store rather than loaded whole.
+        self.assertEqual(len(read(str(FIXTURE))), 1)
+        self.assertEqual(len(read(FIXTURE)), 1)
+
+    def test_trace_reader_reads_a_path_once_per_pass(self) -> None:
+        reader = _TraceReader(str(FIXTURE), include_rotated=False, on_invalid=None)
+
+        roots = list(reader.roots())
+        traces = list(reader.traces())
+
+        # Each pass re-reads the store, so neither consumes the other: nothing is
+        # carried between them, which is what keeps the export bounded.
+        self.assertEqual([root.id for root in roots], [trace.root.id for trace in traces])
+        self.assertEqual([root.id for root in reader.roots()], [root.id for root in roots])
 
 
 @unittest.skipUnless(_OTEL_AVAILABLE, "opentelemetry is not installed")
@@ -633,3 +681,145 @@ class DefaultExporterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamingExportTests(unittest.TestCase):
+    """The export reads the store in passes instead of holding it.
+
+    ``export-otel`` was the last read path that loaded whole traces, so a large
+    store cost memory proportional to itself rather than to one trace. The two
+    passes have to produce exactly what the materializing one did — the same
+    traces, with the same events inside them — so these cases pin the equivalence
+    and the streaming, separately.
+    """
+
+    def test_grouping_a_stream_yields_the_same_traces_as_loading(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            _record_interleaved_traces(trace_path)
+
+            loaded = load_traces(str(trace_path))
+            streamed = list(
+                _iter_traces_from_events(
+                    _iter_trace_events(str(trace_path)),
+                    event_counts=_count_events_per_trace(_iter_trace_events(str(trace_path))),
+                )
+            )
+
+            self.assertEqual(
+                sorted((trace.id, [event.id for event in trace.events]) for trace in streamed),
+                sorted((trace.id, [event.id for event in trace.events]) for trace in loaded),
+            )
+
+    def test_a_trace_whose_root_comes_first_is_still_whole(self) -> None:
+        # The SDK writes a trace's root last, but the shared fixture writes it
+        # first and the exporter accepts any JSONL path, so completeness cannot
+        # be decided by where the root sits.
+        counts = _count_events_per_trace(_iter_trace_events(str(FIXTURE)))
+        streamed = list(_iter_traces_from_events(_iter_trace_events(str(FIXTURE)), event_counts=counts))
+
+        self.assertEqual(len(streamed), 1)
+        self.assertEqual(len(streamed[0].events), 5)
+
+    def test_a_trace_is_released_before_the_store_is_exhausted(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            _record_interleaved_traces(trace_path)
+            events = list(_iter_trace_events(str(trace_path)))
+            counts = _count_events_per_trace(events)
+            consumed = 0
+
+            def counting() -> Any:
+                nonlocal consumed
+                for event in events:
+                    consumed += 1
+                    yield event
+
+            first = next(iter(_iter_traces_from_events(counting(), event_counts=counts)))
+
+            # The whole point: a trace is handed over as soon as it is complete,
+            # so the reader is still short of the end of the store.
+            self.assertIsNotNone(first)
+            self.assertLess(consumed, len(events))
+
+    def test_events_whose_trace_has_no_root_are_dropped(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            _record_interleaved_traces(trace_path)
+            # Drop one trace's root, leaving its children with nowhere to hang.
+            kept = [
+                line
+                for line in trace_path.read_text(encoding="utf-8").splitlines()
+                if not (json.loads(line)["type"] == "trace" and json.loads(line)["name"] == "request-0")
+            ]
+            trace_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+            counts = _count_events_per_trace(_iter_trace_events(str(trace_path)))
+            streamed = list(_iter_traces_from_events(_iter_trace_events(str(trace_path)), event_counts=counts))
+
+            # Same as the materializing loader: a trace is its root, so events
+            # without one are not a trace.
+            self.assertEqual(
+                sorted(trace.name for trace in streamed),
+                sorted(trace.name for trace in load_traces(str(trace_path))),
+            )
+            self.assertNotIn("request-0", {trace.name for trace in streamed})
+
+
+@unittest.skipUnless(_OTEL_AVAILABLE, "opentelemetry is not installed")
+class StreamingExportEquivalenceTests(unittest.TestCase):
+    """Streaming a path exports exactly what handing over loaded traces does."""
+
+    def test_a_path_and_the_loaded_traces_export_the_same_spans(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            _record_interleaved_traces(trace_path)
+
+            from_path = _in_memory_exporter()
+            from_list = _in_memory_exporter()
+            path_counts = _export_traces(str(trace_path), span_exporter=from_path)
+            list_spans = export_traces_to_otlp(load_traces(str(trace_path)), span_exporter=from_list)
+
+            self.assertEqual(path_counts.spans, list_spans)
+            self.assertEqual(
+                sorted(span.name for span in from_path.get_finished_spans()),
+                sorted(span.name for span in from_list.get_finished_spans()),
+            )
+
+            # Attributes have to survive the change too, not just the span count.
+            def attribute_sets(exporter: Any) -> list[tuple[tuple[str, Any], ...]]:
+                return sorted(
+                    tuple(sorted(dict(span.attributes or {}).items())) for span in exporter.get_finished_spans()
+                )
+
+            self.assertEqual(attribute_sets(from_path), attribute_sets(from_list))
+
+    def test_the_trace_count_is_reported_without_holding_the_traces(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            _record_interleaved_traces(trace_path)
+
+            counts = _export_traces(str(trace_path), span_exporter=_in_memory_exporter())
+
+            self.assertEqual(counts.traces, len(load_traces(str(trace_path))))
+
+    def test_a_mixed_environment_export_still_falls_back_per_span(self) -> None:
+        # The Resource pass reads only roots now; a store whose roots disagree
+        # must still push the value onto each span rather than the Resource.
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            bir.configure(trace_path=str(trace_path), environment="staging")
+            with bir.trace("first"):
+                pass
+            bir.configure(environment="prod")
+            with bir.trace("second"):
+                pass
+
+            exporter = _in_memory_exporter()
+            _export_traces(str(trace_path), span_exporter=exporter)
+
+            spans = exporter.get_finished_spans()
+            self.assertEqual(
+                {dict(span.attributes or {}).get("bir.environment") for span in spans},
+                {"staging", "prod"},
+            )

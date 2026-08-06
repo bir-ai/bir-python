@@ -1676,7 +1676,7 @@ class AutomationJsonOutputTests(CliBaseTest):
             write_two_traces(trace_path)
             captured: dict[str, Any] = {}
 
-            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+            with patch("bir.integrations.otel._export_traces", _recording_exporter(captured, spans=6)):
                 code, out, err = run_cli(
                     "export-otel",
                     "--path",
@@ -1812,7 +1812,15 @@ class SendExperimentCommandTests(CliBaseTest):
 
 
 def _recording_exporter(captured: dict[str, Any], *, spans: int = 0):
-    """Return a fake ``export_traces_to_otlp`` that records its call and returns ``spans``."""
+    """Return a fake ``_export_traces`` that records its call and returns counts.
+
+    The command hands the exporter a path and the options for reading it, rather
+    than a list of loaded traces, so that the store is streamed in two passes
+    instead of held. ``traces`` is resolved here the way the exporter would, so a
+    case can still assert which traces the command selected.
+    """
+
+    from bir.integrations.otel import _ExportCounts
 
     def fake(
         traces: Any,
@@ -1822,14 +1830,18 @@ def _recording_exporter(captured: dict[str, Any], *, spans: int = 0):
         environment: Any,
         headers: Any,
         timeout: Any,
-    ) -> int:
-        captured["traces"] = list(traces)
+        include_rotated: Any = False,
+        on_invalid: Any = None,
+    ) -> Any:
+        captured["path"] = traces
+        captured["traces"] = bir.load_traces(str(traces), include_rotated=include_rotated)
         captured["endpoint"] = endpoint
         captured["service_name"] = service_name
         captured["environment"] = environment
         captured["headers"] = headers
         captured["timeout"] = timeout
-        return spans
+        captured["include_rotated"] = include_rotated
+        return _ExportCounts(traces=len(captured["traces"]), spans=spans)
 
     return fake
 
@@ -1843,7 +1855,7 @@ class ExportOtelCommandTests(CliBaseTest):
             write_two_traces(trace_path)
             captured: dict[str, Any] = {}
 
-            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+            with patch("bir.integrations.otel._export_traces", _recording_exporter(captured, spans=6)):
                 code, out, err = run_cli(
                     "export-otel",
                     "--path",
@@ -1874,7 +1886,7 @@ class ExportOtelCommandTests(CliBaseTest):
             write_two_traces(trace_path)
             captured: dict[str, Any] = {}
 
-            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=6)):
+            with patch("bir.integrations.otel._export_traces", _recording_exporter(captured, spans=6)):
                 code, out, err = run_cli(
                     "export-otel",
                     "--path",
@@ -1909,7 +1921,7 @@ class ExportOtelCommandTests(CliBaseTest):
 
             # Default: only the active file's single trace is exported.
             captured: dict[str, Any] = {}
-            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured, spans=1)):
+            with patch("bir.integrations.otel._export_traces", _recording_exporter(captured, spans=1)):
                 code, _out, err = run_cli(
                     "export-otel", "--path", str(trace_path), "--endpoint", "http://collector.test/v1/traces"
                 )
@@ -1919,7 +1931,7 @@ class ExportOtelCommandTests(CliBaseTest):
 
             # --include-rotated also exports the rotated sibling.
             captured_rotated: dict[str, Any] = {}
-            with patch("bir.integrations.otel.export_traces_to_otlp", _recording_exporter(captured_rotated, spans=2)):
+            with patch("bir.integrations.otel._export_traces", _recording_exporter(captured_rotated, spans=2)):
                 code, _out, err = run_cli(
                     "export-otel",
                     "--path",

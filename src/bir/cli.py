@@ -37,12 +37,9 @@ from ._cli_present import (
     _walk_event_tree,
 )
 from ._sdk import (
-    LoadedTrace,
     TraceEvent,
     _iter_trace_events,
-    _load_traces_skipping_invalid,
     _prune_trace_store,
-    load_traces,
     send_events,
 )
 from .evals import (
@@ -173,18 +170,6 @@ class _SkippedSummaries:
         first = next(iter(self._messages))
         # stderr, so a --json run still writes only JSON to stdout.
         print(f"bir: skipped {count} unreadable experiment {noun}; first: {first}", file=sys.stderr)
-
-
-def _read_traces(args: argparse.Namespace) -> list[LoadedTrace]:
-    """Load whole traces for a command that needs their events."""
-
-    if not getattr(args, "skip_invalid", False):
-        return load_traces(args.path, include_rotated=args.include_rotated)
-
-    skipped = _SkippedLines()
-    traces = _load_traces_skipping_invalid(args.path, include_rotated=args.include_rotated, on_invalid=skipped)
-    skipped.report()
-    return traces
 
 
 @dataclass(frozen=True)
@@ -715,31 +700,38 @@ def _cmd_send_experiment(args: argparse.Namespace) -> int:
 
 
 def _cmd_export_otel(args: argparse.Namespace) -> int:
-    traces = _read_traces(args)
     headers = dict(args.headers) if args.headers else None
+    # The store is handed over as a path rather than loaded here, so the exporter
+    # reads it in two streaming passes and holds one trace at a time. The skipped
+    # report is de-duplicated, so seeing a damaged line once per pass says it once.
+    skipped = _SkippedLines() if getattr(args, "skip_invalid", False) else None
     try:
         # Imported lazily so the CLI keeps importing without the optional 'otel'
         # extra: the otel module itself imports cleanly (its opentelemetry imports
         # are deferred), so a missing extra surfaces as an ImportError from the
         # export call below rather than at CLI import time.
-        from .integrations.otel import export_traces_to_otlp
+        from .integrations.otel import _export_traces
 
-        exported = export_traces_to_otlp(
-            traces,
+        counts = _export_traces(
+            _resolved_trace_path(args.path),
             endpoint=args.endpoint,
             service_name=args.service_name,
             environment=args.environment,
             headers=headers,
             timeout=args.timeout,
+            include_rotated=args.include_rotated,
+            on_invalid=skipped,
         )
     except ImportError as exc:
         print(f"bir: {exc}", file=sys.stderr)
         return 1
+    if skipped is not None:
+        skipped.report()
     if args.json:
-        _dump_json({"traces": len(traces), "spans": exported, "endpoint": args.endpoint}, sys.stdout)
+        _dump_json({"traces": counts.traces, "spans": counts.spans, "endpoint": args.endpoint}, sys.stdout)
         return 0
 
-    print(f"exported {len(traces)} trace(s) ({exported} spans) to {args.endpoint}")
+    print(f"exported {counts.traces} trace(s) ({counts.spans} spans) to {args.endpoint}")
     return 0
 
 

@@ -22,6 +22,7 @@ import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import bir
 from bir import cli
@@ -275,3 +276,48 @@ class LenientLoaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportOtelSkipInvalidTests(unittest.TestCase):
+    """``export-otel`` reads past a damaged line like the other display commands.
+
+    It streams the store in two passes now, so a damaged line is met once per
+    pass; the report is de-duplicated, so it is still said once.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def test_it_reports_the_damaged_line_once_and_exports_the_rest(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            truncate_last_line()
+
+            exported: list[object] = []
+
+            def fake_export(traces, **kwargs):
+                on_invalid = kwargs.get("on_invalid")
+                # Drive both passes the way the real exporter does.
+                from bir.integrations.otel import _TraceReader
+
+                reader = _TraceReader(traces, include_rotated=False, on_invalid=on_invalid)
+                list(reader.roots())
+                exported.extend(reader.traces())
+                from bir.integrations.otel import _ExportCounts
+
+                return _ExportCounts(traces=len(exported), spans=len(exported))
+
+            with mock.patch("bir.integrations.otel._export_traces", fake_export):
+                code, _out, err = run_cli(
+                    "export-otel",
+                    "--path",
+                    str(TRACE_PATH),
+                    "--endpoint",
+                    "http://collector.test/v1/traces",
+                    "--skip-invalid",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err.count("skipped"), 1, err)
+            self.assertIn("skipped 1 unreadable line", err)
+            self.assertTrue(exported)

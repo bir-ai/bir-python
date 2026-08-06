@@ -314,6 +314,41 @@ def prepare_cli_show(workdir: Path, size: int) -> Callable[[], object]:
     return lambda: _run_cli("show", trace_id)
 
 
+class _DiscardingSpanExporter:
+    """An OpenTelemetry span exporter that keeps nothing.
+
+    The export case is here to measure reading the store and building spans, not
+    a network round trip, so the spans are dropped as they are produced.
+    """
+
+    def export(self, spans: object) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
+
+
+def prepare_export_otel(workdir: Path, size: int) -> Callable[[], object]:
+    """Export a whole store over OTLP, with the transport removed.
+
+    This is the read path that materialized the store the longest, so it is
+    tracked beside the CLI cases for the same reason they are: a regression that
+    starts holding whole traces again shows up as peak memory growing with the
+    store rather than staying flat.
+
+    Needs the optional ``otel`` extra, so the case is out of the CI smoke subset;
+    a machine taking a real baseline installs it.
+    """
+
+    from bir.integrations.otel import _export_traces
+
+    write_events(size, capture=True)
+    return lambda: _export_traces(str(bir._sdk._config.trace_path), span_exporter=_DiscardingSpanExporter())
+
+
 def _run_cli(*argv: str) -> int:
     """Run one CLI command with its output discarded."""
 
@@ -362,6 +397,9 @@ BENCHMARKS: tuple[Benchmark, ...] = (
     Benchmark("cli_traces", "cli", prepare_cli_traces, size=2_000, smoke_size=100),
     Benchmark("cli_stats", "cli", prepare_cli_stats, size=2_000, smoke_size=100),
     Benchmark("cli_show", "cli", prepare_cli_show, size=2_000, smoke_size=100),
+    # Out of the smoke subset because it needs the optional 'otel' extra, which
+    # CI does not install; a baseline run does.
+    Benchmark("export_otel", "cli", prepare_export_otel, size=2_000, smoke_size=100, smoke=False),
     Benchmark("experiment_sync", "evals", prepare_experiment_sync, size=500, smoke_size=25),
     Benchmark("experiment_async", "evals", prepare_experiment_async, size=500, smoke_size=25),
 )

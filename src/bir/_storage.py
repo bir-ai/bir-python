@@ -324,6 +324,56 @@ def _traces_from_events(events: Iterable[TraceEvent]) -> list[LoadedTrace]:
     return sorted(traces, key=lambda trace: trace.start_time)
 
 
+def _count_events_per_trace(events: Iterable[TraceEvent]) -> dict[str, int]:
+    """Count each trace's events, for a later pass that groups them one at a time.
+
+    Retains one integer per trace, which is the bound the streaming CLI read
+    commands already accept.
+    """
+
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event.trace_id] = counts.get(event.trace_id, 0) + 1
+    return counts
+
+
+def _iter_traces_from_events(
+    events: Iterable[TraceEvent],
+    *,
+    event_counts: Mapping[str, int],
+) -> Iterator[LoadedTrace]:
+    """Group a stream of events into traces, releasing each once it is complete.
+
+    ``event_counts`` says how many events each trace has, from an earlier pass
+    over the same store (:func:`_count_events_per_trace`). A trace is emitted as
+    soon as that many of its events have arrived, so only traces still missing an
+    event are held: memory is bounded by how many traces interleave rather than
+    by the size of the store.
+
+    Counting is what makes this safe. The obvious signal — a trace is done when
+    its root arrives — holds for a store this SDK wrote, because the root event
+    is written when the trace closes, but not for one where the root comes first;
+    the shared ``tests/fixtures`` store is written that way, and the exporter
+    accepts any JSONL path. A count does not care where the root sits.
+
+    Each completed trace goes through :func:`_traces_from_events`, so its own
+    events are ordered identically to the materializing loader, and a trace whose
+    root is absent is dropped exactly as it is there. What differs is the order
+    the traces arrive in — completion order rather than start time — which is the
+    price of not holding them all in order to sort them.
+    """
+
+    pending: dict[str, list[TraceEvent]] = {}
+    for event in events:
+        collected = pending.setdefault(event.trace_id, [])
+        collected.append(event)
+        if len(collected) < event_counts.get(event.trace_id, 0):
+            continue
+        grouped = _traces_from_events(pending.pop(event.trace_id))
+        if grouped:
+            yield grouped[0]
+
+
 def _events_for_sending(
     path: str | Path | None = None,
     *,
