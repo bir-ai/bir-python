@@ -63,6 +63,26 @@ class DocumentationCIContractTests(unittest.TestCase):
         self.assertIn('"ruff", "format", "--check", "."', self.verify_release)
         self.assertEqual(self.workflow.count("run: python scripts/verify_release.py"), 1)
 
+    def test_free_threaded_build_runs_the_unit_suite(self) -> None:
+        job = self._job("free-threaded")
+
+        # A ``t``-suffixed version is what selects the free-threaded build; the
+        # whole point of the job is lost if it silently runs a GIL interpreter.
+        self.assertRegex(job, r'python-version: "3\.\d+t"')
+        self.assertIn("python -m unittest discover -s tests", job)
+        self.assertIn('pip install -e ".[dev]"', job)
+
+    def test_free_threaded_job_does_not_duplicate_the_canonical_gates(self) -> None:
+        job = self._job("free-threaded")
+
+        # Coverage, type checking, and release verification belong to the
+        # canonical ubuntu/3.12 leg; repeating them here would double CI time to
+        # answer a question that leg already answers. The check is on what the
+        # job runs, not on what its comments mention.
+        for command in ("-m coverage", "run: pyright", "scripts/verify_release.py", "matrix:"):
+            with self.subTest(command=command):
+                self.assertNotIn(command, job)
+
     def test_generated_site_directory_is_ignored(self) -> None:
         gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn("/site/", gitignore)

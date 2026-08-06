@@ -1375,8 +1375,12 @@ class _TraceContext:
         self._dropped = _should_drop_trace(self.name)
         self._trace_token = _current_trace_id.set(self.id)
         self._parent_token = _current_parent_id.set(self.id)
-        self._capture_inputs_token = _current_capture_inputs.set(_config.capture_inputs)
-        self._capture_outputs_token = _current_capture_outputs.set(_config.capture_outputs)
+        # Bind the configuration once. ``configure()`` rebinds the whole object,
+        # so one read is consistent, but two reads can straddle two objects and
+        # snapshot inputs from one configuration and outputs from the next.
+        config = _config
+        self._capture_inputs_token = _current_capture_inputs.set(config.capture_inputs)
+        self._capture_outputs_token = _current_capture_outputs.set(config.capture_outputs)
         self._dropped_token = _current_trace_dropped.set(self._dropped)
         return self
 
@@ -1898,8 +1902,9 @@ def _event(
         service_metadata = _service_metadata()
         if service_metadata is not None:
             event_metadata.setdefault("service", service_metadata)
-        if _config.source is not None:
-            event_metadata.setdefault("source", _config.source)
+        source = _config.source
+        if source is not None:
+            event_metadata.setdefault("source", source)
     event: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
         "id": event_id,
@@ -1929,34 +1934,39 @@ def _event(
 
 
 def _service_metadata() -> dict[str, str] | None:
+    config = _config
     payload: dict[str, str] = {}
-    if _config.service_name is not None:
-        payload["name"] = _config.service_name
-    if _config.environment is not None:
-        payload["environment"] = _config.environment
+    if config.service_name is not None:
+        payload["name"] = config.service_name
+    if config.environment is not None:
+        payload["environment"] = config.environment
     return payload or None
 
 
 def _write_event(event: dict[str, Any]) -> None:
     # The master switch and root sampling decision remain lifecycle concerns.
-    if not _config.enabled or _current_trace_dropped.get():
+    config = _config
+    if not config.enabled or _current_trace_dropped.get():
         return
+    # One binding for the whole write, so a reconfiguration cannot pair a new
+    # trace path with the previous rotation settings.
     _storage_helpers._append_event(
         event,
-        trace_path=_config.trace_path,
-        max_bytes=_config.max_bytes,
-        backup_count=_config.backup_count,
+        trace_path=config.trace_path,
+        max_bytes=config.max_bytes,
+        backup_count=config.backup_count,
     )
 
 
 def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
     """Rotate the active trace file before a write that would exceed its cap."""
 
+    config = _config
     _storage_helpers._rotate_trace_file_if_needed(
         trace_path,
         payload,
-        max_bytes=_config.max_bytes,
-        backup_count=_config.backup_count,
+        max_bytes=config.max_bytes,
+        backup_count=config.backup_count,
     )
 
 

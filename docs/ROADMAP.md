@@ -50,62 +50,29 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|-------------|----------|------|-----------------|------------|
-| 1 | Verify free-threaded builds | P3 | S | Python 3.13t/3.14t support is a tested claim or a stated limit | — |
-
-## Work item details
-
-### 1. Verify free-threaded builds
-
-**Why:** CI covers CPython 3.10–3.14 but no free-threaded build, and 3.14 is the
-release where free-threading became officially supported. Nothing here is known
-to be broken — `configure()` rebinds an immutable dataclass atomically
-(`_sdk.py:391`), writes are serialized under module-level locks
-(`_storage.py:116-117`), and per-trace state lives in context variables — so this
-is verification, not a known race. But "supports 3.14" currently means "supports
-the GIL build of 3.14", which the stability page does not say.
-
-**Scope:**
-
-- Add a `3.14t` CI leg, at minimum for the unit suite.
-- Add a concurrency test that writes from several threads at once and asserts
-  every event landed exactly once and no line interleaved.
-- Either state free-threaded support on the stability page, or state the limit.
-
-**Done when:** the supported-Python claim is precise about which builds it covers
-and a test backs it.
-
-## Sequencing
-
-Nothing here is P1 any more: the store-health work that was — a damaged store
-being unreadable, and a large one costing memory proportional to its size — has
-shipped, and so has the deprecation machinery a Beta release needs. One item
-remains, and it is the lowest priority of the audit.
-
-One correction from the 2026-08-06 audit: it claimed `eval-gate` could not tell
-a pipeline which score regressed without parsing prose. That was wrong —
-`eval-gate` has always emitted JSON only, carrying the verdict, per-evaluator
-deltas, the reason each one regressed, and the tolerances that decided it. The
-gap was in `send`, `send-experiment`, `prune`, and `export-otel`, which is what
-shipped.
-
-The deprecation mechanism has no first user yet. The likeliest one is the flat
-re-exports in `bir.integrations.__all__`, where `trace_chat` resolves to
-whichever provider the package imported last and the stability page already
-tells users to import from the module instead. Retiring those is a product
-decision, not a mechanical one, so it belongs in a new issue rather than here.
-
-One read path was deliberately left alone. `bir export-otel` still loads whole
-traces because the exporter takes them as a list; bounding it means changing
-that signature, which is a bigger question than the command's memory use.
+None. Every item from the 2026-08-06 audit has shipped.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
-Two of its entries remain outside this repository's reach: confirming the
-event-schema `1.0` contract against the current `bir-app` release — including the
-event-tree shape the framework bridges record and the `metadata.remote_parent`
-shape ADR 0001 proposes — and the release mechanics of raising the version and
-the `Development Status` classifier.
+Its remaining entries are outside this repository's reach or are release
+mechanics: confirming the event-schema `1.0` contract against the current
+`bir-app` release, writing the migration note for the public changes since
+`0.3.0`, and raising the version and the `Development Status` classifier.
+
+Two things the audit turned up that are decisions rather than defects, and so
+belong in issues rather than here:
+
+- Retiring the flat re-exports in `bir.integrations.__all__`, where `trace_chat`
+  resolves to whichever provider the package imported last. The deprecation
+  machinery for it exists; whether to spend a user's migration budget on it does
+  not follow from the code.
+- Bounding `bir export-otel`, the one read path still loading whole traces,
+  which means changing the exporter's list-taking signature.
+
+Two of the audit's own claims were wrong and were corrected as the items were
+worked: `eval-gate` already emitted JSON, and the concurrent-write test the
+free-threading item asked for already existed in `test_sdk.py`. The next audit
+should re-derive its list from the current code and verify each claim against it
+before writing it down.
 
 ## Explicitly not on the backlog
 
@@ -117,6 +84,6 @@ parenting from the framework's own run ids, the published API stability policy,
 the performance benchmark harness, the trace-context decision
 ([ADR 0001](adr/0001-distributed-trace-context.md)), reading a damaged store with
 `--skip-invalid`, streaming the CLI read commands, the deprecation mechanism,
-machine-readable output for every command that produces a result, and coverage of
-the transport and experiment-loading error paths. Regressions in those areas
+machine-readable output for every command that produces a result, coverage of the
+transport and experiment-loading error paths, and the free-threaded CI leg. Regressions in those areas
 are bugs; new scope requires a new issue with current evidence.

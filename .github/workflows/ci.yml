@@ -81,6 +81,35 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: python scripts/verify_release.py
 
+  free-threaded:
+    name: Free-threaded Python
+    runs-on: ubuntu-latest
+
+    # Kept out of the sdk matrix on purpose. The matrix legs are the supported
+    # GIL builds; this one answers a different question — whether the SDK's
+    # shared state (a rebound immutable config, lock-guarded file writes,
+    # per-thread context variables) still holds when threads run in parallel for
+    # real. It runs the unit suite only: coverage, Pyright, and the release
+    # verification are the canonical ubuntu/3.12 leg's job and would only
+    # duplicate work here.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14t"
+
+      - name: Report the interpreter build
+        run: |
+          python -c "import sys, sysconfig; print(sys.version); print('Py_GIL_DISABLED:', sysconfig.get_config_var('Py_GIL_DISABLED')); print('GIL enabled at runtime:', sys._is_gil_enabled())"
+
+      - name: Install SDK with dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run SDK unit tests
+        shell: bash
+        run: PYTHONPATH=src python -m unittest discover -s tests
+
   fixtures:
     name: Contract fixture drift guard
     runs-on: ubuntu-latest

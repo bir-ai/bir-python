@@ -225,9 +225,19 @@ Deprecated names are still tested and still work. If you want them to fail your
 build early, run your test suite with `-W error::DeprecationWarning`.
 
 **Supported Python.** The package supports every CPython version upstream still
-supports, currently **3.10 through 3.14**, and every one of them is tested on
-Linux, macOS, and Windows in CI. A version is added once CI passes on it, and
-dropped only in a minor release, no earlier than its upstream end-of-life.
+supports, currently **3.10 through 3.14**. Every one of their default (GIL)
+builds is tested on Linux, macOS, and Windows in CI. A version is added once CI
+passes on it, and dropped only in a minor release, no earlier than its upstream
+end-of-life.
+
+The **free-threaded** build of 3.14 runs the unit suite in CI as well, on Linux.
+The SDK holds little shared state and does not lock around most of it by design:
+`configure()` rebinds one immutable object so a reader sees the old or the new
+one whole, trace-file writes are serialized by an explicit lock, and per-trace
+state lives in context variables, which are per-thread. Tests race
+reconfiguration against concurrent recording to keep that true. Treat
+free-threaded support as covered to that extent — the unit suite, on Linux —
+rather than as broadly exercised in production.
 
 **Dependencies.** The runtime package has no third-party dependencies and will
 not gain any; optional capabilities ship as extras (`otel`, `dev`, `docs`). This

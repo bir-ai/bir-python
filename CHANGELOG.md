@@ -8,7 +8,30 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Changed
+
+- Operations that read the module-level configuration now bind it once instead
+  of reading the global repeatedly. `configure()` rebinds one immutable object,
+  so any single read is consistent, but a sequence of reads could straddle two
+  configurations: a trace could snapshot input capture from one and output
+  capture from the next, a write could pair a new trace path with the previous
+  rotation settings, and a trace root could carry a mixed service identity. Each
+  of those now takes one binding for the whole operation.
+
+  This is a latent race rather than a reported bug — under the GIL the window is
+  a single unlucky scheduling — but it is exactly the kind that stops being rare
+  on a free-threaded build. No behavior changes for a program that does not
+  reconfigure while recording.
+
 ### Added
+
+- CI runs the unit suite on the free-threaded build of Python 3.14, in its own
+  job on Linux, so "supports 3.14" stops silently meaning "supports the GIL
+  build of 3.14". The stability page now says which builds are tested and to
+  what extent. New tests race `configure()` against concurrent recording and
+  assert per-thread trace isolation; they identify the interpreter build in
+  their failure messages so a CI log is unambiguous about where a failure
+  happened.
 
 - The transport and experiment-loading error paths are now covered by behavior
   tests. `bir/_sending.py` rose from 79.7% to 98.7% and
