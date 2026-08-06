@@ -36,8 +36,9 @@ from contextvars import ContextVar
 from typing import Any, Iterator
 
 from bir import generation, tool_call
-from bir._sdk import _current_trace_id, _trace_context
+from bir._sdk import _trace_context
 from bir.integrations._common import _string_or_none, _usage_tokens, _value
+from bir.integrations._lifecycle import _open_implicit_root
 
 # Haystack tracing operation names. A pipeline run is the trace root; a component
 # run is mapped to a generation, tool call, or span by its component type.
@@ -279,11 +280,7 @@ def _implicit_trace_context() -> Any | None:
     to a root instead of raising.
     """
 
-    if _current_trace_id.get() is not None:
-        return None
-    context = _trace_context(name=_PIPELINE_RUN, metadata={"integration": "haystack", "kind": "implicit_root"})
-    context.__enter__()
-    return context
+    return _open_implicit_root(name=_PIPELINE_RUN, metadata={"integration": "haystack", "kind": "implicit_root"})
 
 
 def _span_context(name: str) -> Any:

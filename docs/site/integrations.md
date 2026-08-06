@@ -476,10 +476,33 @@ share these rules:
   `metadata["kind"] = "implicit_root"`) so a recorded run is never dropped for
   lack of a root.
 - An end callback for a run the handler never started is ignored, and a repeated
-  end callback records the event once. A run whose end callback never arrives
-  records nothing.
+  end callback records the event once.
 - A failed run is recorded with error status and a redacted message.
 - A handler instance can be reused across runs.
+
+### When a run's end callback never arrives
+
+A run stays open until its end callback, and while it is open it owns the trace
+context — that is what makes your own work nest under it. So a framework that
+drops the terminal callback leaves the run open indefinitely: its event is not
+written, and everything recorded afterwards in that context joins a trace whose
+root does not exist. Two things bring it back:
+
+- **New top-level work reclaims it.** When the framework starts a run it reports
+  as top-level, a handler still holding an earlier run finishes and writes it,
+  and the context is free again. LangChain, OpenAI Agents, and Pydantic AI report
+  this, so their handlers recover on the next request. CrewAI and LlamaIndex
+  report no parent when a run begins, which makes a nested run and a run after an
+  abandoned one look identical, so those handlers do not guess.
+- **Open runs are bounded.** A handler holds at most 1024 open runs; past that
+  the oldest is written and released, so a framework that stops closing runs
+  cannot grow it without limit.
+
+Either way the run's events are written, and its `metadata.abandoned` says the
+framework never closed it — `superseded` when new top-level work reclaimed it,
+`evicted` when the bound did. Until one of the two happens, the events are on
+disk without a root and `bir traces` reports them; see
+[events with no trace root](cli-env.md#events-with-no-trace-root).
 
 Nesting follows the tree the framework reports, so runs it executes in parallel
 under one parent are recorded as siblings rather than nested inside each other.

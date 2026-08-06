@@ -34,8 +34,9 @@ from typing import Any, ClassVar
 
 from integration_contract import REDACTED_TEXT, SECRET_TEXT, temporary_workdir
 
-from bir import TraceEvent, configure, load_events, span, trace
+from bir import TraceEvent, configure, load_events, load_traces, span, trace
 from bir._sdk import _reset_config_for_tests
+from bir.integrations._lifecycle import _MAX_OPEN_RUNS
 
 # Capture options every handler accepts, each defaulting to ``None`` so an unset
 # option leaves the configured capture settings in charge.
@@ -127,6 +128,14 @@ class BridgeContract:
     # one end — true for a context-manager tracer or a single-call report, false
     # for a callback stream, where an end can arrive unmatched, twice, or never.
     guarantees_paired_callbacks: bool = False
+    # Whether the framework says, at the start of a top-level run, that the run
+    # is top-level. A handler that is told can reclaim a root it is still holding
+    # for an earlier run, because new top-level work means the earlier run is
+    # gone. A handler that is not told (CrewAI's kickoff and LlamaIndex's
+    # ``start_trace`` carry no parent, so a nested one is indistinguishable from
+    # one following an abandoned run) must not guess: turning nested work into a
+    # second root is worse than the leak, so it relies on the bounded registry.
+    reclaims_abandoned_roots: bool = False
     # A structural node the handler always inserts between the framework root and
     # a run, named here. AG2 wraps every event in the speaking agent's turn span,
     # so its generations hang from that turn rather than from the run root.
@@ -392,6 +401,110 @@ class UnpairedCallbackTests(BridgeContractTestCase):
             self.assertEqual(load_events(), [])
 
 
+class AbandonedRunTests(BridgeContractTestCase):
+    """Handlers told when a run is top-level reclaim what an earlier one left open.
+
+    A run that never ends holds the ambient trace context, so everything recorded
+    afterwards joins a trace whose root is never written and no trace-shaped
+    reader can find it. Nothing in the callback stream says the run is gone, but
+    a framework starting new top-level work in the same context has said it by
+    implication: the earlier run is finished and written rather than stranded.
+    """
+
+    def drive_abandoned_then_new_root(self, handler: Any) -> None:
+        """Abandon one run, then let the framework start unrelated top-level work.
+
+        Driven in a copied context because an abandoned run is precisely a run
+        that leaves its context entered: without the copy the unbalanced
+        contextvars would leak into every test that runs after this one.
+        """
+
+        def sequence() -> None:
+            self.separable_generation().start(handler, CHILD_KEY, None)
+            self.contract.root.start(handler, ROOT_KEY, None)
+            self.contract.root.end(handler, ROOT_KEY)
+
+        contextvars.copy_context().run(sequence)
+
+    def test_new_top_level_work_reclaims_an_abandoned_run(self) -> None:
+        with temporary_workdir():
+            self.drive_abandoned_then_new_root(self.build_handler())
+
+            # The abandoned run is a complete trace rather than stranded events,
+            # and the new root is its own trace rather than a child of it.
+            self.assertEqual(len(load_traces()), 2)
+            abandoned = [event for event in load_events() if event.metadata.get("abandoned")]
+            self.assertTrue(abandoned, "the reclaimed run must say it was never closed")
+            self.assertEqual({event.metadata["abandoned"] for event in abandoned}, {"superseded"})
+
+    def test_the_context_is_the_application_s_again_after_a_reclaim(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            def sequence() -> None:
+                self.separable_generation().start(handler, CHILD_KEY, None)
+                self.contract.root.start(handler, ROOT_KEY, None)
+                self.contract.root.end(handler, ROOT_KEY)
+                # Unrelated work recorded after the reclaim opens its own trace
+                # instead of joining one whose root will never be written.
+                with trace("application-work"):
+                    pass
+
+            contextvars.copy_context().run(sequence)
+
+            self.assertIn("application-work", {loaded.name for loaded in load_traces()})
+
+    def test_a_run_the_framework_nests_is_not_reclaimed(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+
+            self.contract.root.start(handler, ROOT_KEY, None)
+            # A nested run names its parent, so it is ordinary nesting rather
+            # than new top-level work and must leave the open root alone.
+            self.record_generation(handler, parent=ROOT_KEY)
+            self.contract.root.end(handler, ROOT_KEY)
+
+            self.assertEqual(len(self.events("trace")), 1)
+            self.assertEqual([event for event in load_events() if event.metadata.get("abandoned")], [])
+
+
+class BoundedRegistryTests(BridgeContractTestCase):
+    """A handler cannot grow without limit when terminal callbacks stop arriving."""
+
+    def open_run_count(self, handler: Any) -> int:
+        """Count the runs a handler is holding, whichever shape it holds them in.
+
+        A framework that correlates its callbacks is keyed by run id; one that
+        does not (CrewAI) is stacked per thread by arrival order. Both are
+        registries of open runs and both need the bound, so the case asserts on
+        the total rather than on one shape.
+        """
+
+        keyed = len(getattr(handler, "_active_runs", ()))
+        stacked = sum(len(stack) for stack in getattr(handler, "_call_stacks", {}).values())
+        return keyed + stacked
+
+    def test_open_runs_are_bounded_and_evicted_runs_are_written(self) -> None:
+        with temporary_workdir():
+            handler = self.build_handler()
+            driver = self.separable_generation()
+
+            def sequence() -> None:
+                # Every one of these is abandoned, so they run in a copied
+                # context for the same reason as the cases above.
+                for index in range(_MAX_OPEN_RUNS + 50):
+                    driver.start(handler, f"{CHILD_KEY}-{index}", None)
+
+            contextvars.copy_context().run(sequence)
+
+            self.assertLessEqual(self.open_run_count(handler), _MAX_OPEN_RUNS)
+            # Evicting a run writes it: holding it forever was the alternative,
+            # and dropping it silently would lose what was already recorded.
+            written = load_events()
+            self.assertTrue(written, "an evicted run must be written, not dropped")
+            self.assertTrue(all(event.metadata.get("abandoned") == "evicted" for event in written))
+
+
 class ReportedParentTests(BridgeContractTestCase):
     """Handlers whose framework names each run's parent follow that tree."""
 
@@ -470,6 +583,11 @@ def build_bridge_test_case(contract: BridgeContract) -> type[BridgeContractTestC
         # cannot, so those cases would test a sequence the framework never emits.
         bases.append(UnpairedCallbackTests)
         bases.append(ReportedParentTests if contract.reports_parents else OrderedPairingTests)
+        # Only a callback stream can leave a run open forever, so only it needs
+        # a bound on how many it may hold.
+        bases.append(BoundedRegistryTests)
+    if contract.reclaims_abandoned_roots:
+        bases.append(AbandonedRunTests)
 
     class_name = "".join(part.title() for part in contract.id.replace(".", "_").split("_")) + "BridgeTests"
     return type(class_name, tuple(bases) or (BridgeContractTestCase,), {"contract": contract})

@@ -41,6 +41,13 @@ from typing import Any
 from bir import generation, tool_call
 from bir._sdk import _current_trace_id, _trace_context
 from bir.integrations._common import _string_or_none, _usage_tokens, _value
+from bir.integrations._lifecycle import (
+    _ActiveRun,
+    _bound_run_stack,
+    _enter_framework_root,
+    _open_implicit_root,
+    _OpenRuns,
+)
 
 # ``event.type`` of a node's start mapped to the Bir event the node becomes.
 _START_KINDS: dict[str, str] = {
@@ -89,7 +96,7 @@ class BirCrewAIHandler:
     ) -> None:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = _OpenRuns()
         self._call_stacks: dict[int, list[_ActiveRun]] = {}
 
     def on_event(self, source: Any, event: Any) -> None:
@@ -121,9 +128,13 @@ class BirCrewAIHandler:
 
         if kind == "trace":
             key = f"crew:{_crew_id(source, event)}"
+            # No reclaim here: a kickoff carries no parent, so a nested crew and
+            # a crew following an abandoned one look identical, and reclaiming
+            # would turn nested work into a second root. The bounded registry is
+            # this handler's only recovery.
             if _current_trace_id.get() is None:
                 context = _trace_context(name=_trace_name(source, event), metadata=metadata)
-                context.__enter__()
+                _enter_framework_root(context)
                 self._active_runs[key] = _ActiveRun("trace", context)
                 return
             # A crew kickoff arriving inside an active trace (a nested crew)
@@ -197,7 +208,13 @@ class BirCrewAIHandler:
             active_run.implicit_trace.__exit__(type(error), error, None)
 
     def _push(self, active_run: _ActiveRun) -> None:
-        self._call_stacks.setdefault(get_ident(), []).append(active_run)
+        # CrewAI's LLM-call and tool-usage events carry no correlation id, so
+        # open runs are stacked by arrival order rather than keyed. The stack
+        # needs the same bound as a keyed registry: an end that never arrives is
+        # a run that is never popped.
+        stack = self._call_stacks.setdefault(get_ident(), [])
+        stack.append(active_run)
+        _bound_run_stack(stack)
 
     def _pop(self) -> _ActiveRun | None:
         thread_id = get_ident()
@@ -210,13 +227,6 @@ class BirCrewAIHandler:
         return active_run
 
 
-class _ActiveRun:
-    def __init__(self, kind: str, context: Any, *, implicit_trace: Any | None = None) -> None:
-        self.kind = kind
-        self.context = context
-        self.implicit_trace = implicit_trace
-
-
 def _implicit_trace_context(event: Any) -> Any | None:
     """Open a Bir trace root for an event that arrives with no active Bir trace.
 
@@ -226,13 +236,8 @@ def _implicit_trace_context(event: Any) -> Any | None:
     attaches to a root instead of raising.
     """
 
-    if _current_trace_id.get() is not None:
-        return None
-
     metadata: dict[str, Any] = {"integration": "crewai", "kind": "implicit_root"}
-    context = _trace_context(name="crewai.crew", metadata=metadata)
-    context.__enter__()
-    return context
+    return _open_implicit_root(name="crewai.crew", metadata=metadata)
 
 
 def _span_context(name: str) -> Any:

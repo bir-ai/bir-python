@@ -10,6 +10,45 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A framework run whose end callback never arrives no longer strands everything
+  recorded after it. A bridge enters a Bir context in one callback and exits it
+  in another, and while the run is open it owns the ambient trace context — which
+  is the feature, since an application's own `@observe()` work nests under it.
+  When the terminal callback never came, the run stayed open for the life of the
+  context: its event was never written, and every event recorded afterwards
+  joined a trace whose root did not exist. Driving each bridge's own contract
+  driver with no end callback and then recording one unrelated `@observe()` call,
+  six of the seven declared bridges left the store with no trace roots at all —
+  `bir traces` printed "No traces found", `bir show` reported the id as not
+  found, and `load_traces()` returned `[]` while the events sat on disk.
+
+  Two recoveries now apply. A handler that is told when a run is top-level
+  reclaims a root it is still holding for an earlier one, because new top-level
+  work means the earlier run is gone; LangChain, OpenAI Agents, and Pydantic AI
+  report this, so a long-lived handler recovers on the next request and the
+  abandoned run becomes a complete, findable trace instead of stranded events.
+  CrewAI and LlamaIndex report no parent when a run begins, which makes a nested
+  run indistinguishable from one following an abandoned run, so they do not
+  guess: turning nested work into a second root would be worse than the leak.
+
+  Every handler's open runs are also bounded at 1024, and an evicted run is
+  written rather than dropped. A handler driven with 20,000 abandoned runs held
+  20,001 entries and 21.8 MiB before; it now holds 1,024 and peaks at 1.4 MiB.
+  Both paths record `metadata.abandoned` (`superseded` or `evicted`), so a run no
+  framework ever closed is distinguishable in the store from one that closed
+  normally.
+
+  What neither recovers is a context that sees no further bridge callbacks:
+  nothing distinguishes a run that is still executing from one that is gone, and
+  guessing would break the nesting above. That state is now reported by the
+  reader rather than silent.
+
+  The five callback handlers' identical private `_ActiveRun` classes and plain
+  registry dicts are replaced by one shared implementation, so the bound and the
+  reclaim exist once rather than five times. The bridge conformance matrix gained
+  cases for both, and a handler declares whether its framework tells it when a
+  run is top-level.
+
 - `bir traces`, `bir stats`, and `bir show` now say when the store holds events
   that belong to no trace. A trace's root event is written when the trace closes,
   so a trace that never closes leaves its children on disk with no root, and

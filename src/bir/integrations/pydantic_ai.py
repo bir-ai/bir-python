@@ -29,6 +29,13 @@ from typing import Any
 from bir import generation, tool_call
 from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 from bir.integrations._common import _string_or_none, _usage_tokens, _value
+from bir.integrations._lifecycle import (
+    _ActiveRun,
+    _enter_framework_root,
+    _open_implicit_root,
+    _OpenRuns,
+    _reclaim_open_root,
+)
 
 # ``gen_ai.operation.name`` values (and span-name prefixes for older Pydantic AI
 # instrumentation versions that predate the operation attribute) mapped to the Bir
@@ -59,7 +66,7 @@ class BirPydanticAIHandler:
     ) -> None:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = _OpenRuns()
 
     def on_start(self, span: Any, parent_context: Any | None = None) -> None:
         del parent_context  # The Bir parent is the active contextvar, not OTel's.
@@ -68,9 +75,14 @@ class BirPydanticAIHandler:
         kind = _classify(span, operation)
         metadata = _base_metadata(span, attributes, operation)
 
+        if kind == "agent" and self._parent_event_id(span) is None:
+            # An agent run the framework reports no parent for is new top-level
+            # work, so a root this handler is still holding for an earlier run is
+            # reclaimed first. A nested agent run names its parent and keeps it.
+            _reclaim_open_root()
         if kind == "agent" and _current_trace_id.get() is None:
             context = _trace_context(name=_trace_name(span, attributes), metadata=metadata)
-            context.__enter__()
+            _enter_framework_root(context)
             self._active_runs[_span_key(span)] = _ActiveRun("trace", context)
             return
 
@@ -169,13 +181,6 @@ class BirPydanticAIHandler:
             active_run.implicit_trace.__exit__(type(error), error, None)
 
 
-class _ActiveRun:
-    def __init__(self, kind: str, context: Any, *, implicit_trace: Any | None = None) -> None:
-        self.kind = kind
-        self.context = context
-        self.implicit_trace = implicit_trace
-
-
 def _implicit_trace_context(span: Any) -> Any | None:
     """Open a Bir trace root for a span that arrives with no active Bir trace.
 
@@ -186,17 +191,12 @@ def _implicit_trace_context(span: Any) -> Any | None:
     raising.
     """
 
-    if _current_trace_id.get() is not None:
-        return None
-
     metadata: dict[str, Any] = {"integration": "pydantic_ai", "kind": "implicit_root"}
     trace_id = _trace_id(span)
     if trace_id is not None:
         metadata["otel_trace_id"] = trace_id
 
-    context = _trace_context(name="pydantic_ai.agent_run", metadata=metadata)
-    context.__enter__()
-    return context
+    return _open_implicit_root(name="pydantic_ai.agent_run", metadata=metadata)
 
 
 def _span_context(name: str) -> Any:

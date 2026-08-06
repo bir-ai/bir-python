@@ -15,6 +15,12 @@ from uuid import uuid4
 from bir import generation, retrieval
 from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
 from bir.integrations._common import _response_output, _usage_tokens
+from bir.integrations._lifecycle import (
+    _ActiveRun,
+    _enter_framework_root,
+    _open_implicit_root,
+    _OpenRuns,
+)
 
 
 class BirLlamaIndexHandler:
@@ -28,9 +34,13 @@ class BirLlamaIndexHandler:
     ) -> None:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = _OpenRuns()
 
     def start_trace(self, trace_id: Any = None) -> None:
+        # No reclaim here: LlamaIndex reports no parent on start_trace, so a
+        # nested one and one following an abandoned run look identical, and
+        # reclaiming would turn nested work into a second root. The bounded
+        # registry is this handler's only recovery.
         if _current_trace_id.get() is not None:
             return
 
@@ -38,7 +48,7 @@ class BirLlamaIndexHandler:
             name=_trace_name(trace_id),
             metadata=_trace_metadata(trace_id),
         )
-        context.__enter__()
+        _enter_framework_root(context)
         self._active_runs[_trace_run_key(trace_id)] = _ActiveRun("trace", context)
 
     def end_trace(self, trace_id: Any = None, trace_map: Any = None) -> None:
@@ -145,17 +155,7 @@ class BirLlamaIndexHandler:
             active_run.implicit_trace.__exit__(type(error), error, None)
 
 
-class _ActiveRun:
-    def __init__(self, kind: str, context: Any, *, implicit_trace: Any | None = None) -> None:
-        self.kind = kind
-        self.context = context
-        self.implicit_trace = implicit_trace
-
-
 def _implicit_trace_context(name: str, parent_id: Any) -> Any | None:
-    if _current_trace_id.get() is not None:
-        return None
-
     metadata = {
         "integration": "llamaindex",
         "kind": "implicit_root",
@@ -163,9 +163,7 @@ def _implicit_trace_context(name: str, parent_id: Any) -> Any | None:
     if parent_id not in (None, ""):
         metadata["parent_id"] = _run_key(parent_id)
 
-    context = _trace_context(name=name, metadata=metadata)
-    context.__enter__()
-    return context
+    return _open_implicit_root(name=name, metadata=metadata)
 
 
 def _trace_name(trace_id: Any) -> str:

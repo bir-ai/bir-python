@@ -21,8 +21,15 @@ from __future__ import annotations
 from typing import Any
 
 from bir import generation, tool_call
-from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
+from bir._sdk import _set_event_parent, _trace_context
 from bir.integrations._common import _response_output, _string_or_none, _usage_tokens, _value
+from bir.integrations._lifecycle import (
+    _ActiveRun,
+    _enter_framework_root,
+    _open_implicit_root,
+    _OpenRuns,
+    _reclaim_open_root,
+)
 
 # Agents ``span_data.type`` values mapped to Bir generation events (LLM calls
 # carrying a model and, when present, token usage) and to Bir tool-call events
@@ -49,11 +56,14 @@ class BirAgentsTracingProcessor:
     ) -> None:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = _OpenRuns()
 
     def on_trace_start(self, trace: Any) -> None:
+        # A new Agents trace is new top-level work, so a root this processor is
+        # still holding for an earlier one is reclaimed first.
+        _reclaim_open_root()
         context = _trace_context(name=_trace_name(trace), metadata=_trace_metadata(trace))
-        context.__enter__()
+        _enter_framework_root(context)
         self._active_runs[_trace_key(trace)] = _ActiveRun("trace", context)
 
     def on_trace_end(self, trace: Any) -> None:
@@ -165,13 +175,6 @@ class BirAgentsTracingProcessor:
             active_run.implicit_trace.__exit__(type(error), error, None)
 
 
-class _ActiveRun:
-    def __init__(self, kind: str, context: Any, *, implicit_trace: Any | None = None) -> None:
-        self.kind = kind
-        self.context = context
-        self.implicit_trace = implicit_trace
-
-
 def _implicit_trace_context(span: Any) -> Any | None:
     """Open a Bir trace root for a span that arrives with no active Bir trace.
 
@@ -181,17 +184,12 @@ def _implicit_trace_context(span: Any) -> Any | None:
     (defensive only) still attaches to a root instead of raising.
     """
 
-    if _current_trace_id.get() is not None:
-        return None
-
     metadata: dict[str, Any] = {"integration": "openai_agents", "kind": "implicit_root"}
     trace_id = _value(span, "trace_id")
     if trace_id is not None:
         metadata["agents_trace_id"] = trace_id
 
-    context = _trace_context(name="openai_agents.trace", metadata=metadata)
-    context.__enter__()
-    return context
+    return _open_implicit_root(name="openai_agents.trace", metadata=metadata)
 
 
 def _span_context(name: str) -> Any:

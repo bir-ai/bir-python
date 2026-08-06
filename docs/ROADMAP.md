@@ -55,74 +55,28 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Keep an unfinished bridge run from hiding every later trace | P1 | M | Traces recorded after an abandoned framework run stay findable | — |
-| 2 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
-| 3 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
-| 4 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+| 1 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
+| 2 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
+| 3 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
 
-The audit's other two P1s have shipped — capture failures escaping into the
-traced call, and the quadratic PEM redaction rule. Both are in `CHANGELOG.md`.
+All three P1s have shipped: capture failures escaping into the traced call, the
+quadratic PEM redaction rule, and the unfinished bridge run that hid every later
+trace. All are in `CHANGELOG.md`.
+
+One clause of the bridge item's stated goal was not achievable and was not
+attempted. It asked that an abandoned run leave *a subsequent `@observe()` call*
+recorded as its own root. Nothing distinguishes "the run is still executing" from
+"the run is gone" at the moment that call arrives, and treating it as gone would
+break the documented, contract-tested rule that an application's work nests under
+an open framework run. The two signals that do exist — the framework starting new
+top-level work, and the registry filling up — are what shipped, and the state in
+between is now reported by the reader instead of being silent. Making the
+remaining case recover would require a heuristic (a per-run age bound is the only
+candidate) and belongs in an issue with a decision behind it, not here.
 
 ## Work item details
 
-### 1. Keep an unfinished bridge run from hiding every later trace
-
-**Why:** when a framework starts a run with no Bir trace active, the bridge opens
-an implicit trace root and enters it (`_implicit_trace_context`, e.g.
-`src/bir/integrations/langchain.py:235`, `src/bir/integrations/llamaindex.py:155`).
-If the framework never emits the terminal callback, that context is never exited:
-its root event is never written, and `_current_trace_id` stays set for the life of
-the context. Everything recorded afterwards joins a trace whose root does not
-exist, and `_traces_from_events` drops a rootless trace without a word
-(`src/bir/_storage.py:310`).
-
-Driving each declared bridge's own generation `start` from
-`tests/test_integration_contract.py` with no matching end, then recording one
-unrelated `@observe()` call:
-
-```
-bridge                     events  roots  load_traces   later_work recorded as
-langchain.callbacks             1      0            0                 ['span']
-llamaindex.callbacks            1      0            0                 ['span']
-openai_agents.processor         1      0            0                 ['span']
-pydantic_ai.processor           1      0            0                 ['span']
-crewai.event_bus                1      0            0                 ['span']
-haystack.tracer                 1      0            0                 ['span']
-```
-
-Six of the seven declared bridges; AutoGen hands over a finished call in one
-callback and cannot be left open. Against such a store, `bir traces` prints "No
-traces found", `bir show <trace_id>` exits 1 with "not found", `bir stats` reports
-`traces.total = 0`, and `load_traces()` returns `[]` — while `load_events()` still
-returns the events, so the data is on disk and unreachable through every
-trace-oriented path. Nothing self-heals. The registry is unbounded too: 20,000
-abandoned runs retained 20,001 entries and 21.8 MiB.
-
-The bridge contract already has a case for this state
-(`tests/integration_bridge_contract.py:383`), but it asserts only that nothing is
-written, and it drives the run inside `contextvars.copy_context()` so the
-unbalanced context cannot reach the rest of the suite. A user's process has no
-copied context to retreat into.
-
-**Scope:**
-
-- Give the bridges a shared way to finish or discard an abandoned run, so an
-  unfinished one cannot own the ambient trace context indefinitely.
-- Bound the per-handler `_active_runs` registry so a framework that stops
-  emitting terminal callbacks cannot grow it without limit.
-- Make a rootless trace visible on the read side instead of silently dropped — at
-  minimum a stderr diagnostic from the CLI read commands, in the shape
-  `--skip-invalid` already uses to report skipped lines.
-- Add a bridge-contract case asserting that after an abandoned run, a later
-  unrelated trace is still recorded with its root and found by `load_traces()`.
-
-**Done when:** for every bridge in the matrix, an abandoned run leaves a
-subsequent unrelated `@observe()` call recorded as a trace root that
-`load_traces()` and `bir traces` find; the handler's registry does not grow
-without bound; and events whose trace root is missing are reported rather than
-dropped in silence.
-
-### 2. Stop one damaged summary hiding the whole experiment store
+### 1. Stop one damaged summary hiding the whole experiment store
 
 **Why:** `list_experiments` parses every `*.summary.json` in the directory eagerly
 (`src/bir/_eval_persistence.py:121`), so one unreadable summary raises for the
@@ -171,7 +125,7 @@ what the summary path should also do.
 damaged summary and report what they skipped; and an interrupted summary write
 leaves the previous summary readable.
 
-### 3. Compact the `.sent` upload sidecar
+### 2. Compact the `.sent` upload sidecar
 
 **Why:** `--mark-sent` records accepted event IDs in `<trace_path>.sent` as one
 JSON array. `_record_sent_ids` loads the whole set, merges, sorts, and rewrites
@@ -213,7 +167,7 @@ nothing says the file never shrinks, and nothing offers a way to shrink it.
 the selected store files, and a repeated record/send/prune cycle leaves it bounded
 by the store rather than by history.
 
-### 4. Stop `bir export-otel` materializing the store
+### 3. Stop `bir export-otel` materializing the store
 
 **Why:** `export-otel` is the last read command that loads whole traces.
 `_read_traces` builds the list (`src/bir/cli.py:150`) and `export_traces_to_otlp`
@@ -248,11 +202,9 @@ benchmark harness covers it.
 
 ## Sequencing
 
-Item 1 is the remaining P1 and the largest correctness change here, touching six
-bridges, the shared contract, and the read side's silent drop; take it first.
-Items 2 and 3 are independent of each other and of the rest: 2 continues the
-trace-side `--skip-invalid` work on the experiment store, 3 belongs with prune.
-Item 4 is last — a performance ceiling rather than a defect, and the only item
+Items 1 and 2 are independent of each other and of the rest: 1 continues the
+trace-side `--skip-invalid` work on the experiment store, 2 belongs with prune.
+Item 3 is last — a performance ceiling rather than a defect, and the only item
 whose fix is confined to one command.
 
 Nothing here blocks anything else, so the order is about payoff rather than

@@ -552,6 +552,7 @@ LANGCHAIN = BridgeContract(
         fail=lambda handler, key, error: handler.on_chain_error(error, run_id=key),
     ),
     root_name="langchain.chain",
+    reclaims_abandoned_roots=True,
     generation=RunDriver(
         start=lambda handler, key, parent: handler.on_llm_start(
             langchain_serialized(),
@@ -651,6 +652,7 @@ OPENAI_AGENTS = BridgeContract(
         fail=lambda handler, key, error: handler.on_trace_end(agents_trace(key)),
     ),
     root_name="openai_agents.trace",
+    reclaims_abandoned_roots=True,
     generation=RunDriver(
         start=lambda handler, key, parent: handler.on_span_start(agents_span(key, parent)),
         end=lambda handler, key: handler.on_span_end(agents_span(key)),
@@ -710,6 +712,7 @@ PYDANTIC_AI = BridgeContract(
         fail=lambda handler, key, error: handler.on_end(pydantic_ai_agent_span(key)),
     ),
     root_name="agent run",
+    reclaims_abandoned_roots=True,
     generation=RunDriver(
         start=lambda handler, key, parent: handler.on_start(pydantic_ai_chat_span(key, parent)),
         end=lambda handler, key: handler.on_end(pydantic_ai_chat_span(key)),

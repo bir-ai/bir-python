@@ -1341,6 +1341,48 @@ def _set_event_parent(context: Any, parent_id: str | None) -> None:
         context._parent_override = parent_id
 
 
+# Every contextvar token a Bir context holds while it is entered. Dropping them
+# turns the context's teardown into a plain write, which is what reclaiming an
+# abandoned bridge run needs; see :func:`_abandon_bridge_run`.
+_BRIDGE_CONTEXT_TOKENS = (
+    "_trace_token",
+    "_parent_token",
+    "_capture_inputs_token",
+    "_capture_outputs_token",
+    "_dropped_token",
+)
+
+
+def _abandon_bridge_run(context: Any, *, reason: str) -> None:
+    """Write a bridge run's event without the end callback that never arrived.
+
+    A framework bridge enters a Bir context in one callback and exits it in
+    another. When the second never comes, the event is never written and the run
+    keeps owning the ambient trace context, so everything recorded afterwards
+    joins a trace whose root does not exist. Closing the run here writes the
+    event that would otherwise be lost.
+
+    The run's contextvar tokens are dropped rather than reset, which leaves the
+    context's own teardown to do nothing but write; the caller restores the
+    surrounding values with :func:`_restore_context` instead. A run is reclaimed
+    from whichever callback noticed it was gone, which may be running in a
+    context that merely inherited a copy of the one the run was entered in, where
+    resetting a token raises. Restoring by value works in either, which is why
+    the generator wrappers already tear their own context down that way.
+
+    ``reason`` is recorded as ``metadata.abandoned``, so a run no framework ever
+    closed is distinguishable in the store from one that closed normally.
+    """
+
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata.setdefault("abandoned", reason)
+    for token_attribute in _BRIDGE_CONTEXT_TOKENS:
+        if getattr(context, token_attribute, None) is not None:
+            setattr(context, token_attribute, None)
+    context.__exit__(None, None, None)
+
+
 def _merge_metadata(target: dict[str, Any], metadata: Mapping[str, Any]) -> None:
     """Merge user-supplied metadata into an event's pending metadata dict.
 

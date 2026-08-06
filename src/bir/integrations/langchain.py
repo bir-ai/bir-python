@@ -12,7 +12,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from bir import generation, retrieval, tool_call
-from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
+from bir._sdk import _set_event_parent, _trace_context
+
+from ._lifecycle import (
+    _ActiveRun,
+    _enter_framework_root,
+    _open_implicit_root,
+    _OpenRuns,
+    _reclaim_open_root,
+)
 
 
 class BirCallbackHandler:
@@ -41,7 +49,7 @@ class BirCallbackHandler:
     ) -> None:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = _OpenRuns()
 
     def on_chain_start(
         self,
@@ -56,8 +64,11 @@ class BirCallbackHandler:
         name = _callback_name(serialized, kwargs, default="langchain.chain")
         metadata = _metadata("chain", serialized, kwargs, run_id=run_id, parent_run_id=parent_run_id)
         if parent_run_id is None:
+            # A chain with no parent is new top-level work, so a root this
+            # handler is still holding for an earlier run is reclaimed first.
+            _reclaim_open_root()
             context = _trace_context(name=name, metadata=metadata)
-            context.__enter__()
+            _enter_framework_root(context)
             self._active_runs[_run_key(run_id)] = _ActiveRun("trace", context)
             return
 
@@ -225,17 +236,7 @@ class BirCallbackHandler:
             active_run.implicit_trace.__exit__(type(error), error, None)
 
 
-class _ActiveRun:
-    def __init__(self, kind: str, context: Any, *, implicit_trace: Any | None = None) -> None:
-        self.kind = kind
-        self.context = context
-        self.implicit_trace = implicit_trace
-
-
 def _implicit_trace_context(name: str, parent_run_id: Any) -> Any | None:
-    if _current_trace_id.get() is not None:
-        return None
-
     metadata = {
         "integration": "langchain",
         "kind": "implicit_root",
@@ -243,9 +244,7 @@ def _implicit_trace_context(name: str, parent_run_id: Any) -> Any | None:
     if parent_run_id is not None:
         metadata["parent_run_id"] = _run_key(parent_run_id)
 
-    context = _trace_context(name=name, metadata=metadata)
-    context.__enter__()
-    return context
+    return _open_implicit_root(name=name, metadata=metadata)
 
 
 def _span_context(name: str) -> Any:
