@@ -1090,6 +1090,11 @@ def _prune_trace_store(
                     for temp_path, _ in staged:
                         temp_path.unlink(missing_ok=True)
 
+                if not dry_run and removed_events:
+                    # The store just shrank, so the upload sidecar can too. Still
+                    # inside the trace lock, so the sidecar lock is taken second.
+                    _compact_sent_ids(trace_path)
+
                 return _PruneResult(
                     removed_traces=selection.removed_traces,
                     kept_traces=selection.kept_traces,
@@ -1125,6 +1130,22 @@ def _load_sent_ids(sent_ids_path: Path) -> set[str]:
     return {event_id for event_id in event_ids if isinstance(event_id, str)}
 
 
+def _write_sent_ids(sent_ids_path: Path, event_ids: set[str]) -> None:
+    """Atomically replace the sent-ID sidecar with ``event_ids``.
+
+    Callers create the parent directory before taking the sidecar lock, since the
+    lock file is a sibling and cannot be opened without it.
+    """
+
+    payload = json.dumps({"event_ids": sorted(event_ids)}, separators=(",", ":")) + "\n"
+    temp_path = sent_ids_path.with_name(f".{sent_ids_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(sent_ids_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _record_sent_ids(sent_ids_path: Path, event_ids: list[str]) -> None:
     """Atomically merge ``event_ids`` into the sent-ID sidecar."""
 
@@ -1133,13 +1154,79 @@ def _record_sent_ids(sent_ids_path: Path, event_ids: list[str]) -> None:
         with _InterProcessFileLock(sent_ids_path):
             merged = _load_sent_ids(sent_ids_path)
             merged.update(event_ids)
-            payload = json.dumps({"event_ids": sorted(merged)}, separators=(",", ":")) + "\n"
-            temp_path = sent_ids_path.with_name(f".{sent_ids_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            _write_sent_ids(sent_ids_path, merged)
+
+
+def _iter_stored_event_ids(file_path: Path) -> Iterator[str]:
+    """Yield the ``id`` of every event in one JSONL file, without validating it.
+
+    Compaction only has to decide whether an id is still present, so a line is
+    read for that field alone. A line that cannot be parsed yields nothing:
+    dropping an id costs one duplicate upload, which the server is idempotent
+    against, while failing here would make bookkeeping able to break a prune.
+    """
+
+    with file_path.open("r", encoding="utf-8") as trace_file:
+        for line in trace_file:
+            stripped = line.strip()
+            if not stripped:
+                continue
             try:
-                temp_path.write_text(payload, encoding="utf-8")
-                temp_path.replace(sent_ids_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping):
+                event_id = payload.get("id")
+                if isinstance(event_id, str):
+                    yield event_id
+
+
+def _compact_sent_ids(trace_path: Path) -> None:
+    """Drop sidecar entries for events the store no longer holds.
+
+    ``mark_sent`` records every accepted event id and nothing removed one, so the
+    sidecar grew with everything ever sent while ``prune`` — the operation whose
+    whole job is bounding local state — left it alone. An id naming an event the
+    store no longer holds can never be matched by a later send, so it is weight
+    with no effect, and it accumulates for as long as the deployment runs.
+
+    Every file for this trace path is scanned, not only the ones a prune
+    rewrote: a prune without ``include_rotated`` leaves rotated siblings holding
+    their events, and those ids have to survive.
+
+    Called while the caller holds the trace lock, so the sidecar lock is taken
+    second, which is the order :class:`_InterProcessFileLock` documents. Nothing
+    here can fail a prune: the sidecar is advisory, and leaving it as large as it
+    already was is exactly the previous behavior.
+    """
+
+    sent_ids_path = trace_path.with_name(trace_path.name + _SENT_IDS_SUFFIX)
+    if not sent_ids_path.exists():
+        # No sidecar, so nothing to compact — and taking the lock would leave a
+        # lock file beside a store that never opted into ``mark_sent``.
+        return
+    try:
+        with _sent_ids_lock:
+            with _InterProcessFileLock(sent_ids_path):
+                recorded = _load_sent_ids(sent_ids_path)
+                if not recorded:
+                    # Missing, empty, or unreadable: all mean "nothing sent", and
+                    # writing over an unreadable one would claim more than is known.
+                    return
+                surviving = {
+                    event_id
+                    for file_path in _trace_files_oldest_first(trace_path)
+                    if file_path.exists()
+                    for event_id in _iter_stored_event_ids(file_path)
+                    if event_id in recorded
+                }
+                if len(surviving) == len(recorded):
+                    return
+                _write_sent_ids(sent_ids_path, surviving)
+    except OSError:
+        # The store is already pruned and the result already earned; a sidecar
+        # that could not be rewritten is one that stayed the size it was.
+        return
 
 
 def _trace_event_from_payload(payload: dict[Any, Any], *, trace_path: Path, line_number: int) -> TraceEvent:

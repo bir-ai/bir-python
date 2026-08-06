@@ -120,6 +120,8 @@ _stream_filtered_trace_file = _storage_helpers._stream_filtered_trace_file
 _stage_filtered_trace_file = _storage_helpers._stage_filtered_trace_file
 _load_sent_ids = _storage_helpers._load_sent_ids
 _record_sent_ids = _storage_helpers._record_sent_ids
+_write_sent_ids = _storage_helpers._write_sent_ids
+_compact_sent_ids = _storage_helpers._compact_sent_ids
 _trace_event_from_payload = _storage_helpers._trace_event_from_payload
 _expect_string = _storage_helpers._expect_string
 _expect_optional_string = _storage_helpers._expect_optional_string
@@ -517,6 +519,12 @@ def send_events(
     is treated as empty so it can never block a send. With the default
     ``mark_sent=False`` nothing is recorded and re-sending the whole file stays
     safe because the server is idempotent on event IDs.
+
+    Pruning bounds the sidecar. An ID naming an event the store no longer holds
+    can never be matched by a later send, so ``bir prune`` drops it, and a
+    deployment that prunes on a schedule keeps a sidecar proportional to the
+    traces it retains rather than to everything it has ever sent. Without
+    pruning, the sidecar grows with the number of IDs recorded.
 
     ``include_rotated`` is opt-in upload of size-rotated trace files. The default
     ``False`` uploads only the active trace file, matching the historical

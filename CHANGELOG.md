@@ -10,6 +10,29 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- The `--mark-sent` upload sidecar is now bounded by the store instead of by
+  everything ever sent. It records the event IDs a server accepted so later sends
+  can skip them, and nothing ever removed one — while `prune`, the operation
+  whose whole job is bounding local state, left it alone. Recording 2,000 traces,
+  sending with `mark_sent=True`, pruning to `--keep-last 1`, and repeating grew
+  it linearly and forever: 156 KB after the first cycle, 780 KB and 20,000 IDs
+  after the fifth, against a store of 695 bytes holding one trace. Every entry
+  named an event that no longer existed, and every send read, merged, sorted, and
+  rewrote all of them.
+
+  A successful prune now drops IDs for events the store no longer holds, since
+  such an ID can never be matched by a later send. The same cycle now ends every
+  round at 94 bytes and 2 IDs — the two events of the one trace prune kept.
+
+  Compaction reads every file for the trace path, including size-rotated siblings
+  a prune without `include_rotated` left alone, so an ID is dropped only when its
+  event is in none of them. It runs under the lock ordering the storage lock
+  already documented (trace lock first, sidecar lock second) and only after the
+  prune has succeeded, and the sidecar stays advisory: a dry run changes nothing,
+  a store that never used `mark_sent` gains no sidecar or lock file, and a
+  sidecar that cannot be read or written leaves the prune's own result untouched.
+  Re-sending after a compaction still skips everything still in the store.
+
 - One damaged experiment summary no longer hides every experiment beside it. An
   experiment is a result JSONL plus a `*.summary.json`, and the listing parses
   every summary in the directory, so one it could not read raised for the whole

@@ -55,13 +55,13 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
-| 2 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+| 1 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
 
 Shipped since this audit was written: all three P1s — capture failures escaping
 into the traced call, the quadratic PEM redaction rule, and the unfinished bridge
 run that hid every later trace — plus the damaged experiment summary that hid the
-whole experiment store. All are in `CHANGELOG.md`.
+whole experiment store and the unbounded `.sent` upload sidecar. All are in
+`CHANGELOG.md`.
 
 One clause of the bridge item's stated goal was not achievable and was not
 attempted. It asked that an abandoned run leave *a subsequent `@observe()` call*
@@ -76,49 +76,7 @@ candidate) and belongs in an issue with a decision behind it, not here.
 
 ## Work item details
 
-### 1. Compact the `.sent` upload sidecar
-
-**Why:** `--mark-sent` records accepted event IDs in `<trace_path>.sent` as one
-JSON array. `_record_sent_ids` loads the whole set, merges, sorts, and rewrites
-the file on every checkpoint (`src/bir/_storage.py:1128`), and nothing ever
-removes an ID. `bir prune` — the command whose entire job is bounding local state
-— does not touch it.
-
-Measured by recording 2,000 traces, sending with `mark_sent=True`, pruning to
-`--keep-last 1`, and repeating:
-
-```
-round1: sidecar 156,016 B / 4,000 ids
-pruned: store 695 B (1 trace); sidecar unchanged at 156,016 B / 4,000 ids
-round2: store 695 B  sidecar 312,016 B  ids  8,000
-round3: store 695 B  sidecar 468,016 B  ids 12,000
-round4: store 695 B  sidecar 624,016 B  ids 16,000
-round5: store 695 B  sidecar 780,016 B  ids 20,000
-```
-
-The sidecar reached 1,122× the size of the store it describes and grows linearly
-forever, every entry of it naming an event that no longer exists. Each send reads,
-merges, sorts, and rewrites all of it. The docs say the loaded ID set "grow[s]
-with the number of IDs" (`docs/site/sending.md:45`), which is true of one send;
-nothing says the file never shrinks, and nothing offers a way to shrink it.
-
-**Scope:**
-
-- Drop sidecar entries for events no longer present when prune rewrites the store,
-  under the existing lock ordering (trace lock first, sidecar lock second —
-  `src/bir/_storage.py:120`).
-- Keep the sidecar advisory: a missing or corrupt one still means "nothing sent",
-  so compaction can never block or fail a send.
-- Document what bounds it, on the sending page and in `send_events`' docstring.
-- Tests: a prune that removes traces removes their IDs; a prune that keeps a trace
-  keeps its ID; a re-send after compaction still skips everything still in the
-  store.
-
-**Done when:** after `bir prune`, the sidecar holds IDs only for events still in
-the selected store files, and a repeated record/send/prune cycle leaves it bounded
-by the store rather than by history.
-
-### 2. Stop `bir export-otel` materializing the store
+### 1. Stop `bir export-otel` materializing the store
 
 **Why:** `export-otel` is the last read command that loads whole traces.
 `_read_traces` builds the list (`src/bir/cli.py:178`) and `export_traces_to_otlp`
@@ -153,9 +111,8 @@ benchmark harness covers it.
 
 ## Sequencing
 
-Item 1 belongs with prune, which is where the sidecar's bound has to come from.
-Item 2 is last — a performance ceiling rather than a defect, and the only item
-whose fix is confined to one command. Neither blocks the other.
+One item is left, and it depends on nothing: a performance ceiling rather than a
+defect, and the only one whose fix is confined to a single command.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release

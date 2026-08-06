@@ -83,6 +83,22 @@ Accepted IDs are recorded in `<trace_path>.sent`, such as
 schema. A missing or corrupt sidecar is treated as empty. With the default
 `mark_sent=False`, no local bookkeeping is written.
 
+### What bounds the sidecar
+
+The sidecar is bounded by the store, not by everything ever sent: `bir prune`
+(and `_prune_trace_store`) drops IDs for events the store no longer holds, since
+an ID naming an event that is gone can never be matched by a later send. A
+deployment that prunes on a schedule therefore keeps a sidecar proportional to
+the traces it retains rather than to its whole history.
+
+Compaction reads every file for that trace path, including size-rotated siblings
+a prune without `--include-rotated` left alone, so an ID is dropped only when its
+event is in none of them. A dry run changes nothing. The sidecar stays advisory
+throughout: it is compacted only after the prune has already succeeded, and a
+sidecar that cannot be read or written leaves the prune's own result unaffected —
+at worst it stays the size it already was. Without pruning, the sidecar still
+grows with the number of IDs recorded.
+
 ## Upload size-rotated files
 
 By default `send_events()` uploads only the active trace file, so events stranded

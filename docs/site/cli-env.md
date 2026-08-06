@@ -100,6 +100,10 @@ file is completed before any source is replaced, and replacements remain atomic
 under the same advisory lock an append takes, so a concurrent writer can never
 interleave and a selection, parsing, or staging failure leaves every source file
 intact. Temporary index and staging files are removed after success or failure.
+A successful prune also compacts the `--mark-sent` upload sidecar, dropping IDs
+for events the store no longer holds so it stays bounded by the retained traces
+rather than by everything ever sent; see
+[sending](sending.md#what-bounds-the-sidecar).
 Selection: `--before ISO` removes
 traces whose start time precedes the cutoff, `--keep-last N` removes all but the
 N most recent, and `--status
