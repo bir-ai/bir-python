@@ -8,6 +8,38 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Fixed
+
+- `install_trace_id_filter()` now stamps the log records an application actually
+  emits. With no argument it attached the filter to the root *logger*, and a
+  logger's filters run only for records that logger itself creates: a record from
+  `logging.getLogger("myapp")` propagates to the root logger's handlers but never
+  through its filters, so it was never stamped.
+
+  That cost log lines rather than just correlation. The documented format string
+  asks for `%(bir_trace_id)s`, and a record without the attribute makes the
+  formatter raise — `logging` then drops the line and writes the error to stderr.
+  Running the module docstring's own example verbatim printed nothing but a
+  `ValueError: Formatting field not found in record: 'bir_trace_id'` for every
+  application log line; only records created directly on the root logger came
+  through.
+
+  A no-argument call now attaches to the root logger's handlers, which is where
+  propagated records are seen, and to the root logger itself for records created
+  on it. Configure logging first: a handler added afterwards carries no filter,
+  and a call that finds no handlers at all warns (`RuntimeWarning`) naming the fix
+  instead of attaching to nothing quietly — that ordering, install-then-configure,
+  is the one the docs used to show. Passing an explicit logger or handler is
+  unchanged, and the returned filter is one instance attached to each target, so
+  the documented `removeFilter` still works on each.
+
+  The gap survived because nothing emitted through the default:
+  `test_install_defaults_to_root_logger` asserted only that the filter appeared in
+  `root.filters`, and every behavioral case attached it directly to the logger
+  under test — the one arrangement where a logger filter does run. The new cases
+  emit from child loggers through a root handler, and one runs the documented
+  recipe end to end and asserts nothing reached stderr.
+
 ### Changed
 
 - `bir export-otel` streams the store instead of loading it. It was the last read

@@ -55,65 +55,15 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Make the log-correlation filter work where it is documented to | P1 | S | The documented one-liner stamps application logs instead of dropping them | — |
-| 2 | Stop a store that cannot be written from failing the traced call | P1 | M | A call that succeeded returns its result even when recording fails | — |
-| 3 | Make experiment results survive a stopped process | P2 | S | An interrupted run keeps the examples it already finished | — |
+| 1 | Stop a store that cannot be written from failing the traced call | P1 | M | A call that succeeded returns its result even when recording fails | — |
+| 2 | Make experiment results survive a stopped process | P2 | S | An interrupted run keeps the examples it already finished | — |
+
+The log-correlation filter, this audit's other P1, has shipped; see
+`CHANGELOG.md`.
 
 ## Work item details
 
-### 1. Make the log-correlation filter work where it is documented to
-
-**Why:** `install_trace_id_filter()` with no argument attaches the filter to the
-root logger (`src/bir/logging.py:99`), and both its own docstring and the module
-example present that as the way to use it — "enough for the common case where
-application loggers propagate to root". A logger's filters run only for records
-that logger creates. A record from `logging.getLogger("myapp")` propagates to the
-root logger's *handlers*, never through the root logger's *filters*, so it is
-never stamped.
-
-The documented recipe therefore does not merely lose the ids: the documented
-format string cannot render, and the log line is discarded. Running the module
-docstring's own example verbatim:
-
-```
-install_trace_id_filter()  [documented]    -> LINE LOST
-                                              stderr: ValueError: Formatting field not found in record: 'bir_trace_id'
-install_trace_id_filter(handler)           -> [trace=4798a778-…] application log line
-install_trace_id_filter(app logger)        -> [trace=977224a8-…] application log line
-```
-
-Only a record created by the root logger itself is stamped:
-
-```
-  myapp    has bir_trace_id: False
-  root     has bir_trace_id: True
-```
-
-The tests never exercise it. `test_install_defaults_to_root_logger`
-(`tests/test_logging.py:149`) asserts only that the filter object appears in
-`root.filters`; every behavioral case attaches the filter directly to the logger
-that emits, which is the one arrangement where a logger-level filter does run.
-
-**Scope:**
-
-- Make the no-argument call stamp the records an application actually emits.
-  Attaching to the root logger's handlers is the arrangement that works today, so
-  the fix is a question of what the default should attach to, not of new
-  machinery.
-- Keep `install_trace_id_filter(logger_or_handler)` working as it does, including
-  the returned filter being removable from what it was attached to.
-- Say plainly in the docstring which records a given target stamps, since that is
-  what was wrong rather than the code alone.
-- A test that emits from a child logger through a root handler and asserts the
-  record carries the ids — the arrangement the docs recommend, which nothing
-  covers now.
-
-**Done when:** the module docstring's example, run verbatim, prints an
-application logger's line with the active trace id; a child logger's records are
-stamped without naming a target; and the case is covered by a test that emits
-rather than one that inspects `filters`.
-
-### 2. Stop a store that cannot be written from failing the traced call
+### 1. Stop a store that cannot be written from failing the traced call
 
 **Why:** `_write_event` (`src/bir/_sdk.py:2002`) appends through `_append_event`
 (`src/bir/_storage.py:653`), and an `OSError` from that append propagates out of
@@ -167,7 +117,7 @@ there it was reading the value, here it is writing the event.
 own result (or re-raises its body's own exception), the operator can tell that
 recording is failing, and no traced call raises an error that came from Bir.
 
-### 3. Make experiment results survive a stopped process
+### 2. Make experiment results survive a stopped process
 
 **Why:** `run_experiment` opens the result file once and writes each example's row
 into it as the run proceeds (`src/bir/evals.py:669`), which is the right shape —
@@ -214,12 +164,9 @@ result rows, and the sync, threaded, and async runners all behave that way.
 
 ## Sequencing
 
-Item 1 is the smallest and is self-contained in one module and its tests; take it
-first. Item 2 is next: it is the one that changes a decision rather than a
-mechanism, so it wants the most thought, and it touches every recording entry
-point. Item 3 is independent of both and can be done whenever.
-
-Nothing here blocks anything else.
+Item 1 is the one that changes a decision rather than a mechanism, so it wants
+the most thought, and it touches every recording entry point. Item 2 is
+independent of it and can be done whenever. Neither blocks the other.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -242,8 +189,9 @@ transport and experiment-loading error paths, the free-threaded CI leg, guarding
 capture against a value whose own code raises, bounding the private-key redaction
 rule, reporting events whose trace root is missing, reclaiming a framework run
 whose end callback never arrived, reading a damaged experiment store with
-`--skip-invalid`, compacting the upload sidecar on prune, and streaming
-`bir export-otel`. Regressions in those areas are bugs; new scope requires a new
+`--skip-invalid`, compacting the upload sidecar on prune, streaming
+`bir export-otel`, and attaching the log-correlation filter where propagated
+records are seen. Regressions in those areas are bugs; new scope requires a new
 issue with current evidence.
 
 This audit looked at four more things and declined them:

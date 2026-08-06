@@ -137,9 +137,9 @@ persisted.
 
 ## Correlating your logs with traces
 
-The easy path is the `bir.logging` filter. Attach `BirTraceIdFilter` once (the
-`install_trace_id_filter()` helper adds it to the root logger) and every log record
-gains `bir_trace_id` / `bir_span_id` attributes that any formatter can render — no
+The easy path is the `bir.logging` filter. Configure logging, attach
+`BirTraceIdFilter` once with `install_trace_id_filter()`, and every log record gains
+`bir_trace_id` / `bir_span_id` attributes that any formatter can render — no
 per-call plumbing:
 
 ```python
@@ -148,25 +148,29 @@ import logging
 from bir import observe
 from bir.logging import install_trace_id_filter
 
-install_trace_id_filter()
 logging.basicConfig(
     format="%(asctime)s %(levelname)s [trace=%(bir_trace_id)s span=%(bir_span_id)s] %(message)s"
 )
+install_trace_id_filter()
 
 
 @observe()
 def answer(question: str) -> str:
-    logging.info("handling question")  # the ids are stamped automatically
+    logging.getLogger("myapp").info("handling question")  # ids stamped automatically
     return "ok"
 ```
+
+Configure logging first. A filter on a *logger* only sees records that logger
+creates, so the stamp has to reach the *handlers* your loggers propagate to, and
+those handlers have to exist when you call this — a no-argument call with no
+handlers on the root logger warns rather than attaching to nothing. Add a handler
+later and you pass it yourself: `install_trace_id_filter(handler)`.
 
 Inside a trace the stamped values equal `get_current_trace_id()` /
 `get_current_span_id()`; outside any trace they are `None` and nothing raises. The
 filter only annotates records — it never drops them — and reads from the same
 task-local context as the accessors, so each asyncio task and thread sees its own
-ids. Pass a specific logger or handler to `install_trace_id_filter(target)` to scope
-it; attaching to a handler is the surest way to stamp every record it emits,
-including ones propagated from child loggers.
+ids.
 
 If you prefer to stamp ids by hand, read them directly with
 `get_current_trace_id()` and `get_current_span_id()` and pass them through `extra=`:

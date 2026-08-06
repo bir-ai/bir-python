@@ -11,10 +11,16 @@ attributes, ready for any formatter to render::
 
     from bir.logging import install_trace_id_filter
 
-    install_trace_id_filter()
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [trace=%(bir_trace_id)s span=%(bir_span_id)s] %(message)s"
     )
+    install_trace_id_filter()
+
+Configure logging first. A filter attached to a *logger* only sees records that
+logger creates, so the stamp has to reach the *handlers* an application's loggers
+propagate to — which means the handlers have to exist when
+:func:`install_trace_id_filter` runs. See its docstring for exactly which records
+each target covers.
 
 The stamped attributes mirror the accessors exactly: inside a trace they equal
 :func:`bir.get_current_trace_id` / :func:`bir.get_current_span_id`, and outside any
@@ -30,6 +36,7 @@ log call, inside or outside a trace.
 from __future__ import annotations
 
 import logging
+import warnings
 
 from ._sdk import get_current_span_id, get_current_trace_id
 
@@ -81,22 +88,61 @@ class BirTraceIdFilter(logging.Filter):
 def install_trace_id_filter(
     target: logging.Logger | logging.Handler | None = None,
 ) -> BirTraceIdFilter:
-    """Attach a :class:`BirTraceIdFilter` to a logger or handler and return it.
+    """Attach a :class:`BirTraceIdFilter` where it will see your records, and return it.
 
-    With no argument the filter is added to the root logger, which is enough for the
-    common case where application loggers propagate to root. Pass a specific
-    :class:`logging.Logger` or :class:`logging.Handler` to scope it; attaching to a
-    handler is the most reliable way to stamp every record that handler emits,
-    including ones propagated from child loggers.
+    Which records a filter stamps depends entirely on what it is attached to, and
+    the distinction matters more than it looks:
 
-    Returns the created filter so it can later be removed with
-    ``target.removeFilter(returned_filter)``. Calling this more than once on the same
-    target attaches independent filters; each stamps the same attributes, so the
-    duplication is harmless but you can avoid it by reusing the returned instance.
+    * On a **handler**, it stamps every record that handler emits, including
+      records propagated to it from child loggers. This is what an application
+      wants.
+    * On a **logger**, it stamps only the records *that logger itself creates*.
+      Records from ``logging.getLogger("myapp")`` propagate to the root logger's
+      handlers but never through the root logger's filters, so a filter on the
+      root logger does not stamp them.
+
+    With no argument the filter is therefore attached to the root logger's current
+    handlers, and to the root logger itself for records created directly on it.
+    Configure logging before calling this: a handler added afterwards has no
+    filter on it, and records it emits reach the formatter unstamped. Pass that
+    handler explicitly when you add one.
+
+    An unstamped record is worse than a missing id. A formatter asking for
+    ``%(bir_trace_id)s`` raises on a record that does not carry it, and ``logging``
+    drops the line and writes the error to stderr instead — so an install that
+    misses a handler silently costs log lines, not just correlation. Because of
+    that, a no-argument call on a root logger with no handlers warns
+    (``RuntimeWarning``) rather than attaching to nothing quietly.
+
+    Returns the filter, which is a single instance attached to each target, so it
+    can be removed again with ``target.removeFilter(returned_filter)`` on each of
+    them. Calling this more than once attaches independent filters; each stamps
+    the same attributes, so the duplication is harmless but you can avoid it by
+    reusing the returned instance.
     """
 
-    if target is None:
-        target = logging.getLogger()
     trace_id_filter = BirTraceIdFilter()
-    target.addFilter(trace_id_filter)
+    if target is not None:
+        target.addFilter(trace_id_filter)
+        return trace_id_filter
+
+    root = logging.getLogger()
+    # The handlers carry the stamp for everything that propagates to root; the
+    # root logger itself carries it for records created directly on it, which its
+    # own filters do see.
+    for handler in root.handlers:
+        handler.addFilter(trace_id_filter)
+    root.addFilter(trace_id_filter)
+    if not root.handlers:
+        # Nothing to attach the stamp to, so records from application loggers
+        # will reach their formatter unstamped once handlers do appear. Silence
+        # here is what made this cost log lines rather than just ids, so it is
+        # said out loud instead.
+        warnings.warn(
+            "bir.logging.install_trace_id_filter() found no handlers on the root logger, so records "
+            "from your application's loggers will not be stamped. Configure logging first (for example "
+            "logging.basicConfig(...)) and then call this, or pass the handler explicitly.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return trace_id_filter
