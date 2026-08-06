@@ -10,6 +10,42 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Redaction no longer costs more than the value it is handed. The PEM
+  private-key rule was one regex spanning both markers, and its trailing `.*?`
+  rescanned the rest of the value for every `-----BEGIN ... PRIVATE KEY-----`
+  that never got a matching footer, so the cost was the product of the value's
+  length and the number of unterminated headers.
+
+  Measured on a value made entirely of bare headers, doubling the input
+  quadrupled the time: 128,000 characters took 2.0 s, 256,000 took 8.4 s, and
+  512,000 took 31.1 s. It is now 19 ms, 38 ms, and 75 ms — 2.0x per doubling, and
+  1.04x the cost of redacting the same length of ordinary prose. End to end, a
+  traced call taking a 128,000-character argument with capture on went from
+  2127.6 ms to 22.3 ms against 0.3 ms untraced.
+
+  This was reachable from outside the process: capture runs inline in the traced
+  call, so a value arriving from a caller could stall it for tens of seconds, and
+  `max_value_length` gave no protection because truncation runs after redaction
+  by design. Ordinary text was never the problem — 131,000 characters of prose
+  carrying ten private-key headers cost 20.9 ms then and now — but a value made
+  largely of headers was.
+
+  The two markers are now located separately and paired, which reproduces exactly
+  what the regex matched (leftmost header, nearest footer at or after it, resume
+  past the block) at a cost linear in the value's length. A test pins that
+  equivalence against the rule it replaced, and another times the pathological
+  shape against prose of the same length rather than against a fixed budget, so
+  the bound calibrates itself to whatever machine runs it. No redaction behavior
+  changed: real keys, every label variant, and blocks inside larger payloads
+  redact as before, and a header with no footer is still left alone.
+
+- `scripts/benchmarks.py` gained `capture_large_value`, whose units are
+  characters of one captured value rather than calls. `capture_redaction`
+  measures the per-call cost of the rule set on a small fixed payload and cannot
+  see a rule that stops being linear in the size of the value; the new case
+  reports cost per character, where the regression above showed as 15.12 µs
+  against today's 0.16 µs.
+
 - A value that raises while it is being captured no longer breaks the traced
   call. Capture runs code Bir does not own — a mapping's `items()`, a sequence's
   `__iter__`, an exception's `__str__` — and only `__repr__` was guarded against

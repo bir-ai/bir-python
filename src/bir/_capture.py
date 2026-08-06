@@ -50,6 +50,13 @@ _SECRET_KEY_NAMES = {
     "creds",
 }
 
+# The two halves of a PEM private-key block, matched separately so the block can
+# be located without a quantifier that spans them. See
+# :func:`_redact_private_key_blocks`. Neither label class can contain ``-``, so a
+# footer can never fall inside a header's variable part.
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+
 
 def _capture_call_input(
     signature: inspect.Signature,
@@ -296,16 +303,64 @@ def _redact_secret_text(value: str, *, config: _Config) -> str:
     redacted = re.sub(r"\b(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}\b", _REDACTED, redacted)
     redacted = re.sub(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b", _REDACTED, redacted)
     redacted = re.sub(r"(?<![0-9A-Za-z+/])[0-9A-Za-z+/]{86}==(?![0-9A-Za-z+/=])", _REDACTED, redacted)
-    redacted = re.sub(
-        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-        _REDACTED,
-        redacted,
-    )
+    redacted = _redact_private_key_blocks(redacted)
     redacted = re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _redact_pan_match, redacted)
     # User-supplied patterns run last and only add redaction coverage.
     for pattern in config.additional_redaction_patterns:
         redacted = pattern.sub(_REDACTED, redacted)
     return redacted
+
+
+def _redact_private_key_blocks(text: str) -> str:
+    """Replace every ``-----BEGIN … PRIVATE KEY-----`` block with the marker.
+
+    One regex spanning both markers is the obvious spelling and it is quadratic:
+    a trailing ``.*?`` rescans the rest of the value for every BEGIN that never
+    gets an END, so the cost is the product of the value's length and the number
+    of unterminated headers. Capture runs inline in the traced call and the value
+    can come from a caller, so a large one made mostly of bare headers stalled the
+    call for tens of seconds.
+
+    The two markers are located once each instead, and the blocks are paired by
+    walking the two position lists together. That reproduces what the regex
+    matched -- leftmost BEGIN, nearest END at or after it, resume after the
+    block -- at a cost linear in the length of the value.
+    """
+
+    # Scanning for the footer is skipped entirely when there is no header, so
+    # text without a private key costs the one scan it always cost.
+    begins = [(match.start(), match.end()) for match in _PEM_BEGIN.finditer(text)]
+    if not begins:
+        return text
+    ends = [(match.start(), match.end()) for match in _PEM_END.finditer(text)]
+    if not ends:
+        return text
+
+    parts: list[str] = []
+    copied = 0  # everything before this index has been written to ``parts``
+    next_end = 0  # index of the first END not yet consumed by a block
+    for begin_start, begin_end in begins:
+        if begin_start < copied:
+            # This header sits inside a block already replaced, exactly as the
+            # regex skipped it by resuming past its own match.
+            continue
+        # A block's END may start no earlier than the header's own end, which is
+        # where the regex's ``.*?`` began matching.
+        while next_end < len(ends) and ends[next_end][0] < begin_end:
+            next_end += 1
+        if next_end == len(ends):
+            # No END is left, so no later header can have one either. This is
+            # the case the regex used to pay for once per remaining header.
+            break
+        parts.append(text[copied:begin_start])
+        parts.append(_REDACTED)
+        copied = ends[next_end][1]
+        next_end += 1
+
+    if not parts:
+        return text
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def _redact_labeled_secret_match(match: re.Match[str]) -> str:

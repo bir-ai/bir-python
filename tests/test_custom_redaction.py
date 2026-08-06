@@ -11,10 +11,12 @@ outputs, and experiment JSONL/summary files).
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
 import tempfile
+import time
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from bir import configure, generation, load_events, observe, prompt, score, trace
+from bir._capture import _redact_private_key_blocks
 from bir._sdk import (
     _is_secret_key,
     _redact_secret_text,
@@ -257,6 +260,124 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
         configure(additional_secret_keys=[], additional_redaction_patterns=[])
         self.assertEqual(_redact_secret_text(self.STRIPE_LIVE), "[redacted]")
         self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
+
+
+class PrivateKeyBlockPairingTests(unittest.TestCase):
+    """How a header is paired with a footer, and what that pairing costs.
+
+    A single regex spanning both markers reads well and is quadratic: its
+    trailing ``.*?`` rescans the rest of the value for every header that never
+    gets a footer. Capture runs inline in the traced call and the value can come
+    from a caller, so that cost is reachable from outside. The rule now locates
+    the two markers separately and pairs them, which has to keep producing what
+    the regex produced -- these tests pin the pairing first and the cost second.
+    """
+
+    BEGIN = "-----BEGIN RSA PRIVATE KEY-----"
+    END = "-----END RSA PRIVATE KEY-----"
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_surrounding_text_is_preserved(self) -> None:
+        self.assertEqual(
+            _redact_secret_text(f"before {self.BEGIN}body{self.END} after"),
+            "before [redacted] after",
+        )
+
+    def test_each_block_is_replaced_separately(self) -> None:
+        text = f"a{self.BEGIN}1{self.END}b{self.BEGIN}2{self.END}c"
+        self.assertEqual(_redact_secret_text(text), "a[redacted]b[redacted]c")
+
+    def test_a_header_takes_the_nearest_following_footer(self) -> None:
+        # Two headers, one footer: the block runs from the first header to it,
+        # and the second header is inside that block rather than opening a new
+        # one -- lazy matching, reproduced by pairing.
+        text = f"{self.BEGIN}one{self.BEGIN}two{self.END}tail"
+        self.assertEqual(_redact_secret_text(text), "[redacted]tail")
+
+    def test_a_header_without_a_footer_is_left_alone(self) -> None:
+        # Nothing has been shown to be a key, so nothing is replaced. The point
+        # of the rewrite is that deciding this is cheap, not that it changed.
+        text = f"note {self.BEGIN} and then some prose"
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_a_footer_before_any_header_is_left_alone(self) -> None:
+        text = f"{self.END} stray footer"
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_a_footer_only_counts_after_its_header(self) -> None:
+        # The footer precedes the header, so it cannot close it; the trailing
+        # header stays unmatched and the text is untouched.
+        text = f"{self.END}middle{self.BEGIN}"
+        self.assertEqual(_redact_secret_text(text), text)
+
+    def test_an_unmatched_header_does_not_swallow_a_later_block(self) -> None:
+        text = f"{self.BEGIN}x{self.END}{self.BEGIN}trailing"
+        self.assertEqual(_redact_secret_text(text), f"[redacted]{self.BEGIN}trailing")
+
+    def test_label_variants_pair_independently(self) -> None:
+        # The regex never required the two labels to agree, and neither does the
+        # pairing: a mismatched pair is still one block.
+        text = "-----BEGIN EC PRIVATE KEY-----body-----END OPENSSH PRIVATE KEY-----"
+        self.assertEqual(_redact_secret_text(text), "[redacted]")
+
+    def test_pairing_matches_the_single_regex_it_replaced(self) -> None:
+        # The reference below is the exact rule this replaced. It lives here, in
+        # the test, so the rewrite's equivalence is checked rather than argued;
+        # it is not what the SDK runs, because running it is the defect.
+        reference = re.compile(r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+        tokens = (
+            self.BEGIN,
+            self.END,
+            "-----BEGIN PRIVATE KEY-----",
+            "-----END PRIVATE KEY-----",
+            "-----BEGIN ",
+            "-----END ",
+            "PRIVATE KEY-----",
+            "-----",
+            "body",
+            "\n",
+        )
+        for length in (1, 2, 3):
+            for combination in itertools.product(tokens, repeat=length):
+                text = "".join(combination)
+                with self.subTest(text=text):
+                    self.assertEqual(_redact_private_key_blocks(text), reference.sub("[redacted]", text))
+
+    def test_cost_stays_linear_in_the_size_of_the_value(self) -> None:
+        # Timed against prose of the same length rather than a fixed budget, so
+        # the bound calibrates itself to whatever machine runs it. The rule is
+        # ~1x prose now and was ~108x at this length before, so the 10x bound
+        # separates the two by an order of magnitude on either side.
+        length = 128_000
+        headers = ((self.BEGIN + " ") * (length // (len(self.BEGIN) + 1)))[:length]
+        prose = ("lorem ipsum dolor sit amet consectetur " * (length // 39))[:length]
+
+        def best_seconds(text: str) -> float:
+            timings = []
+            for _ in range(5):
+                started = time.perf_counter()
+                _redact_secret_text(text)
+                timings.append(time.perf_counter() - started)
+            return min(timings)
+
+        baseline = best_seconds(prose)
+        unmatched = best_seconds(headers)
+        self.assertLess(
+            unmatched,
+            baseline * 10,
+            f"redacting {length} characters of unmatched private-key headers took {unmatched:.3f}s "
+            f"against {baseline:.3f}s for the same length of prose; the rule is not linear in value size",
+        )
+
+    def test_a_real_key_is_still_redacted_at_that_size(self) -> None:
+        # Linearity must not have been bought by giving up on long keys.
+        block = f"{self.BEGIN}\n{'QUJDREVG' * 8_000}\n{self.END}"
+        self.assertEqual(_redact_secret_text(f"before {block} after"), "before [redacted] after")
 
 
 class BuiltinPanRedactionTests(unittest.TestCase):

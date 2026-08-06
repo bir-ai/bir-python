@@ -56,13 +56,12 @@ breaking release says otherwise:
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Keep an unfinished bridge run from hiding every later trace | P1 | M | Traces recorded after an abandoned framework run stay findable | — |
-| 2 | Bound the PEM redaction rule | P1 | S | Redaction cost stays linear in the size of the captured value | — |
-| 3 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
-| 4 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
-| 5 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+| 2 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
+| 3 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
+| 4 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
 
-Capture failures escaping into the traced call was the audit's other P1 and has
-shipped; see `CHANGELOG.md`.
+The audit's other two P1s have shipped — capture failures escaping into the
+traced call, and the quadratic PEM redaction rule. Both are in `CHANGELOG.md`.
 
 ## Work item details
 
@@ -123,74 +122,7 @@ subsequent unrelated `@observe()` call recorded as a trace root that
 without bound; and events whose trace root is missing are reported rather than
 dropped in silence.
 
-### 2. Bound the PEM redaction rule
-
-**Why:** the PEM rule at `src/bir/_capture.py:299` ends with `.*?`, so every
-`-----BEGIN … PRIVATE KEY-----` marker that never gets a matching `END` makes the
-engine scan the remainder of the value. Cost is the product of the value's size
-and the number of unterminated markers. Timing each built-in pattern against 32 KB
-and 64 KB of an adversarial payload built from its own prefix:
-
-```
-pattern                    32 KB     64 KB   growth
-authorization label       0.44ms    0.85ms     2.0x
-labeled secret            0.61ms    1.22ms     2.0x
-bearer                    0.53ms    1.05ms     2.0x
-sk- key                   0.42ms    0.83ms     2.0x
-jwt                       0.70ms    1.29ms     1.9x
-aws akid                  0.45ms    0.91ms     2.0x
-google                    0.57ms    1.16ms     2.0x
-slack                     0.37ms    0.73ms     2.0x
-github                    0.37ms    0.74ms     2.0x
-stripe                    0.42ms    0.82ms     1.9x
-b64 86==                  0.54ms    1.09ms     2.0x
-PEM block               128.51ms  504.93ms     3.9x  <-- superlinear
-card PAN                  0.93ms    1.78ms     1.9x
-```
-
-Every other rule is linear; this one quadruples when the input doubles. Doubling
-further, on a value that is nothing but unterminated headers: 128,000 characters
-→ 2.0 s, 256,000 → 8.4 s, 512,000 → 31.1 s. Timing the PEM pattern by itself
-accounts for essentially all of it (121.8 ms of the 129.7 ms at 32,000
-characters, 31.8 s of the 31.1 s at 512,000 — the two runs are the same
-measurement to within noise).
-
-Density matters, and honestly so: ~131,000 characters of prose cost 18.8 ms with
-no markers, 20.9 ms with 10, 56.1 ms with 100, 534.7 ms with 1,000, and 2.1 s when
-the value is nothing else. So a document that mentions a few keys is fine; a value
-made largely of unterminated headers is not, and that value can arrive from a
-caller. End to end, through the public API with `capture_inputs=True` and
-`max_value_length=200`:
-
-```
-128,000-character argument, max_value_length=200
-  capture on :   2127.6 ms   recorded input = 232 chars
-  capture off:      0.3 ms
-```
-
-`max_value_length` gives no protection, by design: truncation runs after
-redaction so a secret can never be split across the cut
-(`src/bir/_capture.py:150`). Two seconds bought a 232-character record. A complete
-1,662-character key redacts in 0.17 ms, so the rule's real job is cheap; the cost
-is entirely in the case where it finds no `END`.
-
-**Scope:**
-
-- Bound the PEM rule's span so its cost is linear in the size of the captured
-  value regardless of how many unterminated headers it contains.
-- Keep redaction behavior identical for real keys, including the label variants
-  `tests/test_custom_redaction.py:219` pins.
-- Add a benchmark case that scales the captured value's *size*: `capture_redaction`
-  today repeats one small fixed dict (`scripts/benchmarks.py:67`), so it measures
-  per-call cost and no baseline comparison can see this class of regression.
-- A test pinning the scaling, not just the correctness.
-
-**Done when:** redacting a 512,000-character value made entirely of unterminated
-PEM headers costs within a small constant factor of redacting the same length of
-prose, real keys still redact unchanged, and the benchmark harness has a case that
-would fail on a regression.
-
-### 3. Stop one damaged summary hiding the whole experiment store
+### 2. Stop one damaged summary hiding the whole experiment store
 
 **Why:** `list_experiments` parses every `*.summary.json` in the directory eagerly
 (`src/bir/_eval_persistence.py:121`), so one unreadable summary raises for the
@@ -239,7 +171,7 @@ what the summary path should also do.
 damaged summary and report what they skipped; and an interrupted summary write
 leaves the previous summary readable.
 
-### 4. Compact the `.sent` upload sidecar
+### 3. Compact the `.sent` upload sidecar
 
 **Why:** `--mark-sent` records accepted event IDs in `<trace_path>.sent` as one
 JSON array. `_record_sent_ids` loads the whole set, merges, sorts, and rewrites
@@ -281,12 +213,12 @@ nothing says the file never shrinks, and nothing offers a way to shrink it.
 the selected store files, and a repeated record/send/prune cycle leaves it bounded
 by the store rather than by history.
 
-### 5. Stop `bir export-otel` materializing the store
+### 4. Stop `bir export-otel` materializing the store
 
 **Why:** `export-otel` is the last read command that loads whole traces.
 `_read_traces` builds the list (`src/bir/cli.py:150`) and `export_traces_to_otlp`
 walks the traces twice — once to resolve the resource context, once to emit
-(`src/bir/integrations/otel.py:101`) — so the argument has to be a list even
+(`src/bir/integrations/otel.py:102`) — so the argument has to be a list even
 though the signature already accepts an iterable. Measured on a 1.54 MiB store of
 4,000 events across 2,000 traces, the shape the repo's own `cli_*` benchmark cases
 build, exporting to a local sink:
@@ -316,14 +248,12 @@ benchmark harness covers it.
 
 ## Sequencing
 
-Item 2 is the smallest change here — one regex plus a benchmark case — and the
-only remaining one in the capture path the shipped capture-failure work already
-opened; take it first. Item 1 is next and is the largest correctness change,
-touching six bridges, the shared contract, and the read side's silent drop. Items
-3 and 4 are independent of each other and of the rest: 3 continues the trace-side
-`--skip-invalid` work on the experiment store, 4 belongs with prune. Item 5 is
-last — a performance ceiling rather than a defect, and the only item whose fix is
-confined to one command.
+Item 1 is the remaining P1 and the largest correctness change here, touching six
+bridges, the shared contract, and the read side's silent drop; take it first.
+Items 2 and 3 are independent of each other and of the rest: 2 continues the
+trace-side `--skip-invalid` work on the experiment store, 3 belongs with prune.
+Item 4 is last — a performance ceiling rather than a defect, and the only item
+whose fix is confined to one command.
 
 Nothing here blocks anything else, so the order is about payoff rather than
 dependency.

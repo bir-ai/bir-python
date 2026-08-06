@@ -186,6 +186,32 @@ def prepare_capture_redaction(workdir: Path, size: int) -> Callable[[], object]:
     return body
 
 
+def prepare_capture_large_value(workdir: Path, size: int) -> Callable[[], object]:
+    """Redact one value of ``size`` characters, so cost is tracked per character.
+
+    ``capture_redaction`` above repeats one small payload and therefore measures
+    the per-call cost of the rule set; a rule whose cost grows faster than the
+    length of the value it is handed is invisible to it. This case is that axis.
+
+    The payload is prose carrying the shapes redaction has to decide about,
+    including private-key headers that never get a matching footer -- the input
+    whose cost used to grow with the square of the value's length, because the
+    rule spanning the two markers rescanned the remainder for every unmatched
+    header.
+    """
+
+    unit = (
+        "lorem ipsum dolor sit amet, authorization: Bearer abc123, "
+        "-----BEGIN RSA PRIVATE KEY----- consectetur adipiscing elit, "
+    )
+    payload = (unit * (size // len(unit) + 1))[:size]
+
+    def body() -> None:
+        _safe_capture(payload)
+
+    return body
+
+
 def prepare_store_rotation(workdir: Path, size: int) -> Callable[[], object]:
     # Small enough that a run crosses the rotation threshold many times, which is
     # what this case is here to measure.
@@ -320,6 +346,11 @@ BENCHMARKS: tuple[Benchmark, ...] = (
     Benchmark("trace_recorded", "tracing", prepare_trace_recorded, size=2_000, smoke_size=100),
     Benchmark("generation_recorded", "tracing", prepare_generation_recorded, size=1_000, smoke_size=50),
     Benchmark("capture_redaction", "capture", prepare_capture_redaction, size=5_000, smoke_size=200),
+    # Units are characters of one captured value, not calls, so this case reports
+    # the per-character cost of redaction and a rule that stops being linear in
+    # the value's length shows up as a per-unit regression rather than hiding in
+    # the fixed-size case above.
+    Benchmark("capture_large_value", "capture", prepare_capture_large_value, size=500_000, smoke_size=20_000),
     Benchmark("store_rotation", "storage", prepare_store_rotation, size=1_000, smoke_size=50),
     Benchmark("load_events", "storage", prepare_load_events, size=5_000, smoke_size=200),
     Benchmark("load_traces", "storage", prepare_load_traces, size=5_000, smoke_size=200),
