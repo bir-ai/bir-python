@@ -10,6 +10,27 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir traces`, `bir stats`, and `bir show` now say when the store holds events
+  that belong to no trace. A trace's root event is written when the trace closes,
+  so a trace that never closes leaves its children on disk with no root, and
+  every trace-shaped read resolves a trace through that root. The events were
+  therefore dropped in silence: `bir traces` printed "No traces found" over a
+  store that held them, `bir show <id>` reported the trace as not found, and
+  nothing connected the two facts.
+
+  `traces` and `stats` now report the count and the first trace id on stderr, so
+  `--json` output stays parseable, and `show` distinguishes a trace whose events
+  are recorded but rootless from one that is simply absent. What is listed has
+  not changed — a trace with no root is still not a trace, and `load_traces()`
+  still drops it — but the reader no longer implies the store is empty when it is
+  not.
+
+  A root goes missing when the process died before the trace closed, when
+  size-rotation dropped the file the root was written to, or when a framework
+  integration never received the callback that would have closed the run. All
+  three leave the same shape on disk, so the report names the shape rather than
+  guessing the cause.
+
 - Redaction no longer costs more than the value it is handed. The PEM
   private-key rule was one regex spanning both markers, and its trailing `.*?`
   rescanned the rest of the value for every `-----BEGIN ... PRIVATE KEY-----`

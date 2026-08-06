@@ -245,6 +245,35 @@ def _trace_summary_to_dict(trace: _TraceSummary) -> dict[str, Any]:
     }
 
 
+def _report_rootless_events(counts: dict[str, int], roots: dict[str, Any]) -> None:
+    """Say how much of the store is not reachable as a trace, and why.
+
+    A trace is built from its root event, so events whose root is absent belong
+    to no trace and are dropped by every trace-shaped read. That is invisible
+    otherwise: the store holds the events, ``bir traces`` prints "No traces
+    found", and nothing says the two facts are related.
+
+    A root goes missing when the process died before the trace closed, when
+    rotation dropped the file the root was written to, or when a framework bridge
+    never got the terminal callback that would have written it. All three leave
+    the same shape, so the report names the shape rather than guessing the cause.
+    """
+
+    rootless = [trace_id for trace_id in counts if trace_id not in roots]
+    if not rootless:
+        return
+    events = sum(counts[trace_id] for trace_id in rootless)
+    subject = "1 event" if events == 1 else f"{events} events"
+    verb, listed = ("has", "is") if events == 1 else ("have", "are")
+    trace_noun = "trace" if len(rootless) == 1 else "traces"
+    # stderr, so a --json run still writes only JSON to stdout.
+    print(
+        f"bir: {subject} across {len(rootless)} {trace_noun} {verb} no trace root and {listed} not listed; "
+        f"first trace id: {rootless[0]}",
+        file=sys.stderr,
+    )
+
+
 def _summarize_store(args: argparse.Namespace) -> _StoreSummary:
     """Summarize the store in one pass, retaining nothing per event.
 
@@ -264,6 +293,8 @@ def _summarize_store(args: argparse.Namespace) -> _StoreSummary:
             accumulated.setdefault(event.trace_id, _UsageTotals()).add(event)
         if event.type == "trace" and event.id == event.trace_id:
             roots[event.trace_id] = (event.name, event.start_time, event.end_time, event.status)
+
+    _report_rootless_events(counts, roots)
 
     summaries = [
         _TraceSummary(
@@ -388,6 +419,17 @@ def _cmd_show(args: argparse.Namespace) -> int:
     wanted = [event for event in _iter_store_events(args) if event.trace_id == args.trace_id]
     trace = next(iter(_sdk._traces_from_events(wanted)), None)
     if trace is None:
+        if wanted:
+            # The events are there; what is missing is the root that makes them a
+            # trace. Saying "not found" would send someone looking for the wrong
+            # thing, so name what was found and what it is missing.
+            noun = "event" if len(wanted) == 1 else "events"
+            print(
+                f"bir: trace {args.trace_id!r} has {len(wanted)} recorded {noun} but no trace root, "
+                "so it cannot be shown as a tree",
+                file=sys.stderr,
+            )
+            return 1
         print(
             f"bir: trace {args.trace_id!r} not found in {_resolved_trace_path(args.path)}",
             file=sys.stderr,

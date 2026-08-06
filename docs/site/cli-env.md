@@ -268,6 +268,33 @@ need, remove the damaged line from the JSONL file to make the store whole again.
 building on them gets all the recorded events or an error, never a silently
 partial list.
 
+### Events with no trace root
+
+A trace's root event is written when the trace closes, so a trace that never
+closes leaves its child events on disk with no root. Because a trace is resolved
+through its root, those events belong to no trace and are not listed:
+
+```
+$ bir traces
+bir: 2 events across 1 trace have no trace root and are not listed; first trace id: b23aa02e-...
+No traces found in .bir/traces.jsonl.
+```
+
+`traces` and `stats` report this on stderr, so `--json` output stays parseable,
+and `show` says the same thing for a specific id rather than reporting it as
+missing:
+
+```
+$ bir show b23aa02e-...
+bir: trace 'b23aa02e-...' has 2 recorded events but no trace root, so it cannot be shown as a tree
+```
+
+The store is intact; the trace is not. A root goes missing when the process died
+before the trace closed, when `configure(max_bytes=...)` rotation dropped the
+file the root was written to, or when a framework integration never received the
+callback that would have closed the run. The events themselves are still
+returned by `load_events()`.
+
 ## Environment configuration
 
 Bir reads these variables once when the `bir` package is imported:
