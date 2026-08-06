@@ -84,6 +84,29 @@ Captured values are normalized to JSON-compatible data. Non-finite floats such
 as `NaN` and `Infinity` are stored as strings, and deeply nested values are
 truncated.
 
+### When a value cannot be captured
+
+Capturing a value runs code Bir does not own: a mapping's `items()`, a sequence's
+`__iter__`, an object's `__repr__`, an exception's `__str__`. Those can fail — a
+config client whose backend is down, a result set whose next page is gone — and
+recording a value is never allowed to decide whether your call succeeds. So a
+capture that fails is recorded, not raised:
+
+- A value Bir could not read at all is recorded as `[uncapturable]`.
+- A mapping or list whose walk fails part-way keeps the entries it read and adds
+  one `[uncapturable]` entry for the rest, the same shape `max_collection_items`
+  produces below.
+- An object whose `__repr__` fails is recorded as `<unrepresentable TypeName>`,
+  and so is an exception whose `__str__` fails.
+
+Your function still runs, still returns its own result, and the event still
+records its own status. The marker is a recorded value, so `[uncapturable]` is
+distinguishable from a field that was simply never captured (`null`).
+
+Passing something that is not a mapping where a mapping belongs — for example
+`trace(name, metadata=[1, 2])` — is a mistake in the call rather than a value
+misbehaving, and still raises `TypeError` immediately.
+
 ### Limiting capture size
 
 Capture is normally written whole, so a single large value — a base64 image, a

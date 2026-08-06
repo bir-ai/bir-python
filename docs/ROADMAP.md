@@ -55,62 +55,18 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Stop capture failures escaping into the traced call | P1 | S | A traced call returns its own result whatever the captured value does | — |
-| 2 | Keep an unfinished bridge run from hiding every later trace | P1 | M | Traces recorded after an abandoned framework run stay findable | — |
-| 3 | Bound the PEM redaction rule | P1 | S | Redaction cost stays linear in the size of the captured value | — |
-| 4 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
-| 5 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
-| 6 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+| 1 | Keep an unfinished bridge run from hiding every later trace | P1 | M | Traces recorded after an abandoned framework run stay findable | — |
+| 2 | Bound the PEM redaction rule | P1 | S | Redaction cost stays linear in the size of the captured value | — |
+| 3 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
+| 4 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
+| 5 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+
+Capture failures escaping into the traced call was the audit's other P1 and has
+shipped; see `CHANGELOG.md`.
 
 ## Work item details
 
-### 1. Stop capture failures escaping into the traced call
-
-**Why:** `_safe_capture` runs the captured object's own code — `Mapping.items()`
-in `_capture_mapping` (`src/bir/_capture.py:108`) and iteration in
-`_capture_sequence` (`src/bir/_capture.py:130`) — with no guard, while the same
-module already refuses to let `__repr__` escape (`src/bir/_capture.py:156`). An
-object whose `items()` or `__iter__` raises is ordinary: a config client, an ORM
-row proxy, a lazily-loading result set.
-
-Measured with `configure(capture_inputs=True, capture_outputs=True)` and a
-`Mapping` whose `items()` raises `ConnectionError`:
-
-```
-captured input   -> raised ConnectionError: backend unavailable
-captured output  -> raised ConnectionError: backend unavailable
-events recorded: [('trace', 'on_input', 'error')]
-bad __repr__ ->  ok
-```
-
-Passed as an argument, the decorated body never runs, the caller gets Bir's
-exception, and the trace is written with `status="error"` blaming the user's
-function for a failure inside the SDK. Returned as a result, the function ran to
-completion and produced its value, but the caller gets the exception instead and
-no event is written at all. The same object behind a failing `__repr__` records
-`<unrepresentable BadRepr>` and returns normally, which `tests/test_sdk.py:4993`
-already pins — the capture path has decided this question once and applied the
-answer in one of three places.
-
-**Scope:**
-
-- Guard every point where capture invokes code owned by the captured value —
-  mapping iteration, sequence iteration, key stringification — the way
-  `_safe_repr` is guarded, recording a visible marker instead of propagating.
-- Keep the marker distinguishable from an absent value, so a failed capture is
-  never read as "nothing was passed".
-- Apply it to every capture path: inputs, outputs, event metadata, prompt
-  records, and dataset/experiment capture.
-- Tests driving a mapping whose `items()` raises and a sequence whose `__iter__`
-  raises through `@observe`, each context manager, and `run_experiment`,
-  asserting the caller's result and the recorded status.
-
-**Done when:** with capture enabled, a traced call whose argument or return value
-raises from `items()`, iteration, or `__repr__` returns its own result, records
-its own status, and records the marker; no exception raised by a captured value
-reaches the caller.
-
-### 2. Keep an unfinished bridge run from hiding every later trace
+### 1. Keep an unfinished bridge run from hiding every later trace
 
 **Why:** when a framework starts a run with no Bir trace active, the bridge opens
 an implicit trace root and enters it (`_implicit_trace_context`, e.g.
@@ -167,9 +123,9 @@ subsequent unrelated `@observe()` call recorded as a trace root that
 without bound; and events whose trace root is missing are reported rather than
 dropped in silence.
 
-### 3. Bound the PEM redaction rule
+### 2. Bound the PEM redaction rule
 
-**Why:** the PEM rule at `src/bir/_capture.py:200` ends with `.*?`, so every
+**Why:** the PEM rule at `src/bir/_capture.py:299` ends with `.*?`, so every
 `-----BEGIN … PRIVATE KEY-----` marker that never gets a matching `END` makes the
 engine scan the remainder of the value. Cost is the product of the value's size
 and the number of unterminated markers. Timing each built-in pattern against 32 KB
@@ -214,7 +170,7 @@ caller. End to end, through the public API with `capture_inputs=True` and
 
 `max_value_length` gives no protection, by design: truncation runs after
 redaction so a secret can never be split across the cut
-(`src/bir/_capture.py:86`). Two seconds bought a 232-character record. A complete
+(`src/bir/_capture.py:150`). Two seconds bought a 232-character record. A complete
 1,662-character key redacts in 0.17 ms, so the rule's real job is cheap; the cost
 is entirely in the case where it finds no `END`.
 
@@ -234,7 +190,7 @@ PEM headers costs within a small constant factor of redacting the same length of
 prose, real keys still redact unchanged, and the benchmark harness has a case that
 would fail on a regression.
 
-### 4. Stop one damaged summary hiding the whole experiment store
+### 3. Stop one damaged summary hiding the whole experiment store
 
 **Why:** `list_experiments` parses every `*.summary.json` in the directory eagerly
 (`src/bir/_eval_persistence.py:121`), so one unreadable summary raises for the
@@ -283,7 +239,7 @@ what the summary path should also do.
 damaged summary and report what they skipped; and an interrupted summary write
 leaves the previous summary readable.
 
-### 5. Compact the `.sent` upload sidecar
+### 4. Compact the `.sent` upload sidecar
 
 **Why:** `--mark-sent` records accepted event IDs in `<trace_path>.sent` as one
 JSON array. `_record_sent_ids` loads the whole set, merges, sorts, and rewrites
@@ -325,7 +281,7 @@ nothing says the file never shrinks, and nothing offers a way to shrink it.
 the selected store files, and a repeated record/send/prune cycle leaves it bounded
 by the store rather than by history.
 
-### 6. Stop `bir export-otel` materializing the store
+### 5. Stop `bir export-otel` materializing the store
 
 **Why:** `export-otel` is the last read command that loads whole traces.
 `_read_traces` builds the list (`src/bir/cli.py:150`) and `export_traces_to_otlp`
@@ -360,14 +316,14 @@ benchmark harness covers it.
 
 ## Sequencing
 
-Items 1 and 3 both live in the capture path, are independent of everything else,
-and are the smallest changes here; take them first — 1 because it turns a working
-call into a failure, 3 because it is one regex plus a benchmark case. Item 2 is
-next and is the largest correctness change, touching six bridges, the shared
-contract, and the read side's silent drop. Items 4 and 5 are independent of each
-other and of the rest: 4 continues the trace-side `--skip-invalid` work on the
-experiment store, 5 belongs with prune. Item 6 is last — a performance ceiling
-rather than a defect, and the only item whose fix is confined to one command.
+Item 2 is the smallest change here — one regex plus a benchmark case — and the
+only remaining one in the capture path the shipped capture-failure work already
+opened; take it first. Item 1 is next and is the largest correctness change,
+touching six bridges, the shared contract, and the read side's silent drop. Items
+3 and 4 are independent of each other and of the rest: 3 continues the trace-side
+`--skip-invalid` work on the experiment store, 4 belongs with prune. Item 5 is
+last — a performance ceiling rather than a defect, and the only item whose fix is
+confined to one command.
 
 Nothing here blocks anything else, so the order is about payoff rather than
 dependency.

@@ -24,6 +24,12 @@ _MAX_DEPTH_REACHED = "[max_depth]"
 # captured value valid JSON while making the truncation visible.
 _TRUNCATED = "…[truncated]"
 _REDACTED = "[redacted]"
+# Recorded in place of a value whose own code raised while it was being
+# captured, and appended to a container whose walk failed part-way -- the same
+# shape ``_TRUNCATED`` uses for the other reason a walk stops early. Capture runs
+# code Bir does not own, and recording a value must never decide whether the
+# traced call succeeds, so every failure ends at this marker.
+_UNCAPTURABLE = "[uncapturable]"
 
 _SECRET_KEY_PARTS = (
     "access_key",
@@ -52,12 +58,70 @@ def _capture_call_input(
     *,
     config: _Config,
 ) -> dict[str, Any]:
-    bound = signature.bind_partial(*args, **kwargs)
-    bound.apply_defaults()
+    """Name the decorated call's arguments for recording, without refusing the call.
+
+    ``inspect.signature`` follows ``__wrapped__``, so ``@observe`` over a
+    decorator that widens its wrapper's signature is handed the narrow one and
+    cannot bind a call the function itself accepts. Naming the arguments is
+    bookkeeping; it must not turn a working call into a ``TypeError``.
+    """
+
+    try:
+        bound = signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+    except Exception:
+        return {_UNCAPTURABLE: _UNCAPTURABLE}
     return {name: _safe_capture(value, config=config, key=name) for name, value in bound.arguments.items()}
 
 
 def _safe_capture(
+    value: Any,
+    *,
+    config: _Config,
+    key: str | None = None,
+    depth: int = 0,
+) -> Any:
+    """Capture ``value`` for recording, never raising into the traced call.
+
+    Capturing runs code the captured object owns -- a mapping's ``items()``, a
+    sequence's ``__iter__``, a subclass's ``__len__`` -- none of which is Bir's to
+    trust. Recording a value must never decide whether the traced call succeeds
+    or what it returns, so a failure anywhere below is recorded as
+    :data:`_UNCAPTURABLE` instead of propagating. This is the guard
+    :func:`_safe_repr` has always had around ``__repr__``, applied to the rest of
+    the capture path. Container walks keep what they already read (see
+    :func:`_capture_mapping`), so this whole-value marker is the last resort.
+    """
+
+    try:
+        return _capture_value(value, config=config, key=key, depth=depth)
+    except Exception:
+        return _UNCAPTURABLE
+
+
+def _safe_metadata(value: Any, *, field: str) -> dict[str, Any]:
+    """Snapshot a caller-supplied metadata mapping without letting it raise.
+
+    Every ``metadata=`` argument is copied before it is captured, and copying one
+    runs its own ``keys()``/``__getitem__``. A non-mapping stays a caller mistake
+    and still raises, matching the checks ``observe()`` and ``score()`` already
+    make; a mapping that fails while being read is recorded as uncapturable,
+    because recording metadata must not decide whether the traced call succeeds.
+    Only the snapshot happens here -- the values are captured later by
+    :func:`_safe_capture`, which redacts them.
+    """
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError(f"bir {field} must be a mapping")
+    try:
+        return dict(value)
+    except Exception:
+        return {_UNCAPTURABLE: _UNCAPTURABLE}
+
+
+def _capture_value(
     value: Any,
     *,
     config: _Config,
@@ -100,40 +164,63 @@ def _truncate_captured_text(text: str, *, config: _Config) -> str:
 
 
 def _capture_mapping(value: Mapping[Any, Any], depth: int, *, config: _Config) -> dict[str, Any]:
-    """Capture a mapping, bounding entry count by ``max_collection_items``."""
+    """Capture a mapping, bounding entry count by ``max_collection_items``.
+
+    Walking the mapping runs its own ``items()`` and the iterator that returns,
+    which may do I/O or fail outright (a config client, a lazily-loading row
+    proxy). A walk that fails keeps the entries it already read and marks the
+    rest uncapturable, the same way the entry-count limit marks what it left out.
+    """
 
     limit = config.max_collection_items
     captured: dict[str, Any] = {}
     truncated = False
-    for index, (item_key, item_value) in enumerate(value.items()):
-        if limit is not None and index >= limit:
-            truncated = True
-            break
-        item_key_text = _safe_key(item_key)
-        captured[item_key_text] = _safe_capture(
-            item_value,
-            config=config,
-            key=item_key_text,
-            depth=depth + 1,
-        )
+    uncapturable = False
+    try:
+        for index, (item_key, item_value) in enumerate(value.items()):
+            if limit is not None and index >= limit:
+                truncated = True
+                break
+            item_key_text = _safe_key(item_key)
+            captured[item_key_text] = _safe_capture(
+                item_value,
+                config=config,
+                key=item_key_text,
+                depth=depth + 1,
+            )
+    except Exception:
+        uncapturable = True
     if truncated:
         captured[_TRUNCATED] = _TRUNCATED
+    if uncapturable:
+        captured[_UNCAPTURABLE] = _UNCAPTURABLE
     return captured
 
 
 def _capture_sequence(value: Iterable[Any], depth: int, *, config: _Config) -> list[Any]:
-    """Capture a sequence, bounding item count by ``max_collection_items``."""
+    """Capture a sequence, bounding item count by ``max_collection_items``.
+
+    Iteration is the sequence's own code, so a walk that fails keeps the items it
+    already read and marks the rest uncapturable, mirroring
+    :func:`_capture_mapping`.
+    """
 
     limit = config.max_collection_items
     captured: list[Any] = []
     truncated = False
-    for index, item in enumerate(value):
-        if limit is not None and index >= limit:
-            truncated = True
-            break
-        captured.append(_safe_capture(item, config=config, depth=depth + 1))
+    uncapturable = False
+    try:
+        for index, item in enumerate(value):
+            if limit is not None and index >= limit:
+                truncated = True
+                break
+            captured.append(_safe_capture(item, config=config, depth=depth + 1))
+    except Exception:
+        uncapturable = True
     if truncated:
         captured.append(_TRUNCATED)
+    if uncapturable:
+        captured.append(_UNCAPTURABLE)
     return captured
 
 
@@ -161,7 +248,19 @@ def _safe_repr(value: Any, *, config: _Config) -> str:
 
 
 def _safe_error(exc: BaseException, *, config: _Config) -> str:
-    return _redact_secret_text(str(exc), config=config)
+    """Render an exception's message for recording, without raising.
+
+    ``str(exc)`` runs the exception's own ``__str__``. Letting that raise would
+    replace the exception the traced call is already propagating with one of
+    Bir's, so a failure records the exception's type instead -- the same fallback
+    :func:`_safe_repr` uses when ``__repr__`` fails.
+    """
+
+    try:
+        message = str(exc)
+    except Exception:
+        return f"<unrepresentable {type(exc).__name__}>"
+    return _redact_secret_text(message, config=config)
 
 
 def _redact_secret_text(value: str, *, config: _Config) -> str:

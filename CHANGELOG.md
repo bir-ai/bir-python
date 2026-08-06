@@ -8,6 +8,37 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Fixed
+
+- A value that raises while it is being captured no longer breaks the traced
+  call. Capture runs code Bir does not own — a mapping's `items()`, a sequence's
+  `__iter__`, an exception's `__str__` — and only `__repr__` was guarded against
+  it. A mapping whose `items()` raised (a config client, a lazily-loading row
+  proxy) turned a working call into a failure two different ways: passed as an
+  argument, the decorated body never ran, the caller got Bir's exception, and the
+  trace was written with `status="error"` blaming the user's function; returned
+  as a result, the function had already completed and produced its value, but the
+  caller got the exception instead and no event was written at all.
+
+  Every point where capture invokes the captured value's own code is now guarded,
+  and a failure is recorded rather than raised. A value that could not be read at
+  all records `[uncapturable]`; a mapping or list whose walk fails part-way keeps
+  the entries it read and marks the rest, the same shape `max_collection_items`
+  already produced; an exception whose `__str__` fails records
+  `<unrepresentable TypeName>` and the caller's own exception propagates
+  untouched. A `metadata=` mapping is copied before it is captured, and that read
+  is guarded too, on every primitive that takes one.
+
+  `@observe` also stopped refusing calls it could not describe.
+  `inspect.signature` follows `__wrapped__`, so `@observe` over a decorator that
+  widens its wrapper's signature was handed the narrow one and raised
+  `TypeError: too many positional arguments` for a call the function itself
+  accepts; the arguments are now recorded as `[uncapturable]` and the call runs.
+
+  Redaction is unchanged and still applies to everything that was read. Passing a
+  non-mapping where a mapping belongs is still a `TypeError`, since that is a
+  mistake in the call rather than a value misbehaving while it is read.
+
 ### Changed
 
 - Operations that read the module-level configuration now bind it once instead

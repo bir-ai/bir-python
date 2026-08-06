@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ._sdk import _safe_capture
+from ._sdk import _safe_capture, _safe_metadata
 
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
 _MISSING_SCORE_IGNORE = "ignore"
@@ -446,7 +446,16 @@ def _dataset_example_from_payload(
 
 
 def _safe_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
-    captured = _safe_capture({str(key): item for key, item in value.items()})
+    """Snapshot and redact a caller-supplied metadata mapping.
+
+    An evaluator's metadata reaches here as whatever object the evaluator
+    returned, and reading it runs that object's own code. Building a result must
+    not decide whether the experiment run survives, so the snapshot goes through
+    the same no-raise contract as every other capture; a value that could not be
+    captured at all comes back as a marker string rather than a mapping.
+    """
+
+    captured = _safe_capture(_safe_metadata(value, field="metadata"))
     if not isinstance(captured, dict):
         return {}
     return captured

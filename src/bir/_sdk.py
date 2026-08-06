@@ -80,8 +80,12 @@ _MAX_CAPTURE_DEPTH = _capture_helpers._MAX_CAPTURE_DEPTH
 _MAX_DEPTH_REACHED = _capture_helpers._MAX_DEPTH_REACHED
 _TRUNCATED = _capture_helpers._TRUNCATED
 _REDACTED = _capture_helpers._REDACTED
+_UNCAPTURABLE = _capture_helpers._UNCAPTURABLE
 _SECRET_KEY_PARTS = _capture_helpers._SECRET_KEY_PARTS
 _SECRET_KEY_NAMES = _capture_helpers._SECRET_KEY_NAMES
+# Snapshotting a caller's ``metadata=`` mapping runs the mapping's own code, so
+# it goes through the same no-raise contract as the rest of capture.
+_safe_metadata = _capture_helpers._safe_metadata
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -698,7 +702,7 @@ def observe(
         _validate_event_name(name, "observe name")
     if metadata is not None and not isinstance(metadata, Mapping):
         raise TypeError("bir observe metadata must be a mapping")
-    observe_metadata = dict(metadata) if metadata is not None else None
+    observe_metadata = _safe_metadata(metadata, field="observe metadata") if metadata is not None else None
 
     def decorator(func: F) -> F:
         trace_name = name or func.__name__
@@ -1136,9 +1140,9 @@ def prompt(
         name=name,
         version=version,
         template=template,
-        variables=dict(variables or {}),
+        variables=_safe_metadata(variables, field="prompt variables"),
         rendered=rendered,
-        metadata=dict(metadata or {}),
+        metadata=_safe_metadata(metadata, field="prompt metadata"),
         capture_template=capture_template,
         capture_variables=capture_variables,
         capture_rendered=capture_rendered,
@@ -1238,7 +1242,7 @@ def score(name: str, value: int | float, *, metadata: Mapping[str, Any] | None =
             end_time=timestamp,
             status="success",
             error=None,
-            metadata=_safe_capture(dict(metadata or {})),
+            metadata=_safe_capture(_safe_metadata(metadata, field="score metadata")),
             value=score_value,
         )
     )
@@ -1306,7 +1310,7 @@ def _record_score_event(
             end_time=score_time,
             status="success",
             error=None,
-            metadata=_safe_capture(dict(metadata or {})),
+            metadata=_safe_capture(_safe_metadata(metadata, field="score metadata")),
             value=score_value,
         )
     )
@@ -1352,14 +1356,14 @@ def _merge_metadata(target: dict[str, Any], metadata: Mapping[str, Any]) -> None
 
     if not isinstance(metadata, Mapping):
         raise TypeError("bir set_metadata() requires a mapping")
-    target.update(metadata)
+    target.update(_safe_metadata(metadata, field="set_metadata() metadata"))
 
 
 class _TraceContext:
     def __init__(self, *, name: str, metadata: Mapping[str, Any] | None) -> None:
         _validate_event_name(name, "trace name")
         self.name = name
-        self.metadata: dict[str, Any] = dict(metadata or {})
+        self.metadata: dict[str, Any] = _safe_metadata(metadata, field="trace metadata")
         self.id: str | None = None
         self.start_time: str | None = None
         self._dropped = False
@@ -1540,7 +1544,7 @@ class _Generation:
         self.name = name
         self.model = model
         self.input = input
-        self.metadata: dict[str, Any] = dict(metadata or {})
+        self.metadata: dict[str, Any] = _safe_metadata(metadata, field="generation metadata")
         self.prompt_record = prompt_record
         self.capture_input = capture_input
         self.capture_output = capture_output
@@ -1735,7 +1739,7 @@ class _ToolCall:
     ) -> None:
         self.name = name
         self.input = input
-        self.metadata: dict[str, Any] = dict(metadata or {})
+        self.metadata: dict[str, Any] = _safe_metadata(metadata, field="tool_call metadata")
         self.capture_input = capture_input
         self.capture_output = capture_output
         self.id: str | None = None
@@ -1827,7 +1831,7 @@ class _Retrieval(_ToolCall):
         capture_input: bool | None,
         capture_output: bool | None,
     ) -> None:
-        retrieval_metadata = dict(metadata or {})
+        retrieval_metadata = _safe_metadata(metadata, field="retrieval metadata")
         retrieval_metadata["kind"] = "retrieval"
         super().__init__(
             name=name,
@@ -1870,7 +1874,7 @@ class _Retrieval(_ToolCall):
         if text is not None:
             document["text"] = text
         if metadata is not None:
-            document["metadata"] = dict(metadata)
+            document["metadata"] = _safe_metadata(metadata, field="retrieval document metadata")
         self.output["documents"].append(document)
 
     def set_documents(self, documents: Iterable[Mapping[str, Any]]) -> None:
