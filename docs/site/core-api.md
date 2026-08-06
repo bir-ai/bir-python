@@ -280,6 +280,34 @@ time, so a bad rate, unknown key, invalid currency, or non-mapping table raises
 immediately. Passing `model_prices` replaces the previous table (an empty mapping
 clears it); with no table configured, cost behavior is unchanged.
 
+## When the trace store cannot be written
+
+Recording is bookkeeping about a call, not part of it, so a store Bir cannot
+write to never changes what your code does. If the append fails — a read-only
+filesystem, a full disk, a `.bir/` owned by another user, a volume that went
+away — the traced call still returns its own result, and a call whose body raised
+still raises its own exception. The event is lost; the call is not.
+
+It is not silent either. Bir reports the failure on its own `bir` logger, at
+`ERROR` when writing starts failing and at `WARNING` when it recovers, with a
+count of the events dropped in between:
+
+```
+ERROR bir: bir could not write to the trace store at /srv/.bir/traces.jsonl:
+  [Errno 30] Read-only file system. Recording is paused and events are being
+  dropped; the traced calls themselves are unaffected. This is reported once,
+  and again when writing recovers.
+```
+
+One message per outage, not one per event. Route or silence it like any other
+logger: `logging.getLogger("bir")`. (That is the SDK's own operational log, and
+is unrelated to `bir.logging`,
+which stamps trace ids onto *your* records.)
+
+Commands you invoke for their effect are unaffected and still report failure:
+`bir prune`, `bir send`, `load_events()`, and `load_traces()` all raise what they
+hit, because there the write or read *is* the operation you asked for.
+
 ## Event loading
 
 `load_events()` validates JSONL records against the current event schema and

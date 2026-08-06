@@ -55,69 +55,18 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Stop a store that cannot be written from failing the traced call | P1 | M | A call that succeeded returns its result even when recording fails | — |
-| 2 | Make experiment results survive a stopped process | P2 | S | An interrupted run keeps the examples it already finished | — |
+| 1 | Make experiment results survive a stopped process | P2 | S | An interrupted run keeps the examples it already finished | — |
 
-The log-correlation filter, this audit's other P1, has shipped; see
-`CHANGELOG.md`.
+Both of this audit's P1s have shipped — the log-correlation filter and the store
+that could not be written — and are in `CHANGELOG.md`. The second item's Why said
+no test pinned the old behavior; that was wrong.
+`test_storage_errors_are_not_swallowed` pinned it deliberately, so the work
+reversed a decision rather than filling a gap. Check for a pinning test before
+claiming there is none.
 
 ## Work item details
 
-### 1. Stop a store that cannot be written from failing the traced call
-
-**Why:** `_write_event` (`src/bir/_sdk.py:2002`) appends through `_append_event`
-(`src/bir/_storage.py:653`), and an `OSError` from that append propagates out of
-the context manager to the caller. When the traced body raised, the SDK already
-prefers the caller's own exception (`raise exc from storage_error`,
-`src/bir/_sdk.py:1072`) — so the question has been half-answered. When the body
-*succeeded* there is no competing exception, and the storage error is what the
-caller gets.
-
-Measured against a trace directory with no write permission, every recording
-entry point turns a completed call into a failure:
-
-```
-@observe (sync)                              -> BROKE: PermissionError
-@observe (async)                             -> BROKE: PermissionError
-@observe (generator)                         -> BROKE: PermissionError
-trace() context manager                      -> BROKE: PermissionError
-span() context manager                       -> BROKE: PermissionError
-generation() context manager                 -> BROKE: PermissionError
-tool_call() context manager                  -> BROKE: PermissionError
-retrieval() context manager                  -> BROKE: PermissionError
-bir.score()                                  -> BROKE: PermissionError
-```
-
-A function that charged an order returned `PermissionError` to its caller. The
-conditions that produce it are deployment conditions rather than programming
-mistakes: a read-only container filesystem, a full disk, a `.bir/` owned by
-another user, an unmounted ephemeral volume. Nothing in the docs decides that
-recording failures should surface this way, and no test pins it — the `OSError`
-cases in the suite cover `prune`, which is an explicit destructive command the
-user invoked and where raising is right.
-
-This is the same class as the capture failures already fixed, one layer down:
-there it was reading the value, here it is writing the event.
-
-**Scope:**
-
-- Decide and implement what a failed append does to the traced call. It must not
-  be "raise into a caller whose call succeeded"; silence is also wrong, since a
-  store that is not being written is worth knowing about.
-- Keep the existing precedence: a body that raised still surfaces its own
-  exception, never Bir's.
-- Keep explicit commands strict. `prune`, `send`, and the loaders are invoked for
-  their effect and must keep reporting failure.
-- Make a persistently unwritable store visible without a per-event cost —
-  repeating the same warning for every event of every trace is its own failure.
-- Tests covering each entry point above against an unwritable store, and one that
-  the body's own exception still wins.
-
-**Done when:** with an unwritable store, every recording entry point returns its
-own result (or re-raises its body's own exception), the operator can tell that
-recording is failing, and no traced call raises an error that came from Bir.
-
-### 2. Make experiment results survive a stopped process
+### 1. Make experiment results survive a stopped process
 
 **Why:** `run_experiment` opens the result file once and writes each example's row
 into it as the run proceeds (`src/bir/evals.py:669`), which is the right shape —
@@ -164,9 +113,7 @@ result rows, and the sync, threaded, and async runners all behave that way.
 
 ## Sequencing
 
-Item 1 is the one that changes a decision rather than a mechanism, so it wants
-the most thought, and it touches every recording entry point. Item 2 is
-independent of it and can be done whenever. Neither blocks the other.
+One item is left, and it depends on nothing.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -190,9 +137,10 @@ capture against a value whose own code raises, bounding the private-key redactio
 rule, reporting events whose trace root is missing, reclaiming a framework run
 whose end callback never arrived, reading a damaged experiment store with
 `--skip-invalid`, compacting the upload sidecar on prune, streaming
-`bir export-otel`, and attaching the log-correlation filter where propagated
-records are seen. Regressions in those areas are bugs; new scope requires a new
-issue with current evidence.
+`bir export-otel`, attaching the log-correlation filter where propagated records
+are seen, and reporting rather than raising a failed trace-store write.
+Regressions in those areas are bugs; new scope requires a new issue with current
+evidence.
 
 This audit looked at four more things and declined them:
 

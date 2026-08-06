@@ -10,6 +10,41 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A trace store that cannot be written no longer fails the call it was recording.
+  Recording appends to a local JSONL file, and an `OSError` from that append
+  propagated out of the context manager, so a call that had already succeeded
+  raised at its caller. Measured against a trace directory with no write
+  permission, every recording entry point broke: `@observe` (sync, async, and
+  generator), `trace()`, `span()`, `generation()`, `tool_call()`, `retrieval()`,
+  and `score()`. A function that charged an order returned `PermissionError`.
+
+  The conditions are deployment conditions rather than programming mistakes — a
+  read-only container filesystem, a full disk, a `.bir/` owned by another user, an
+  unmounted ephemeral volume — and recording is bookkeeping about a call rather
+  than part of it. A failed append is now reported instead of raised: the traced
+  call returns its own result, and a call whose body raised still raises its own
+  exception, which is the precedence the SDK already applied when there was a
+  competing exception to prefer.
+
+  It is not swallowed. Bir reports on its own `bir` logger, at `ERROR` when
+  writing starts failing and at `WARNING` when it recovers, naming the path, the
+  error, and how many events were dropped in between. The report is emitted on the
+  transition only, so a persistent outage costs one message rather than one per
+  event of every trace — and, incidentally, an application whose logging handler is
+  itself traced cannot recurse. `logging.getLogger("bir")` routes or silences it.
+  This is the SDK's own operational log and is unrelated to `bir.logging`, which
+  stamps trace ids onto the application's records.
+
+  Operations invoked for their effect are unchanged and still raise: `bir prune`,
+  `bir send`, `load_events()`, and `load_traces()`, where the read or write *is*
+  the requested operation.
+
+  This reverses a decision rather than filling a gap. `test_storage_errors_are_not_swallowed`
+  pinned the old behavior deliberately; it is now
+  `test_storage_errors_are_reported_not_swallowed`, keeping the intent — the error
+  must not vanish — while changing how it travels, since destroying a caller's
+  result is not a way of reporting anything.
+
 - `install_trace_id_filter()` now stamps the log records an application actually
   emits. With no argument it attached the filter to the root *logger*, and a
   logger's filters run only for records that logger itself creates: a record from

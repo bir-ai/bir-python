@@ -4744,7 +4744,7 @@ for batch in range(int(batches)):
         with self.assertRaisesRegex(TypeError, "source"):
             configure(source=cast(Any, 123))
 
-    def test_storage_errors_are_not_swallowed(self) -> None:
+    def test_storage_errors_are_reported_not_swallowed(self) -> None:
         with temporary_workdir() as workdir:
             configure(trace_path=workdir)
 
@@ -4752,12 +4752,16 @@ for batch in range(int(batches)):
             def answer() -> str:
                 return "ok"
 
-            # Pointing ``trace_path`` at a directory makes the append open fail, and
-            # the error must propagate rather than be swallowed. The concrete
-            # ``OSError`` subclass is platform-specific (``IsADirectoryError`` on
-            # POSIX, ``PermissionError`` on Windows), so assert the shared base.
-            with self.assertRaises(OSError):
-                answer()
+            # Pointing ``trace_path`` at a directory makes the append open fail.
+            # This used to propagate the OSError, which meant a call that had
+            # already succeeded failed at its caller; recording is bookkeeping
+            # about a call, not part of it. The error is still not swallowed — it
+            # is reported on the SDK's own logger instead of travelling by
+            # destroying the result.
+            with self.assertLogs("bir", level="ERROR") as captured:
+                self.assertEqual(answer(), "ok")
+
+            self.assertIn("could not write to the trace store", captured.output[0])
 
     def test_observe_can_capture_inputs_and_outputs(self) -> None:
         with temporary_workdir() as workdir:

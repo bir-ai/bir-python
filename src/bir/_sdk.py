@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import inspect
+import logging
 import os  # noqa: F401 - compatibility patch seam for storage internals
 import random
 import re
@@ -23,6 +24,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from types import TracebackType
 from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 from uuid import uuid4
@@ -1034,10 +1036,12 @@ def _finish_observe_error(
 ) -> None:
     """Reset the call contextvars and write the error event for a failed observation.
 
-    A storage failure re-raises the original ``exc`` chained to it so the user's
-    exception is never silently swallowed by a write error. ``metadata`` is
-    optional event metadata (used by the generator wrappers); it defaults to
-    ``None`` so the plain sync/async wrappers keep writing no metadata.
+    The caller re-raises ``exc`` after this returns. A store that cannot be
+    written cannot change that: :func:`_write_event` reports a failed write
+    rather than raising, so the user's own exception is what surfaces either way.
+    ``metadata`` is optional event metadata (used by the generator wrappers); it
+    defaults to ``None`` so the plain sync/async wrappers keep writing no
+    metadata.
     ``reset_context`` is ``False`` for the generator wrappers, which tear down
     their own context by value (see :func:`_finish_observe_success`).
     """
@@ -1066,10 +1070,7 @@ def _finish_observe_error(
         metadata=_observe_event_metadata(state, metadata),
         input=input_payload,
     )
-    try:
-        _write_event(event)
-    except Exception as storage_error:
-        raise exc from storage_error
+    _write_event(event)
 
 
 def _finalize_generator(
@@ -1467,12 +1468,7 @@ class _TraceContext:
             error=_safe_error(exc) if exc is not None else None,
             metadata=_safe_capture(dict(self.metadata or {})),
         )
-        try:
-            _write_event(event)
-        except Exception as storage_error:
-            if exc is not None:
-                raise exc from storage_error
-            raise
+        _write_event(event)
         return False
 
     async def __aenter__(self) -> _TraceContext:
@@ -1554,12 +1550,7 @@ class _Span:
             error=_safe_error(exc) if exc is not None else None,
             metadata=_safe_capture(dict(self.metadata or {})),
         )
-        try:
-            _write_event(event)
-        except Exception as storage_error:
-            if exc is not None:
-                raise exc from storage_error
-            raise
+        _write_event(event)
         return False
 
     async def __aenter__(self) -> _Span:
@@ -1662,12 +1653,7 @@ class _Generation:
             cost=self.cost,
             currency=self.currency,
         )
-        try:
-            _write_event(event)
-        except Exception as storage_error:
-            if exc is not None:
-                raise exc from storage_error
-            raise
+        _write_event(event)
         return False
 
     async def __aenter__(self) -> _Generation:
@@ -1843,12 +1829,7 @@ class _ToolCall:
             input=input_payload,
             output=output_payload,
         )
-        try:
-            _write_event(event)
-        except Exception as storage_error:
-            if exc is not None:
-                raise exc from storage_error
-            raise
+        _write_event(event)
         return False
 
     async def __aenter__(self) -> _ToolCall:
@@ -1999,19 +1980,96 @@ def _service_metadata() -> dict[str, str] | None:
     return payload or None
 
 
+# A recording write that fails is reported here rather than raised, so the state
+# below is what keeps "report it" from meaning "once per event of every trace".
+# One message when writing starts failing, one when it recovers, and the count of
+# what was lost in between.
+_write_failure_lock = Lock()
+_write_failing = False
+_events_lost_while_failing = 0
+
+# The SDK's own operational log. A library reporting that it cannot do its job
+# belongs in the application's logging, where an operator already looks and can
+# route or silence it; this is unrelated to ``bir.logging``, which stamps trace
+# ids onto the application's own records.
+_logger = logging.getLogger("bir")
+
+
 def _write_event(event: dict[str, Any]) -> None:
+    """Append one event, never letting a failed write reach the traced call.
+
+    Recording is bookkeeping about a call, not part of it, so a store that cannot
+    be written must not decide whether the call succeeded — a read-only container
+    filesystem, a full disk, or a ``.bir/`` owned by another user would otherwise
+    turn every completed call into an exception at its caller.
+
+    Silence would be the other way to get that wrong, so the failure is reported
+    once (see :func:`_report_write_failure`) instead of per event. Explicit
+    operations are unaffected: ``prune``, ``send``, and the loaders are invoked
+    for their effect and still raise what they hit.
+    """
+
     # The master switch and root sampling decision remain lifecycle concerns.
     config = _config
     if not config.enabled or _current_trace_dropped.get():
         return
-    # One binding for the whole write, so a reconfiguration cannot pair a new
-    # trace path with the previous rotation settings.
-    _storage_helpers._append_event(
-        event,
-        trace_path=config.trace_path,
-        max_bytes=config.max_bytes,
-        backup_count=config.backup_count,
+    try:
+        # One binding for the whole write, so a reconfiguration cannot pair a new
+        # trace path with the previous rotation settings.
+        _storage_helpers._append_event(
+            event,
+            trace_path=config.trace_path,
+            max_bytes=config.max_bytes,
+            backup_count=config.backup_count,
+        )
+    except Exception as error:
+        # Deliberately broad: from the caller's side every way of failing to
+        # record is the same thing, and a serialization bug here would otherwise
+        # destroy a production call rather than a trace.
+        _report_write_failure(config.trace_path, error)
+        return
+    if _write_failing:
+        _report_write_recovered()
+
+
+def _report_write_failure(trace_path: Path, error: BaseException) -> None:
+    """Say once that recording has stopped working, and count what is being lost.
+
+    The report is emitted only on the transition into failure. That bounds a
+    persistent outage to one message, and it also bounds recursion: an
+    application whose logging handler is itself traced would otherwise log, fail
+    to record, and log again without end.
+    """
+
+    global _write_failing, _events_lost_while_failing
+
+    with _write_failure_lock:
+        _events_lost_while_failing += 1
+        if _write_failing:
+            return
+        _write_failing = True
+    # Logged outside the lock so a handler that traces cannot deadlock on it.
+    _logger.error(
+        "bir could not write to the trace store at %s: %s. Recording is paused and events are being "
+        "dropped; the traced calls themselves are unaffected. This is reported once, and again when "
+        "writing recovers.",
+        trace_path,
+        error,
     )
+
+
+def _report_write_recovered() -> None:
+    """Say that recording works again, and how much was lost while it did not."""
+
+    global _write_failing, _events_lost_while_failing
+
+    with _write_failure_lock:
+        if not _write_failing:
+            return
+        lost = _events_lost_while_failing
+        _write_failing = False
+        _events_lost_while_failing = 0
+    _logger.warning("bir resumed writing to the trace store; %d event(s) were dropped in the meantime.", lost)
 
 
 def _rotate_trace_file_if_needed(trace_path: Path, payload: str) -> None:
@@ -2230,5 +2288,10 @@ def _reset_config_for_tests() -> None:
     into an unrelated test.
     """
 
-    global _config
+    global _config, _write_failing, _events_lost_while_failing
     _config = _Config()
+    # A test that made a write fail must not leave the next one reporting a
+    # recovery it did not cause.
+    with _write_failure_lock:
+        _write_failing = False
+        _events_lost_while_failing = 0
