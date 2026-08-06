@@ -49,6 +49,7 @@ from .evals import (
     _MISSING_SCORE_POLICIES,  # shared missing-score vocabulary
     _REPORT_FORMATS,  # shared report-format vocabulary
     ExperimentSummary,
+    _list_experiments_skipping_invalid,
     compare_experiments,
     list_experiments,
     load_experiment,
@@ -145,6 +146,33 @@ class _SkippedLines:
         first = next(iter(self._messages))
         # stderr, so a --json run still writes only JSON to stdout.
         print(f"bir: skipped {count} unreadable {noun}; first: {first}", file=sys.stderr)
+
+
+class _SkippedSummaries:
+    """Collects the experiment summaries a lenient listing could not read.
+
+    The trace-store counterpart counts lines; this counts files, because an
+    experiment summary is one JSON document per experiment rather than a line in
+    a shared store. Messages are de-duplicated for the same reason: a command may
+    list the directory more than once.
+    """
+
+    def __init__(self) -> None:
+        self._messages: dict[str, None] = {}
+
+    def __call__(self, error: ValueError) -> None:
+        self._messages.setdefault(str(error), None)
+
+    def report(self) -> None:
+        """Tell the user the listing is partial, and why."""
+
+        if not self._messages:
+            return
+        count = len(self._messages)
+        noun = "summary" if count == 1 else "summaries"
+        first = next(iter(self._messages))
+        # stderr, so a --json run still writes only JSON to stdout.
+        print(f"bir: skipped {count} unreadable experiment {noun}; first: {first}", file=sys.stderr)
 
 
 def _read_traces(args: argparse.Namespace) -> list[LoadedTrace]:
@@ -539,8 +567,26 @@ def _percentile(sorted_values: list[float], percentile: float) -> float:
     return sorted_values[index]
 
 
+def _read_experiments(args: argparse.Namespace) -> list[ExperimentSummary]:
+    """List experiment summaries, honoring ``--skip-invalid``.
+
+    One damaged summary used to raise for the whole directory, which took every
+    intact experiment beside it with it. The flag reads past it and says what it
+    skipped, exactly as it does for a damaged trace store.
+    """
+
+    directory = args.directory or _DEFAULT_EXPERIMENT_DIR
+    if not getattr(args, "skip_invalid", False):
+        return list_experiments(directory)
+
+    skipped = _SkippedSummaries()
+    summaries = _list_experiments_skipping_invalid(directory, on_invalid=skipped)
+    skipped.report()
+    return summaries
+
+
 def _cmd_experiments(args: argparse.Namespace) -> int:
-    summaries = list_experiments(args.directory) if args.directory else list_experiments()
+    summaries = _read_experiments(args)
 
     if args.json:
         _dump_json([_experiment_to_dict(summary) for summary in summaries], sys.stdout)
@@ -568,7 +614,7 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
 def _cmd_experiment_show(args: argparse.Namespace) -> int:
     directory = args.directory or _DEFAULT_EXPERIMENT_DIR
     summary = next(
-        (candidate for candidate in list_experiments(directory) if candidate.experiment_id == args.experiment_id),
+        (candidate for candidate in _read_experiments(args) if candidate.experiment_id == args.experiment_id),
         None,
     )
     if summary is None:
@@ -591,7 +637,7 @@ def _cmd_experiment_show(args: argparse.Namespace) -> int:
 def _cmd_experiment_report(args: argparse.Namespace) -> int:
     directory = args.directory or _DEFAULT_EXPERIMENT_DIR
     summary = next(
-        (candidate for candidate in list_experiments(directory) if candidate.experiment_id == args.experiment_id),
+        (candidate for candidate in _read_experiments(args) if candidate.experiment_id == args.experiment_id),
         None,
     )
     if summary is None:

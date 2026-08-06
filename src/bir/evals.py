@@ -1016,6 +1016,24 @@ def list_experiments(directory: str | Path = Path(".bir") / "experiments") -> li
     return _eval_persistence_helpers.list_experiments(directory)
 
 
+def _list_experiments_skipping_invalid(
+    directory: str | Path,
+    *,
+    on_invalid: Callable[[ValueError], None],
+) -> list[ExperimentSummary]:
+    """List summaries, handing each unreadable one to ``on_invalid`` and skipping it.
+
+    The public loader stays strict: refusing a directory it cannot fully read is
+    the contract a program building on it relies on. A person running the CLI
+    against a directory an interrupted write damaged needs the opposite — the
+    experiments that are still intact, and a note about what could not be read —
+    so the commands that only display experiments use this instead. It mirrors
+    ``_load_traces_skipping_invalid`` on the trace side.
+    """
+
+    return _eval_persistence_helpers.list_experiments(directory, on_invalid=on_invalid)
+
+
 def send_experiment(
     path: str | Path,
     server_url: str = "http://127.0.0.1:8000",

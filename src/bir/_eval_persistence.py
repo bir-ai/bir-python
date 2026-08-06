@@ -9,12 +9,14 @@ the public module owns orchestration and compatibility wrappers.
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO
+from uuid import uuid4
 
 from ._eval_models import (
     _EXPERIMENT_SCHEMA_VERSION,
@@ -112,17 +114,34 @@ def load_experiment_summary(path: str | Path) -> ExperimentSummary:
     return _experiment_summary_from_payload(payload, summary_path)
 
 
-def list_experiments(directory: str | Path = Path(".bir") / "experiments") -> list[ExperimentSummary]:
-    """List experiment summaries in newest-first order."""
+def list_experiments(
+    directory: str | Path = Path(".bir") / "experiments",
+    *,
+    on_invalid: Callable[[ValueError], None] | None = None,
+) -> list[ExperimentSummary]:
+    """List experiment summaries in newest-first order.
+
+    ``on_invalid`` decides what an unreadable summary means. Left ``None``, the
+    first one raises and nothing is listed, which is the contract every caller
+    has always had. Supplied, the summary is handed to the callback and skipped,
+    so one file an interrupted write damaged does not hide every experiment
+    beside it. Only the CLI passes it: a program building on this should not
+    receive a silently partial list.
+    """
 
     experiment_directory = Path(directory)
     if not experiment_directory.exists():
         return []
-    summaries = [
-        load_experiment_summary(summary_path)
-        for summary_path in experiment_directory.glob("*.summary.json")
-        if summary_path.is_file()
-    ]
+    summaries: list[ExperimentSummary] = []
+    for summary_path in experiment_directory.glob("*.summary.json"):
+        if not summary_path.is_file():
+            continue
+        try:
+            summaries.append(load_experiment_summary(summary_path))
+        except ValueError as exc:
+            if on_invalid is None:
+                raise
+            on_invalid(exc)
     return sorted(summaries, key=lambda summary: (summary.start_time, summary.experiment_id), reverse=True)
 
 
@@ -251,10 +270,24 @@ def _summary_from_result(result: ExperimentResult) -> ExperimentSummary:
 
 
 def _write_experiment_summary(path: Path, summary: ExperimentSummary) -> None:
+    """Write the summary through a temp file, so a failed write keeps the old one.
+
+    A plain write truncates in place, so a process killed part-way through leaves
+    a summary that parses as nothing — and because the listing reads every
+    summary in the directory, that one file used to make every experiment beside
+    it unreachable. Staging and renaming is what the trace store's sent-ID
+    sidecar and prune already do: either the new summary is there whole, or the
+    previous one still is.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8"
-    )
+    payload = json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _summary_path(result_path: Path) -> Path:

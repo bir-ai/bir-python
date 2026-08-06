@@ -55,13 +55,13 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Stop one damaged summary hiding the whole experiment store | P2 | M | Intact experiments stay readable, and a killed write keeps the old summary | — |
-| 2 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
-| 3 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
+| 1 | Compact the `.sent` upload sidecar | P2 | M | Local bookkeeping is bounded by the store, not by history | — |
+| 2 | Stop `bir export-otel` materializing the store | P3 | M | The last whole-store read path streams like the others | — |
 
-All three P1s have shipped: capture failures escaping into the traced call, the
-quadratic PEM redaction rule, and the unfinished bridge run that hid every later
-trace. All are in `CHANGELOG.md`.
+Shipped since this audit was written: all three P1s — capture failures escaping
+into the traced call, the quadratic PEM redaction rule, and the unfinished bridge
+run that hid every later trace — plus the damaged experiment summary that hid the
+whole experiment store. All are in `CHANGELOG.md`.
 
 One clause of the bridge item's stated goal was not achievable and was not
 attempted. It asked that an abandoned run leave *a subsequent `@observe()` call*
@@ -76,56 +76,7 @@ candidate) and belongs in an issue with a decision behind it, not here.
 
 ## Work item details
 
-### 1. Stop one damaged summary hiding the whole experiment store
-
-**Why:** `list_experiments` parses every `*.summary.json` in the directory eagerly
-(`src/bir/_eval_persistence.py:121`), so one unreadable summary raises for the
-whole listing — and `experiment-show` and `experiment-report` both resolve their
-target through it. Measured with three experiments whose summaries were valid,
-then one truncated to half its length:
-
-```
-bir experiments --dir exp                 -> bir: Invalid JSON in experiment summary exp/beta.summary.json (exit 1)
-bir experiments --dir exp --json          -> same, exit 1
-bir experiment-show <intact-id> --dir exp -> same, exit 1
-```
-
-Two intact experiments become unreachable through the CLI because of an unrelated
-third file. There is no escape hatch: `bir experiments --skip-invalid` fails with
-"unrecognized arguments", while the trace read commands grew exactly that flag for
-exactly this failure.
-
-The SDK can produce the state itself. `_write_experiment_summary` is a truncating
-`path.write_text` with no temp-and-rename (`src/bir/_eval_persistence.py:253`),
-unlike every other writer in the SDK — the sent-ID sidecar
-(`src/bir/_storage.py:1128`) and prune's staging (`src/bir/_storage.py:987`) both
-stage and replace. A write failing part-way reproduces it deterministically: a
-valid 255-byte summary became 127 bytes, `load_experiment_summary()` on it raised,
-and `list_experiments()` on its directory raised with it.
-
-A damaged *result* file is correctly scoped by comparison — it fails only
-`experiment-show` for that experiment and leaves the listing intact — which is
-what the summary path should also do.
-
-**Scope:**
-
-- Write the summary through a temp file and rename, so a killed or failed write
-  leaves the previous summary intact.
-- Give `experiments`, `experiment-show`, and `experiment-report` the same
-  `--skip-invalid` contract the trace read commands have: skip what cannot be
-  read, report the count and the first message on stderr, keep `--json` on stdout
-  parseable.
-- Keep `load_experiment_summary()` and `load_experiment()` strict by default,
-  matching the public loaders on the trace side.
-- Tests for a truncated summary, a summary that parses but fails validation, and a
-  summary write interrupted part-way.
-
-**Done when:** `bir experiments`, `bir experiment-show <intact id>`, and
-`bir experiment-report <intact id>` all succeed against a directory holding one
-damaged summary and report what they skipped; and an interrupted summary write
-leaves the previous summary readable.
-
-### 2. Compact the `.sent` upload sidecar
+### 1. Compact the `.sent` upload sidecar
 
 **Why:** `--mark-sent` records accepted event IDs in `<trace_path>.sent` as one
 JSON array. `_record_sent_ids` loads the whole set, merges, sorts, and rewrites
@@ -167,10 +118,10 @@ nothing says the file never shrinks, and nothing offers a way to shrink it.
 the selected store files, and a repeated record/send/prune cycle leaves it bounded
 by the store rather than by history.
 
-### 3. Stop `bir export-otel` materializing the store
+### 2. Stop `bir export-otel` materializing the store
 
 **Why:** `export-otel` is the last read command that loads whole traces.
-`_read_traces` builds the list (`src/bir/cli.py:150`) and `export_traces_to_otlp`
+`_read_traces` builds the list (`src/bir/cli.py:178`) and `export_traces_to_otlp`
 walks the traces twice — once to resolve the resource context, once to emit
 (`src/bir/integrations/otel.py:102`) — so the argument has to be a list even
 though the signature already accepts an iterable. Measured on a 1.54 MiB store of
@@ -202,13 +153,9 @@ benchmark harness covers it.
 
 ## Sequencing
 
-Items 1 and 2 are independent of each other and of the rest: 1 continues the
-trace-side `--skip-invalid` work on the experiment store, 2 belongs with prune.
-Item 3 is last — a performance ceiling rather than a defect, and the only item
-whose fix is confined to one command.
-
-Nothing here blocks anything else, so the order is about payoff rather than
-dependency.
+Item 1 belongs with prune, which is where the sidecar's bound has to come from.
+Item 2 is last — a performance ceiling rather than a defect, and the only item
+whose fix is confined to one command. Neither blocks the other.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release

@@ -10,6 +10,35 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- One damaged experiment summary no longer hides every experiment beside it. An
+  experiment is a result JSONL plus a `*.summary.json`, and the listing parses
+  every summary in the directory, so one it could not read raised for the whole
+  directory — and because `experiment-show` and `experiment-report` find their
+  target through the listing, all three commands failed over an unrelated third
+  file. Measured with three experiments whose summaries were valid and one
+  truncated to half its length, `bir experiments`, `bir experiments --json`, and
+  `bir experiment-show <intact id>` all exited 1.
+
+  The SDK could produce that state itself: `_write_experiment_summary` truncated
+  in place with no temp-and-rename, unlike the sent-ID sidecar and prune, both of
+  which stage and replace. A summary is now staged and renamed, so a killed or
+  failed write leaves the previous summary readable instead of destroying it — a
+  write failing part-way used to leave a valid 255-byte summary at 127 bytes and
+  take the directory's listing with it.
+
+  `experiments`, `experiment-show`, and `experiment-report` also accept
+  `--skip-invalid`, matching the trace read commands: unreadable summaries are
+  skipped, the count and the first message go to stderr so `--json` stays
+  parseable on stdout, and the intact experiments are listed. A summary that
+  parses but fails validation is skipped the same way.
+
+  The default is unchanged and still strict. `list_experiments()` and
+  `load_experiment_summary()` still refuse a directory they cannot read
+  completely, because a program building on them should not receive a silently
+  partial list. A damaged *result* file needed no change: it is read only by the
+  experiment that owns it, so it already failed just that one `experiment-show`
+  and left the listing alone — which is what the summary path now matches.
+
 - A framework run whose end callback never arrives no longer strands everything
   recorded after it. A bridge enters a Bir context in one callback and exits it
   in another, and while the run is open it owns the ambient trace context — which

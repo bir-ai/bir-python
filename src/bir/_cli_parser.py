@@ -144,6 +144,13 @@ def build_parser(
         help=f"Experiments directory to read (default: {default_experiment_dir}).",
     )
     experiments.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
+    experiments.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip experiment summaries that cannot be read instead of refusing the whole directory, reporting how many were skipped. Use after an interrupted write left a damaged summary."
+        ),
+    )
     experiments.set_defaults(func=handlers["experiments"])
 
     experiment_show = subparsers.add_parser(
@@ -157,6 +164,13 @@ def build_parser(
         help=f"Experiments directory to read (default: {default_experiment_dir}).",
     )
     experiment_show.add_argument("--json", action="store_true", help="Emit a nested JSON object instead of a table.")
+    experiment_show.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip experiment summaries that cannot be read instead of refusing the whole directory, reporting how many were skipped. Use after an interrupted write left a damaged summary."
+        ),
+    )
     experiment_show.set_defaults(func=handlers["experiment_show"])
 
     experiment_report = subparsers.add_parser(
@@ -180,6 +194,13 @@ def build_parser(
         "--output",
         metavar="PATH",
         help="Write the report to PATH instead of stdout.",
+    )
+    experiment_report.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip experiment summaries that cannot be read instead of refusing the whole directory, reporting how many were skipped. Use after an interrupted write left a damaged summary."
+        ),
     )
     experiment_report.set_defaults(func=handlers["experiment_report"])
 

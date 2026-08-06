@@ -41,9 +41,9 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir stats [--path P] [--include-rotated] [--json] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
 | `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes] [--json]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
 | `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
-| `bir experiments [--dir D] [--json]` | List local experiment summaries. |
-| `bir experiment-show EXPERIMENT_ID [--dir D] [--json]` | Print one experiment's summary and per-example results. |
-| `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH]` | Render one experiment to a self-contained HTML or Markdown report. |
+| `bir experiments [--dir D] [--json] [--skip-invalid]` | List local experiment summaries. |
+| `bir experiment-show EXPERIMENT_ID [--dir D] [--json] [--skip-invalid]` | Print one experiment's summary and per-example results. |
+| `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH] [--skip-invalid]` | Render one experiment to a self-contained HTML or Markdown report. |
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS] [--json]` | Send local events and print the upload result; optionally use bounded groups. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS] [--json]` | Send a saved experiment and summary, retrying transient failures. |
 | `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
@@ -257,6 +257,32 @@ START                             STATUS   DURATION  EVENTS  NAME
 The report goes to stderr, so `--json` still writes only JSON to stdout. The
 flag is available on `traces`, `show`, `stats`, and `export-otel` — the commands
 that only display what they read.
+
+An experiment store fails the same way and answers it the same way. An experiment
+is a result JSONL plus a `*.summary.json` beside it, and the listing reads every
+summary in the directory, so one it cannot parse refuses the whole directory —
+which also blocks `experiment-show` and `experiment-report`, since both find their
+target through the listing:
+
+```
+$ bir experiments --dir .bir/experiments
+bir: Invalid JSON in experiment summary .bir/experiments/beta.summary.json
+```
+
+`--skip-invalid` is available on `experiments`, `experiment-show`, and
+`experiment-report`:
+
+```
+$ bir experiments --skip-invalid
+bir: skipped 1 unreadable experiment summary; first: Invalid JSON in experiment summary .bir/experiments/beta.summary.json
+ID                                    NAME   STATUS   EXAMPLES  ERRORS  SCORES
+7bc09786-5c90-4604-83cf-2012d377593f  gamma  success  3         0       exact_match=1.00
+92db3b13-87ab-41af-a7ef-b9971cfd9205  alpha  success  3         0       exact_match=1.00
+```
+
+A damaged *result* file needs no flag: it is read only by the experiment that
+owns it, so it fails `experiment-show` for that one experiment and leaves the
+listing alone.
 
 `send` and `prune` deliberately have no such flag. Skipping a line while
 uploading would silently fail to send recorded data, and skipping one while
