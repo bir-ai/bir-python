@@ -35,6 +35,26 @@
     "expected": "Authorization: Bearer [redacted]"
   },
   {
+    "name": "github-fine-grained-token",
+    "input": "github_pat_11EXAMPLE0aaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expected": "[redacted]"
+  },
+  {
+    "name": "connection-uri-password",
+    "input": "postgres://admin:hunter2@db.internal:5432/prod",
+    "expected": "postgres://admin:[redacted]@db.internal:5432/prod"
+  },
+  {
+    "name": "connection-uri-password-without-a-user",
+    "input": "redis://:mypassword@127.0.0.1:6379/0",
+    "expected": "redis://:[redacted]@127.0.0.1:6379/0"
+  },
+  {
+    "name": "url-without-a-password-is-untouched",
+    "input": "http://example.com:8080/path",
+    "expected": "http://example.com:8080/path"
+  },
+  {
     "name": "api-key-assignment",
     "input": "api_key=supersecretvalue",
     "expected": "api_key=[redacted]"

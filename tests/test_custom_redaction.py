@@ -256,10 +256,143 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
             self.assertEqual(event["input"]["payload"], {"pem": "[redacted]", "azure": "[redacted]"})
             self.assertEqual(event["output"], "issued [redacted]")
 
+    # GitHub's fine-grained tokens: ``github_pat_`` then two base62 halves joined
+    # by an underscore. Assembled from fragments for the same push-protection
+    # reason as the Stripe samples above.
+    _GH = "github"
+    GITHUB_FINE_GRAINED = f"{_GH}_pat_11EXAMPLE0aaaaaaaaaa_" + "b" * 59
+
+    def test_fine_grained_github_token_is_redacted(self) -> None:
+        self.assertEqual(_redact_secret_text(f"token {self.GITHUB_FINE_GRAINED} end"), "token [redacted] end")
+
+    def test_classic_and_fine_grained_github_tokens_are_both_redacted(self) -> None:
+        classic = "ghp_" + "A" * 36
+        self.assertEqual(
+            _redact_secret_text(f"{classic} and {self.GITHUB_FINE_GRAINED}"),
+            "[redacted] and [redacted]",
+        )
+
+    def test_github_near_misses_are_not_redacted(self) -> None:
+        for benign in (f"{self._GH}_pat_short", f"{self._GH}_patient_records", "ghp_tooshort"):
+            with self.subTest(benign=benign):
+                self.assertEqual(_redact_secret_text(benign), benign)
+
     def test_builtin_formats_cannot_be_disabled_by_clearing_custom_rules(self) -> None:
         configure(additional_secret_keys=[], additional_redaction_patterns=[])
         self.assertEqual(_redact_secret_text(self.STRIPE_LIVE), "[redacted]")
         self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
+        self.assertEqual(_redact_secret_text(self.GITHUB_FINE_GRAINED), "[redacted]")
+
+
+class UriCredentialRedactionTests(unittest.TestCase):
+    """The password inside a connection string, and what that rule costs.
+
+    ``password=hunter2`` was replaced and the same password in
+    ``postgres://admin:hunter2@db`` was not, though a connection string is how a
+    traced application usually holds one -- in a config object, or in the error a
+    client library raises when it cannot connect. Only the password goes: the
+    scheme, user, and host are what make the trace worth reading.
+
+    The rule starts at ``://`` rather than at the scheme, which is what keeps it
+    linear; the cost case at the end pins that, because the obvious spelling is
+    quadratic on a long unbroken run.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_the_password_goes_and_the_rest_stays(self) -> None:
+        for uri, expected in (
+            ("postgres://admin:hunter2@db.internal:5432/prod", "postgres://admin:[redacted]@db.internal:5432/prod"),
+            ("mongodb+srv://u:p4ss@cluster0.example.net/db", "mongodb+srv://u:[redacted]@cluster0.example.net/db"),
+            ("redis://:mypassword@127.0.0.1:6379/0", "redis://:[redacted]@127.0.0.1:6379/0"),
+            ("amqp://guest:guest@rabbit:5672/%2f", "amqp://guest:[redacted]@rabbit:5672/%2f"),
+            ("https://user:secret@example.com/path", "https://user:[redacted]@example.com/path"),
+        ):
+            with self.subTest(uri=uri):
+                self.assertEqual(_redact_secret_text(uri), expected)
+
+    def test_a_uri_inside_prose_keeps_the_prose(self) -> None:
+        self.assertEqual(
+            _redact_secret_text("connect to mysql://root:toor@localhost/app then retry"),
+            "connect to mysql://root:[redacted]@localhost/app then retry",
+        )
+
+    def test_urls_without_a_password_are_untouched(self) -> None:
+        # A ``host:port`` has a colon and no userinfo; ``user@host`` has userinfo
+        # and no password. Neither carries a secret, and redacting either would
+        # cost the trace its endpoint.
+        for benign in (
+            "http://example.com:8080/path",
+            "postgres://db.internal:5432/prod",
+            "https://user@example.com/no-password",
+            "http://127.0.0.1:4318/v1/traces",
+            "mailto:someone@example.com",
+            "see https://docs.example.com/a:b/c for details",
+        ):
+            with self.subTest(benign=benign):
+                self.assertEqual(_redact_secret_text(benign), benign)
+
+    def test_a_token_used_as_the_user_half_is_still_matched_by_its_own_rule(self) -> None:
+        # The ``<token>:x-oauth-basic@`` convention puts the secret in the user
+        # position, where this rule leaves it; the token-shape rules run after it
+        # and take it from there.
+        classic = "ghp_" + "A" * 36
+        self.assertEqual(
+            _redact_secret_text(f"https://{classic}:x-oauth-basic@github.com/o/r.git"),
+            "https://[redacted]:[redacted]@github.com/o/r.git",
+        )
+
+    def test_redacting_twice_changes_nothing(self) -> None:
+        once = _redact_secret_text("postgres://admin:hunter2@db.internal:5432/prod")
+        self.assertEqual(_redact_secret_text(once), once)
+
+    def test_uri_password_is_gone_from_the_trace_file(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+
+            @observe(name="connect")
+            def connect(dsn: str) -> str:
+                raise RuntimeError(f"could not reach {dsn}")
+
+            with self.assertRaises(RuntimeError):
+                connect("postgres://admin:hunter2@db.internal:5432/prod")
+
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("hunter2", raw)
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertIn("postgres://admin:[redacted]@db.internal", event["error"])
+
+    def test_cost_stays_linear_in_the_size_of_the_value(self) -> None:
+        # Anchoring on the scheme makes every letter start an attempt that runs
+        # its greedy class to the end of the run and backtracks over it: measured
+        # at 4,745 ms for this length against 0.03 ms anchored on ``://``. Timed
+        # against prose of the same length so the bound calibrates itself to
+        # whatever machine runs it.
+        length = 128_000
+        run = ("QUJDREVG" * (length // 8))[:length]
+        prose = ("lorem ipsum dolor sit amet consectetur " * (length // 39))[:length]
+
+        def best_seconds(text: str) -> float:
+            timings = []
+            for _ in range(5):
+                started = time.perf_counter()
+                _redact_secret_text(text)
+                timings.append(time.perf_counter() - started)
+            return min(timings)
+
+        baseline = best_seconds(prose)
+        unbroken = best_seconds(run)
+        self.assertLess(
+            unbroken,
+            baseline * 10,
+            f"redacting a {length}-character unbroken run took {unbroken:.3f}s against {baseline:.3f}s for the "
+            f"same length of prose; the URI rule is not linear in value size",
+        )
 
 
 class AuthorizationHeaderRedactionTests(unittest.TestCase):

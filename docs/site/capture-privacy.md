@@ -44,7 +44,16 @@ are also scanned for common secret-like text patterns, including:
 - AWS access key IDs (`AKIA...` and `ASIA...`).
 - Google API keys (`AIza...`).
 - Slack `xox*` tokens.
-- GitHub `ghp_`, `gho_`, `ghs_`, `ghu_`, and `ghr_` tokens.
+- GitHub tokens: the classic `ghp_`, `gho_`, `ghs_`, `ghu_`, and `ghr_` prefixes
+  and the fine-grained `github_pat_` form.
+- Passwords inside a connection string. In a URI carrying `user:password@`, the
+  password is replaced and the scheme, user, and host are kept, so
+  `postgres://admin:hunter2@db.internal:5432/prod` records as
+  `postgres://admin:[redacted]@db.internal:5432/prod` and the trace still says
+  which database the call was reaching. A URL with no password
+  (`https://user@example.com`) and an ordinary `host:port` are left alone. A
+  token placed in the *user* half instead — the `<token>:x-oauth-basic@`
+  convention — is covered by the token rules above rather than by this one.
 - Stripe secret and restricted keys (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`).
 - Azure storage-style account keys (88-character base64 ending in `==`).
 - PEM private-key blocks (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`).

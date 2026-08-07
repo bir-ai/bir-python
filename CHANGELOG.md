@@ -58,6 +58,40 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- Built-in redaction now recognizes two credential formats it was missing.
+
+  GitHub's fine-grained personal access tokens (`github_pat_…`) were not
+  redacted. The rules covered only the classic `ghp_`, `gho_`, `ghs_`, `ghu_`,
+  and `ghr_` prefixes, so they read as current while missing the token type
+  GitHub now steers users toward. Both families share one pass.
+
+  Passwords inside a connection string were not redacted either, and the same
+  secret was treated inconsistently depending on how it was written:
+  `password=hunter2` was replaced, and the same password in
+  `postgres://admin:hunter2@db.internal:5432/prod` was not. Connection strings
+  reach traces through config objects and through the error messages the client
+  libraries raise when they cannot connect. The password is now replaced and the
+  scheme, user, and host are kept, so the trace still says which database the
+  call was reaching. A URL with no password (`https://user@example.com`) and an
+  ordinary `host:port` are untouched — neither carries a password to hide — and a
+  token placed in the *user* half instead (the `<token>:x-oauth-basic@`
+  convention) is covered by the token-shape rules that run after it.
+
+  The URI rule matches from `://` rather than from the scheme, which is a cost
+  decision. The obvious spelling, `[A-Za-z][A-Za-z0-9+.-]*://`, is quadratic:
+  every letter starts an attempt that runs its greedy class to the end of the run
+  and backtracks over it looking for the `://`. Measured on one 64,000-character
+  alphanumeric run — the shape a base64 body has — that spelling took 4,745 ms
+  and grew 60x for 8x the input, against 0.03 ms and 7x for the one that shipped.
+  A test pins the linearity the way the private-key rule's does.
+
+  Measured cost: `capture_large_value` 79.4 ms against 79.2 before, so the
+  per-character axis is unchanged; `capture_redaction` is 30.9 µs/unit against
+  30.1, the per-call cost of one added pass.
+
+  `tests/fixtures/redaction-cases.json` gains four cases, synced into the `bir`
+  repo with `scripts/fixtures.py sync`.
+
 - An `Authorization` header no longer leaks its credential for any scheme other
   than `Bearer`. RFC 7235 writes the header as a scheme followed by the
   credential, and the rule named `Bearer` explicitly so it could be preserved.

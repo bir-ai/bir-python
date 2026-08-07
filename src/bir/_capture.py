@@ -80,6 +80,22 @@ _AUTH_ANY_SCHEME = f"{_AUTH_SCHEME_TOKEN}|{_AUTH_SCHEME_PARAMS}"
 # scheme and matches the scheme word itself, which destroyed the scheme and left
 # the credential behind it untouched. That is also what makes the rule idempotent
 # -- re-redacting an already-redacted header used to consume its scheme.
+# A credential carried in a URI's userinfo, the spelling a connection string
+# uses. The password is the secret; the scheme, user, and host are what make the
+# trace worth reading, so they stay. Requiring the ``:`` and the ``@`` is what
+# keeps an ordinary ``host:port`` and a passwordless ``https://user@host`` out of
+# it -- neither carries a password to hide.
+#
+# It starts at ``://`` rather than at the scheme, and that is a cost decision
+# rather than a stylistic one. Written as ``[A-Za-z][A-Za-z0-9+.-]*://`` the rule
+# is quadratic: every letter in the value starts an attempt, and each one runs
+# the greedy class to the end of its run and backtracks over it looking for the
+# ``://``. Measured on one 64,000-character alphanumeric run -- the shape a
+# base64 body has -- that spelling took 4,745 ms and grew 60x for 8x the input,
+# against 0.03 ms and 7x here. The scheme is left out of the match entirely; it
+# sits in front of it and is never replaced, so the result is identical.
+_URI_CREDENTIAL_RULE = re.compile(r"(://[^\s/:@]*:)[^\s/@]*(@)")
+
 _AUTH_HEADER_RULE = re.compile(
     rf"(?i)\b(?P<label>authorization\s*[:=]\s*)(?:"
     rf"(?P<param_scheme>(?:{_AUTH_SCHEME_PARAMS})\s+)"
@@ -320,6 +336,10 @@ def _redact_secret_text(value: str, *, config: _Config) -> str:
         _redact_bearer_secret_match,
         redacted,
     )
+    # Before the token shapes below, so a token used as the *user* half of a URI
+    # (the ``<token>:x-oauth-basic@`` convention) is still matched by its own rule
+    # once the password beside it has gone.
+    redacted = _URI_CREDENTIAL_RULE.sub(_redact_uri_credential_match, redacted)
     redacted = re.sub(r"\b(sk-[A-Za-z0-9_-]{4,})\b", _REDACTED, redacted)
     redacted = re.sub(
         r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
@@ -329,7 +349,15 @@ def _redact_secret_text(value: str, *, config: _Config) -> str:
     redacted = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", _REDACTED, redacted)
     redacted = re.sub(r"(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", _REDACTED, redacted)
     redacted = re.sub(r"\bxox[baprs]-[0-9A-Za-z-]+\b", _REDACTED, redacted)
-    redacted = re.sub(r"\b(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}\b", _REDACTED, redacted)
+    # Both GitHub token families in one pass: the classic ``ghp_``-style prefixes
+    # and the fine-grained ``github_pat_`` tokens that replaced them. The
+    # fine-grained form joins its two halves with an underscore, so it needs a
+    # character class the classic branch must not have.
+    redacted = re.sub(
+        r"\b(?:(?:ghp|gho|ghs|ghu|ghr)_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{50,})\b",
+        _REDACTED,
+        redacted,
+    )
     redacted = re.sub(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b", _REDACTED, redacted)
     redacted = re.sub(r"(?<![0-9A-Za-z+/])[0-9A-Za-z+/]{86}==(?![0-9A-Za-z+/=])", _REDACTED, redacted)
     redacted = _redact_private_key_blocks(redacted)
@@ -405,6 +433,12 @@ def _redact_auth_header_match(match: re.Match[str]) -> str:
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_REDACTED}"
+
+
+def _redact_uri_credential_match(match: re.Match[str]) -> str:
+    """Keep a URI's scheme, user, and host; replace the password between them."""
+
+    return f"{match.group(1)}{_REDACTED}{match.group(2)}"
 
 
 def _redact_pan_match(match: re.Match[str]) -> str:
