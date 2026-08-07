@@ -46,6 +46,16 @@ Results are written to `.bir/experiments/*.jsonl`, one row per example. A
 sibling `.summary.json` stores the experiment status, counts, aggregate scores,
 and result path.
 
+Each row is flushed as its example finishes, so a run that is stopped part-way
+keeps the work it had already done. If the process is killed without unwinding —
+`SIGTERM` from a pod eviction, `docker stop`, or a cancelled CI job — the rows
+for the completed examples are on disk and `load_experiment()` reads them. The
+`.summary.json` is written only when the run ends, so an interrupted experiment
+has result rows and no summary; it will not appear in `list_experiments()` or
+`bir experiments`, both of which list summaries. This matters most for the runs
+it is most expensive to lose: an evaluation against a model API can be an hour
+of paid calls.
+
 ## Run experiments concurrently with a thread pool
 
 For I/O-bound synchronous tasks — such as network LLM calls behind a sync
@@ -110,7 +120,13 @@ persisted JSONL/summary schema are identical to `run_experiment()`.
 Each example runs in its own asyncio task, so `record_traces=True` produces an
 isolated trace tree per example even when they run concurrently. If the
 surrounding coroutine is cancelled, the in-flight example tasks are cancelled and
-awaited and `CancelledError` propagates without writing a summary.
+awaited and `CancelledError` propagates without writing a summary; the leading
+examples that had already finished keep their rows.
+
+Because rows follow dataset order, an example that finishes while an earlier one
+is still running is written only once that earlier one lands. What survives an
+interruption is therefore the completed prefix of the dataset, not every example
+that happened to finish.
 
 ## Bound each example with a timeout
 

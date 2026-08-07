@@ -70,7 +70,8 @@ _markdown_inline = _eval_report_helpers._markdown_inline
 _markdown_cell = _eval_report_helpers._markdown_cell
 
 _write_experiment_result = _eval_persistence_helpers._write_experiment_result
-_persist_experiment = _eval_persistence_helpers._persist_experiment
+_ExperimentResultWriter = _eval_persistence_helpers._ExperimentResultWriter
+_finalize_experiment = _eval_persistence_helpers._finalize_experiment
 _experiment_result = _eval_persistence_helpers._experiment_result
 _summary_from_result = _eval_persistence_helpers._summary_from_result
 _write_experiment_summary = _eval_persistence_helpers._write_experiment_summary
@@ -620,6 +621,13 @@ def run_experiment(
     isolation is preserved because each worker thread inherits its own copy of
     the context-var state, so trace trees never bleed across examples.
 
+    Each finished example's row is flushed to the operating system before the
+    next one is written, so a run stopped without unwinding — ``SIGTERM`` from a
+    pod eviction, ``docker stop``, or a cancelled CI job — leaves the rows for
+    the examples that had completed, in dataset order. The ``.summary.json``
+    sibling is written only when the run ends, so an interrupted run has result
+    rows and no summary; :func:`load_experiment` reads those rows.
+
     ``timeout`` is an optional per-example limit in seconds (a positive, finite
     number; default ``None`` means unlimited). When set, an example whose task
     runs longer than ``timeout`` is recorded as an ``"error"``-status result with
@@ -664,9 +672,13 @@ def run_experiment(
         )
 
     results: list[ExperimentExampleResult] = []
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open("w", encoding="utf-8") as experiment_file:
+    with _ExperimentResultWriter(
+        output_path,
+        experiment_id=experiment_id,
+        name=name,
+        stop_after_error=raise_on_error,
+    ) as writer:
         for example in examples:
             result, error = _run_example_capturing_sync(
                 experiment_id=experiment_id,
@@ -678,31 +690,26 @@ def run_experiment(
                 timeout=timeout,
             )
             results.append(result)
-            _write_experiment_result(experiment_file, experiment_id, name, result)
+            writer.write(result, failed=error is not None)
             if error is not None and raise_on_error:
-                end_time = _now()
-                experiment_result = _experiment_result(
+                _finalize_experiment(
+                    output_path=output_path,
                     experiment_id=experiment_id,
                     name=name,
                     start_time=start_time,
-                    end_time=end_time,
+                    end_time=_now(),
                     results=results,
-                    path=output_path,
                 )
-                _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
                 raise error
 
-    end_time = _now()
-    experiment_result = _experiment_result(
+    return _finalize_experiment(
+        output_path=output_path,
         experiment_id=experiment_id,
         name=name,
         start_time=start_time,
-        end_time=end_time,
+        end_time=_now(),
         results=results,
-        path=output_path,
     )
-    _write_experiment_summary(_summary_path(output_path), _summary_from_result(experiment_result))
-    return experiment_result
 
 
 async def run_experiment_async(
@@ -743,6 +750,11 @@ async def run_experiment_async(
     and ``CancelledError`` propagates without writing a misleading success
     summary.
 
+    Like :func:`run_experiment`, rows are flushed as the run proceeds, so an
+    interrupted run keeps the leading examples that had finished. Because rows
+    follow dataset order, an example that completes while an earlier one is still
+    running is written only once that earlier one lands.
+
     ``timeout`` is an optional per-example limit in seconds (a positive, finite
     number; default ``None`` means unlimited). When set, each example coroutine
     is wrapped in :func:`asyncio.wait_for`; an example that runs longer than
@@ -771,64 +783,85 @@ async def run_experiment_async(
     semaphore = asyncio.Semaphore(max_concurrency)
     results_by_index: dict[int, ExperimentExampleResult] = {}
     errors_by_index: dict[int, Exception] = {}
+    next_unwritten_index = 0
 
-    async def run_one(index: int, example: DatasetExample) -> None:
-        async with semaphore:
-            if timeout is None:
-                result, error = await _capture_example_async(
-                    experiment_id=experiment_id,
-                    experiment_name=name,
-                    example=example,
-                    task=task,
-                    evaluators=evaluator_list,
-                    record_traces=record_traces,
-                )
-            else:
-                # The holder lets the traced runner publish its trace id before a
-                # timeout cancellation unwinds it, so the error result below can
-                # link the closed trace. wait_for awaits the cancelled inner task
-                # before raising TimeoutError, so by then the holder is final and
-                # the trace root (if any) has been written.
-                trace_id_holder: list[str | None] = [None]
-                try:
-                    result, error = await asyncio.wait_for(
-                        _capture_example_async(
-                            experiment_id=experiment_id,
-                            experiment_name=name,
-                            example=example,
-                            task=task,
-                            evaluators=evaluator_list,
-                            record_traces=record_traces,
-                            trace_id_holder=trace_id_holder,
-                        ),
-                        timeout,
+    with _ExperimentResultWriter(
+        output_path,
+        experiment_id=experiment_id,
+        name=name,
+        stop_after_error=raise_on_error,
+    ) as writer:
+
+        async def run_one(index: int, example: DatasetExample) -> None:
+            nonlocal next_unwritten_index
+            async with semaphore:
+                if timeout is None:
+                    result, error = await _capture_example_async(
+                        experiment_id=experiment_id,
+                        experiment_name=name,
+                        example=example,
+                        task=task,
+                        evaluators=evaluator_list,
+                        record_traces=record_traces,
                     )
-                except asyncio.TimeoutError:
-                    exc = _timeout_exc(timeout)
-                    result, error = _error_example_result(example, exc), exc
-                    if trace_id_holder[0] is not None:
-                        result = replace(result, trace_id=trace_id_holder[0])
-            results_by_index[index] = result
-            if error is not None:
-                errors_by_index[index] = error
+                else:
+                    # The holder lets the traced runner publish its trace id before a
+                    # timeout cancellation unwinds it, so the error result below can
+                    # link the closed trace. wait_for awaits the cancelled inner task
+                    # before raising TimeoutError, so by then the holder is final and
+                    # the trace root (if any) has been written.
+                    trace_id_holder: list[str | None] = [None]
+                    try:
+                        result, error = await asyncio.wait_for(
+                            _capture_example_async(
+                                experiment_id=experiment_id,
+                                experiment_name=name,
+                                example=example,
+                                task=task,
+                                evaluators=evaluator_list,
+                                record_traces=record_traces,
+                                trace_id_holder=trace_id_holder,
+                            ),
+                            timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        exc = _timeout_exc(timeout)
+                        result, error = _error_example_result(example, exc), exc
+                        if trace_id_holder[0] is not None:
+                            result = replace(result, trace_id=trace_id_holder[0])
+                results_by_index[index] = result
+                if error is not None:
+                    errors_by_index[index] = error
+                # Rows are persisted in dataset order, so an example that finishes
+                # early waits for the ones before it; this drains however much of
+                # that order is now complete. It never awaits, so no other example
+                # can interleave between reading the cursor and writing the row.
+                while next_unwritten_index in results_by_index:
+                    writer.write(
+                        results_by_index[next_unwritten_index],
+                        failed=next_unwritten_index in errors_by_index,
+                    )
+                    next_unwritten_index += 1
 
-    tasks = [asyncio.create_task(run_one(index, example)) for index, example in enumerate(examples)]
-    try:
-        await asyncio.gather(*tasks)
-    except BaseException:
-        # Includes CancelledError: cancel and await the in-flight example tasks so
-        # they clean up, then re-raise without persisting a misleading summary.
-        for pending in tasks:
-            pending.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+        tasks = [asyncio.create_task(run_one(index, example)) for index, example in enumerate(examples)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            # Includes CancelledError: cancel and await the in-flight example tasks
+            # so they clean up, then re-raise. The examples that had already
+            # finished keep their rows; no summary is written, so nothing claims the
+            # run completed.
+            for pending in tasks:
+                pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     ordered_results = [results_by_index[index] for index in range(len(examples))]
     end_time = _now()
 
     if raise_on_error and errors_by_index:
         first_error_index = min(errors_by_index)
-        _persist_experiment(
+        _finalize_experiment(
             output_path=output_path,
             experiment_id=experiment_id,
             name=name,
@@ -838,7 +871,7 @@ async def run_experiment_async(
         )
         raise errors_by_index[first_error_index]
 
-    return _persist_experiment(
+    return _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
         name=name,
@@ -1320,31 +1353,42 @@ def _run_experiment_threaded(
 
     results_by_index: dict[int, ExperimentExampleResult] = {}
     errors_by_index: dict[int, Exception] = {}
-    if timeout is None:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
-            concurrent.futures.wait(futures)
-        for future in futures:
-            index, result, error = future.result()
-            results_by_index[index] = result
-            if error is not None:
-                errors_by_index[index] = error
-    else:
-        _collect_threaded_results_with_timeout(
-            run_one=run_one,
-            examples=examples,
-            max_workers=max_workers,
-            timeout=timeout,
-            results_by_index=results_by_index,
-            errors_by_index=errors_by_index,
-        )
+    with _ExperimentResultWriter(
+        output_path,
+        experiment_id=experiment_id,
+        name=name,
+        stop_after_error=raise_on_error,
+    ) as writer:
+        if timeout is None:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(run_one, index, example) for index, example in enumerate(examples)]
+                # Waiting on futures in dataset order rather than on the whole set
+                # keeps the rows in that order while still letting every worker run:
+                # each finished example is written while the rest are still going,
+                # so an interrupted run keeps the prefix it had completed.
+                for future in futures:
+                    index, result, error = future.result()
+                    results_by_index[index] = result
+                    if error is not None:
+                        errors_by_index[index] = error
+                    writer.write(result, failed=error is not None)
+        else:
+            _collect_threaded_results_with_timeout(
+                run_one=run_one,
+                examples=examples,
+                max_workers=max_workers,
+                timeout=timeout,
+                results_by_index=results_by_index,
+                errors_by_index=errors_by_index,
+                writer=writer,
+            )
 
     ordered_results = [results_by_index[i] for i in range(len(examples))]
     end_time = _now()
 
     if raise_on_error and errors_by_index:
         first_error_index = min(errors_by_index)
-        _persist_experiment(
+        _finalize_experiment(
             output_path=output_path,
             experiment_id=experiment_id,
             name=name,
@@ -1354,7 +1398,7 @@ def _run_experiment_threaded(
         )
         raise errors_by_index[first_error_index]
 
-    return _persist_experiment(
+    return _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
         name=name,
@@ -1372,6 +1416,7 @@ def _collect_threaded_results_with_timeout(
     timeout: float,
     results_by_index: dict[int, ExperimentExampleResult],
     errors_by_index: dict[int, Exception],
+    writer: _ExperimentResultWriter,
 ) -> None:
     """Run examples on a thread pool, recording a timeout error per example.
 
@@ -1389,7 +1434,9 @@ def _collect_threaded_results_with_timeout(
     to stop, so a timed-out task keeps running and occupies its pool slot until
     it returns; a queued example may therefore wait for a free worker, but its
     own clock is not running while it waits. The executor is shut down without
-    waiting so the run finishes as soon as every example is resolved.
+    waiting so the run finishes as soon as every example is resolved. Because the
+    collector already walks dataset order, each resolved example's row goes
+    straight to ``writer``, so a run stopped part-way keeps what it had finished.
     """
 
     started_events = [threading.Event() for _ in examples]
@@ -1419,6 +1466,7 @@ def _collect_threaded_results_with_timeout(
             results_by_index[result_index] = result
             if error is not None:
                 errors_by_index[result_index] = error
+            writer.write(result, failed=error is not None)
     finally:
         executor.shutdown(wait=False)
 

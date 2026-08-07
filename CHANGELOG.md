@@ -10,6 +10,53 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Experiment results now survive a process that is stopped without unwinding.
+  `run_experiment` already wrote each example's row as the run proceeded, but the
+  handle kept default buffering for the whole run, so the rows reached the disk
+  only when the file was closed. Measured on a 20-example run stopped after 10
+  examples had completed:
+
+  ```
+  SIGTERM: result rows on disk = 0   (10 examples had completed)
+  SIGINT:  result rows on disk = 10
+  SIGKILL: result rows on disk = 0
+  ```
+
+  `SIGINT` survived because Python unwinds and closes the file. `SIGTERM` is how
+  an orchestrator stops a process — a pod eviction, `docker stop`, a cancelled CI
+  job — and Python's default handler exits without unwinding, so the buffer went
+  with it. The cost is proportional to how long a run takes, which for an
+  evaluation over a model API is the point of the feature: an hour of paid model
+  calls could be on the wrong side of that buffer. The trace store beside it was
+  never affected, because each append opens, writes, and closes.
+
+  A finished example's row is now flushed before the next example starts. The
+  threaded and async runners were worse off still — they collected every result
+  and wrote the file in one pass at the end, so an interruption lost the whole run
+  — and they now stream rows too, in dataset order as that order completes.
+  Waiting on the dataset-order prefix rather than on the whole set is what makes
+  this possible without changing the documented ordering: rows, results, and
+  aggregates still follow dataset order regardless of completion order.
+
+  Flushing pushes the bytes to the operating system, which is what makes them
+  outlive the process; it deliberately stops short of `fsync`, which would cost a
+  disk round trip per example to also survive a machine-level crash, and which the
+  trace store does not pay either. The write cost stays proportional to the number
+  of examples rather than to their size.
+
+  The `.summary.json` sibling is still written only when the run ends, so an
+  interrupted run has result rows and no summary — nothing claims it completed.
+  `load_experiment()` reads the rows; `list_experiments()` and `bir experiments`
+  list summaries and so will not show it.
+
+  One consequence is worth naming: all three runners now open the result file when
+  the run starts rather than when it ends, so a cancelled async run leaves an empty
+  result file where it previously left none.
+  `test_cancellation_cleans_up_children_without_writing_summary` pinned the old
+  behavior and now pins the new one, keeping its real subject — the summary must
+  not appear — and a new test covers what the change was for: a cancellation after
+  some examples have finished keeps their rows.
+
 - A trace store that cannot be written no longer fails the call it was recording.
   Recording appends to a local JSONL file, and an `OSError` from that append
   propagated out of the context manager, so a call that had already succeeded

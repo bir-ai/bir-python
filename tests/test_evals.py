@@ -2221,7 +2221,45 @@ class RunExperimentAsyncTests(unittest.TestCase):
 
             asyncio.run(driver())
             self.assertTrue(cancelled_children)  # in-flight example tasks were cancelled
-            self.assertFalse(experiment_path.exists())
+            # The result file is opened when the run starts so finished rows can be
+            # flushed as they land; no example finished here, so it is empty. The
+            # summary is still the thing that must not appear, because that is what
+            # would claim the run completed.
+            self.assertEqual(experiment_path.read_text(encoding="utf-8"), "")
+            self.assertFalse(experiment_path.with_suffix(".summary.json").exists())
+
+    def test_cancellation_keeps_the_rows_of_examples_that_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment_path = Path(directory) / "cancel-partial.jsonl"
+            dataset = Dataset([DatasetExample(id=f"q{index}", input={"n": index}) for index in range(4)])
+
+            async def driver() -> None:
+                finished_two = asyncio.Event()
+
+                async def task(n: int) -> int:
+                    if n >= 2:
+                        finished_two.set()
+                        await asyncio.sleep(10)
+                    return n
+
+                experiment = asyncio.ensure_future(
+                    run_experiment_async(
+                        "cancel-partial",
+                        dataset=dataset,
+                        task=task,
+                        evaluators=[json_valid()],
+                        path=experiment_path,
+                        max_concurrency=1,
+                    )
+                )
+                await finished_two.wait()
+                experiment.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await experiment
+
+            asyncio.run(driver())
+            rows = [json.loads(line) for line in experiment_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["example_id"] for row in rows], ["q0", "q1"])
             self.assertFalse(experiment_path.with_suffix(".summary.json").exists())
 
 

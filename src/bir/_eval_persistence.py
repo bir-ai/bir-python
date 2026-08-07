@@ -202,7 +202,67 @@ def _write_experiment_result(
     experiment_file.write(_json_line(record))
 
 
-def _persist_experiment(
+class _ExperimentResultWriter:
+    """Stream experiment result rows, flushing each completed example's row.
+
+    The handle stays open for the whole run so rows are appended in dataset
+    order in one pass, but a finished example's row is pushed out of Python's
+    buffer before the next example starts. Under default buffering the rows sat
+    in memory until the handle closed, so a process stopped without unwinding
+    lost every one of them: ``SIGTERM`` is how an orchestrator stops a process —
+    a pod eviction, ``docker stop``, a cancelled CI job — and Python's default
+    handler exits without running the ``with`` block's cleanup. An evaluation
+    over a model API can be an hour of paid calls on the wrong side of that
+    buffer.
+
+    Flushing hands the bytes to the operating system, which is what makes them
+    outlive the process. It deliberately stops there rather than calling
+    ``os.fsync``: surviving a machine-level crash would cost a disk round trip
+    per example, and the trace store beside it does not pay that either. The
+    cost stays proportional to the number of examples rather than to their size.
+
+    ``stop_after_error`` mirrors ``raise_on_error``. The run is about to abort at
+    the first failing example in dataset order, so that example's row is the last
+    one the file should contain, and rows offered afterwards are dropped.
+
+    Not thread-safe, and it does not need to be: every runner drives it from a
+    single thread. The concurrent ones run examples on workers but collect them
+    in dataset order on the calling thread, which is the same thread that writes.
+    """
+
+    def __init__(
+        self,
+        output_path: Path,
+        *,
+        experiment_id: str,
+        name: str,
+        stop_after_error: bool,
+    ) -> None:
+        self._experiment_id = experiment_id
+        self._name = name
+        self._stop_after_error = stop_after_error
+        self._stopped = False
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = output_path.open("w", encoding="utf-8")
+
+    def __enter__(self) -> _ExperimentResultWriter:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._file.close()
+
+    def write(self, result: ExperimentExampleResult, *, failed: bool) -> None:
+        """Append one finished example's row and flush it out of the process."""
+
+        if self._stopped:
+            return
+        _write_experiment_result(self._file, self._experiment_id, self._name, result)
+        self._file.flush()
+        if failed and self._stop_after_error:
+            self._stopped = True
+
+
+def _finalize_experiment(
     *,
     output_path: Path,
     experiment_id: str,
@@ -211,16 +271,13 @@ def _persist_experiment(
     end_time: str,
     results: list[ExperimentExampleResult],
 ) -> ExperimentResult:
-    """Write ordered result rows and the summary, returning the experiment result.
+    """Write the summary for already-streamed rows, returning the experiment result.
 
-    Used by the async evaluator runner, which collects results by dataset index
-    and persists them in one pass once every example has finished.
+    The rows reached the file through :class:`_ExperimentResultWriter` as each
+    example finished. Only the summary is written here, because its status,
+    counts, and aggregate scores are not known until the run ends.
     """
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as experiment_file:
-        for result in results:
-            _write_experiment_result(experiment_file, experiment_id, name, result)
     experiment_result = _experiment_result(
         experiment_id=experiment_id,
         name=name,
