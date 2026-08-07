@@ -5,6 +5,36 @@
     "expected": "Authorization: Bearer [redacted]"
   },
   {
+    "name": "authorization-basic-header",
+    "input": "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+    "expected": "Authorization: Basic [redacted]"
+  },
+  {
+    "name": "authorization-token-header",
+    "input": "Authorization: Token 9f8e7d6c5b4a32109f8e",
+    "expected": "Authorization: Token [redacted]"
+  },
+  {
+    "name": "authorization-digest-header",
+    "input": "Authorization: Digest username=\"admin\", response=\"deadbeef\"",
+    "expected": "Authorization: Digest [redacted]"
+  },
+  {
+    "name": "authorization-header-without-a-scheme",
+    "input": "Authorization: rawtokenvalue123",
+    "expected": "Authorization: [redacted]"
+  },
+  {
+    "name": "authorization-assignment-spelling",
+    "input": "authorization=Basic dXNlcjpwYXNzd29yZA==",
+    "expected": "authorization=Basic [redacted]"
+  },
+  {
+    "name": "authorization-redaction-is-idempotent",
+    "input": "Authorization: Bearer [redacted]",
+    "expected": "Authorization: Bearer [redacted]"
+  },
+  {
     "name": "api-key-assignment",
     "input": "api_key=supersecretvalue",
     "expected": "api_key=[redacted]"

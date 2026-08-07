@@ -57,6 +57,39 @@ _SECRET_KEY_NAMES = {
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 
+# How far a secret runs once something has labeled it. It ends at whitespace or
+# at punctuation that closes the value rather than belonging to it, so a header
+# quoted inside a sentence does not swallow the sentence.
+_SECRET_VALUE = r"[^\s,;\)\]\}]+"
+
+# RFC 7235 writes an Authorization header as a scheme followed by the credential.
+# Only the credential is secret; the scheme says which authentication a call
+# used, which is worth keeping in a trace. These schemes carry a single
+# ``token68`` credential.
+_AUTH_SCHEME_TOKEN = r"bearer|basic|token|api-?key|ntlm|negotiate|ssws"
+# These carry a comma-separated auth-param list instead. The part worth hiding is
+# not the first pair -- a Digest ``response`` and a SigV4 ``Signature`` come last
+# -- so the whole list goes rather than its head.
+_AUTH_SCHEME_PARAMS = r"digest|hawk|signature|aws4-hmac-sha256"
+_AUTH_ANY_SCHEME = f"{_AUTH_SCHEME_TOKEN}|{_AUTH_SCHEME_PARAMS}"
+
+# One pattern rather than two, so a long captured value is scanned for the header
+# once. The scheme group in the second branch stays optional so a bare
+# ``Authorization: <token>`` is still covered, and the trailing lookahead is what
+# keeps that optionality honest: without it the engine backtracks to an empty
+# scheme and matches the scheme word itself, which destroyed the scheme and left
+# the credential behind it untouched. That is also what makes the rule idempotent
+# -- re-redacting an already-redacted header used to consume its scheme.
+_AUTH_HEADER_RULE = re.compile(
+    rf"(?i)\b(?P<label>authorization\s*[:=]\s*)(?:"
+    rf"(?P<param_scheme>(?:{_AUTH_SCHEME_PARAMS})\s+)"
+    rf"(?!\[redacted\]){_SECRET_VALUE}(?:\s*,\s*{_SECRET_VALUE})*"
+    rf"|"
+    rf"(?P<token_scheme>(?:{_AUTH_SCHEME_TOKEN})\s+)?"
+    rf"(?!\[redacted\])(?!(?:{_AUTH_ANY_SCHEME})\s){_SECRET_VALUE}"
+    rf")"
+)
+
 
 def _capture_call_input(
     signature: inspect.Signature,
@@ -272,11 +305,7 @@ def _safe_error(exc: BaseException, *, config: _Config) -> str:
 
 def _redact_secret_text(value: str, *, config: _Config) -> str:
     redacted = value
-    redacted = re.sub(
-        r"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?(?!\[redacted\])[^\s,;\)\]\}]+",
-        _redact_labeled_secret_match,
-        redacted,
-    )
+    redacted = _AUTH_HEADER_RULE.sub(_redact_auth_header_match, redacted)
     redacted = re.sub(
         (
             r"(?i)\b(access[_-]?key|api[_-]?key|apikey|auth|client[_-]?secret|credential|credentials|password|"
@@ -365,6 +394,13 @@ def _redact_private_key_blocks(text: str) -> str:
 
 def _redact_labeled_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{match.group(2) or ''}{_REDACTED}"
+
+
+def _redact_auth_header_match(match: re.Match[str]) -> str:
+    """Keep the header label and the auth scheme; replace the credential."""
+
+    scheme = match.group("param_scheme") or match.group("token_scheme") or ""
+    return f"{match.group('label')}{scheme}{_REDACTED}"
 
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:

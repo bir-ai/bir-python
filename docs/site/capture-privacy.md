@@ -30,7 +30,16 @@ as `api_key`, `authorization`, `password`, `secret`, and `token`.
 Captured strings, fallback object representations, and captured error messages
 are also scanned for common secret-like text patterns, including:
 
-- Labeled and Bearer secrets.
+- Labeled secrets (`api_key=…`, `password: …`, and the other names above).
+- `Authorization` headers, in either the `Authorization: …` or `authorization=…`
+  spelling. The authentication scheme is kept and the credential after it is
+  replaced, so `Authorization: Basic dXNlcjpwYXNz` records as
+  `Authorization: Basic [redacted]` — the trace still tells you which
+  authentication the call used. `Bearer`, `Basic`, `Token`, `ApiKey`, `NTLM`,
+  `Negotiate`, and `SSWS` carry a single credential; `Digest`, `Hawk`,
+  `Signature`, and `AWS4-HMAC-SHA256` carry a comma-separated parameter list, and
+  the whole list is replaced because the secret part of it comes last. A header
+  with no scheme at all has its value replaced.
 - `sk-...` tokens and JWTs.
 - AWS access key IDs (`AKIA...` and `ASIA...`).
 - Google API keys (`AIza...`).

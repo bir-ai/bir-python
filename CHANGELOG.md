@@ -8,6 +8,59 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Security
+
+- An `Authorization` header no longer leaks its credential for any scheme other
+  than `Bearer`. RFC 7235 writes the header as a scheme followed by the
+  credential, and the rule named `Bearer` explicitly so it could be preserved.
+  Every other scheme therefore fell into the credential position and was replaced
+  while the credential behind it survived:
+
+  ```
+  Authorization: Bearer abc123secret        -> Authorization: Bearer [redacted]
+  Authorization: Basic YWRtaW46aHVudGVyMg== -> Authorization: [redacted] YWRtaW46aHVudGVyMg==
+  Authorization: Token 9f8e7d6c5b4a32109f8e -> Authorization: [redacted] 9f8e7d6c5b4a32109f8e
+  ```
+
+  The surviving base64 in that second line decodes to `admin:hunter2`. The
+  documentation already told users Bir redacts `authorization`, and this is the
+  one layer the SDK keeps non-disableable.
+
+  Only the text path was affected. A header captured as a mapping key
+  (`{"authorization": "Basic …"}`) went through the whole-value key rule and was
+  always replaced. A header captured as text — one entry in a list of headers,
+  a client library's error message, the `repr` of a request — kept its
+  credential, and those are the ordinary shapes.
+
+  The scheme is now recognized and kept, and the credential after it is replaced,
+  so a trace still records which authentication a call used. `Bearer`, `Basic`,
+  `Token`, `ApiKey`, `NTLM`, `Negotiate`, and `SSWS` carry one credential;
+  `Digest`, `Hawk`, `Signature`, and `AWS4-HMAC-SHA256` carry a comma-separated
+  parameter list, and the whole list is replaced because the secret part of it —
+  a Digest `response`, a SigV4 `Signature` — comes last rather than first. A
+  header with no scheme still has its value replaced, and surrounding text is
+  untouched: a header quoted inside a sentence does not take the sentence with
+  it. `Bearer` is byte-for-byte unchanged.
+
+  Redaction is now idempotent here, which it was not. The optional scheme group
+  could backtrack past the already-redacted guard and consume the scheme, so
+  re-redacting `Authorization: Bearer [redacted]` produced
+  `Authorization: [redacted] [redacted]`. That was reachable: stored experiment
+  rows are re-redacted when read, so `load_experiment()` and `bir experiment-show`
+  destroyed the scheme on every read.
+
+  `tests/fixtures/redaction-cases.json` gains six cases covering the schemes and
+  the idempotence, synced into the `bir` repo with `scripts/fixtures.py sync` as
+  the shared-fixture process requires. The server keeps its own independent
+  redactor against that fixture and has the identical rule, so it needs the same
+  fix; the new cases are what will tell it so.
+
+  Measured no cost: the two rules are one pattern, so a captured value is still
+  scanned for the header once. `capture_redaction` is 30.0 µs/unit against 30.9
+  before and `capture_large_value` 78.8 ms against 78.1, both within noise, and
+  the repeated group over an auth-param list stays linear in the size of the
+  value.
+
 ### Fixed
 
 - Experiment results now survive a process that is stopped without unwinding.

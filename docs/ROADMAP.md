@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,399 lines of runtime source across 19 dependency-free integration modules
+- 17,435 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,627 tests in 47 files at 93.90% branch coverage, with a CI floor, strict
+- 1,637 tests in 47 files at 93.91% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -56,79 +56,17 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Redact the credential in every `Authorization` scheme | P1 | S | A captured auth header stops leaking its secret | — |
 | 2 | Make `bir export-otel` report what it actually exported | P1 | S | A failed export stops looking like a successful one | — |
-| 3 | Recognize credential formats that have become standard | P2 | S | Fine-grained GitHub tokens and connection URIs are redacted | 1 |
+| 3 | Recognize credential formats that have become standard | P2 | S | Fine-grained GitHub tokens and connection URIs are redacted | — |
 | 4 | Keep derived cost from failing the traced call | P3 | XS | The last unguarded raise leaves the recording path | — |
 
-Items 1 and 3 both edit the redaction rules and the shared fixture; doing 1
-first keeps the fixture coordination to one round.
+Item 1, the `Authorization` credential leak, has shipped and is in
+`CHANGELOG.md`. Numbering is kept so the remaining items stay citable. Item 3 no
+longer depends on it, but it edits the same redaction rules and the same shared
+fixture, so it should be read against the code as it now stands rather than
+against the note below.
 
 ## Work item details
-
-### 1. Redact the credential in every `Authorization` scheme
-
-**Why:** The first redaction rule (`src/bir/_capture.py:276`) redacts the wrong
-half of a non-`Bearer` auth header. Measured through `_safe_capture`:
-
-```
-  Authorization: Bearer abc123secret        -> Authorization: Bearer [redacted]
-  Authorization: Basic YWRtaW46aHVudGVyMg== -> Authorization: [redacted] YWRtaW46aHVudGVyMg==
-  Authorization: Token 9f8e7d6c5b4a32109f8e -> Authorization: [redacted] 9f8e7d6c5b4a32109f8e
-  Authorization: ApiKey k-live-abcdefghij   -> Authorization: [redacted] k-live-abcdefghij
-  Authorization: Digest username="admin", response="deadbeef"
-                                            -> Authorization: [redacted] username="admin", response="deadbeef"
-```
-
-The surviving base64 decodes to `admin:hunter2`.
-
-The rule is `(authorization\s*[:=]\s*)(bearer\s+)?…[^\s,;\)\]\}]+`, and
-`_redact_labeled_secret_match` keeps groups 1 and 2 and replaces what follows.
-`Bearer` is named explicitly, so it is preserved and the token after it is
-replaced. Any other scheme is not matched by group 2, so the value pattern —
-which stops at the first space — matches the *scheme word*, and that is what gets
-replaced. The credential is the part left behind.
-
-Only the text path is affected, and it is worth being exact about which shapes
-reach it, because the mapping-key rule is a different rule and it is sound:
-
-```
-  {"authorization": "Basic YWRtaW46aHVudGVyMg=="}   -> {"authorization": "[redacted]"}      safe
-  {"headers": ["Authorization: Basic YWRtaW46…"]}   -> ["Authorization: [redacted] YWRtaW46…"]
-  "request failed: Authorization: Basic YWRtaW46…"  -> "request failed: Authorization: [redacted] YWRtaW46…"
-```
-
-A header captured as a dict key is replaced whole. A header captured as text — in
-a list of headers, inside an error message, or in the `repr` of a request object —
-keeps its credential. Those are the ordinary shapes: a client library's exception
-string and a captured request are both text.
-
-`docs/site/capture-privacy.md:27` tells users Bir redacts `authorization`. This
-is a broken promise rather than a coverage gap, and it lands in the one layer the
-guardrails require to stay non-disableable.
-
-No test pins the current behavior. Of the seventeen `Authorization` references
-under `tests/`, fifteen use `Bearer` — including
-`{"headers": ["Authorization: Bearer sk-input-header"]}` at
-`tests/test_sdk.py:4958`, which is exactly the leaking shape, tested with the one
-scheme that works. The other two assert the mapping-key rule. The shared
-fixture's single case is `authorization-bearer-header`. This fills a gap; it
-reverses nothing.
-
-**Scope:**
-
-- Redact the credential for any scheme, not only `Bearer`, keeping the scheme
-  itself readable — a trace that says `Basic` or `Digest` is worth more than one
-  that says `[redacted]`.
-- Keep `Bearer` byte-for-byte as it is; it is in the shared fixture.
-- Cover the `authorization=` spelling as well as `authorization:`, since both
-  reach the same rule.
-- Fixture cases for the schemes above. `tests/fixtures/redaction-cases.json` is
-  the parity contract with `bir-app`, so adding cases needs the coordinated
-  change the guardrails call for.
-
-**Done when:** for every common scheme, the credential is replaced and the scheme
-survives, and the redaction fixture covers more than `Bearer`.
 
 ### 2. Make `bir export-otel` report what it actually exported
 
@@ -208,9 +146,10 @@ in `postgres://admin:hunter2@…` is not. Connection strings reach traces throug
 config objects and through the error messages of the client libraries that raise
 them.
 
-Unlike item 1 this is a coverage gap, not a broken promise:
-`docs/site/capture-privacy.md` enumerates exactly what is covered and warns that
-redaction is best-effort. That is why it sits below item 1 and not beside it.
+Unlike the shipped `Authorization` item this is a coverage gap, not a broken
+promise: `docs/site/capture-privacy.md` enumerates exactly what is covered and
+warns that redaction is best-effort. That is why it is a P2 and that one was a
+P1.
 
 **Scope:**
 
@@ -260,9 +199,10 @@ cheap to close and it stops the invariant from being true only by accident.
 
 ## Sequencing
 
-Items 1, 2, and 4 depend on nothing and can go in any order. Item 3 touches the
-same rules and the same shared fixture as item 1, so running it after 1 keeps the
-`bir-app` coordination to a single round.
+Nothing that is left depends on anything else, so items 2, 3, and 4 can go in any
+order. Item 3 changes the shared redaction fixture again, which means another
+`scripts/fixtures.py sync` and another paired commit in the `bir` repo; that is
+the only coordination cost remaining on this list.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -287,8 +227,9 @@ rule, reporting events whose trace root is missing, reclaiming a framework run
 whose end callback never arrived, reading a damaged experiment store with
 `--skip-invalid`, compacting the upload sidecar on prune, streaming
 `bir export-otel`, attaching the log-correlation filter where propagated records
-are seen, reporting rather than raising a failed trace-store write, and flushing
-each finished example's result row so an interrupted experiment keeps it.
+are seen, reporting rather than raising a failed trace-store write, flushing
+each finished example's result row so an interrupted experiment keeps it, and
+redacting the credential rather than the scheme in an `Authorization` header.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence. Note that item 2 above is not a reopening of streaming
 `bir export-otel`: that item was about the memory the export holds, this one is
@@ -338,9 +279,11 @@ Five areas were checked and found sound, so they need no item:
 - Rotation. Forty traces against `max_bytes=4000, backup_count=3` produced four
   files, and `--include-rotated` agreed across commands: `bir traces` and
   `bir stats` both reported 20 traces with it and 5 without.
-- Redaction of the formats it does claim. Fourteen of the twenty credential
-  shapes swept were replaced, including the AWS, Google, Slack, Stripe, JWT,
-  classic GitHub, PEM, and Luhn-checked card cases.
+- Redaction of the formats it does claim. Fifteen of the twenty credential shapes
+  swept are replaced, including the AWS, Google, Slack, Stripe, JWT, classic
+  GitHub, PEM, and Luhn-checked card cases, and the auth headers the shipped item
+  above repaired. The five that survive are the two in item 3 and the three
+  declined below.
 - The documented capture path against values JSON cannot hold.
   `set_output(float("inf"))` records `'inf'`, `set_output(b"bytes")` and an
   arbitrary object record their `repr`, and a `set` records a list. No event was

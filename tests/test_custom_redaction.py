@@ -262,6 +262,156 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
         self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
 
 
+class AuthorizationHeaderRedactionTests(unittest.TestCase):
+    """Which half of an ``Authorization`` header is the secret.
+
+    RFC 7235 writes the header as a scheme and the credential after it. Only the
+    credential is secret, and the scheme is worth keeping: a trace saying
+    ``Basic`` tells you which authentication a call used. The rule used to name
+    ``Bearer`` alone, so every other scheme fell into the credential position and
+    was replaced while the credential behind it survived -- ``Basic`` leaking the
+    base64 of a username and password.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_token_schemes_keep_the_scheme_and_lose_the_credential(self) -> None:
+        for scheme in ("Bearer", "Basic", "Token", "ApiKey", "Api-Key", "NTLM", "Negotiate", "SSWS"):
+            with self.subTest(scheme=scheme):
+                self.assertEqual(
+                    _redact_secret_text(f"Authorization: {scheme} YWRtaW46aHVudGVyMg=="),
+                    f"Authorization: {scheme} [redacted]",
+                )
+
+    def test_scheme_matching_ignores_case(self) -> None:
+        self.assertEqual(_redact_secret_text("authorization: basic QQ=="), "authorization: basic [redacted]")
+
+    def test_parameterized_schemes_lose_the_whole_auth_param_list(self) -> None:
+        # A Digest ``response`` and a SigV4 ``Signature`` are the secret and come
+        # last, so redacting only the head of the list would leave them behind.
+        for header, secret in (
+            ('Digest username="admin", response="deadbeef"', "deadbeef"),
+            ('Hawk id="dh37f", ts="1353832234", mac="6R4rV5iE"', "6R4rV5iE"),
+            ("AWS4-HMAC-SHA256 Credential=AK/20260807, SignedHeaders=host, Signature=abc9", "abc9"),
+        ):
+            with self.subTest(header=header):
+                scheme = header.split(" ", 1)[0]
+                redacted = _redact_secret_text(f"Authorization: {header}")
+                self.assertEqual(redacted, f"Authorization: {scheme} [redacted]")
+                self.assertNotIn(secret, redacted)
+
+    def test_a_credential_with_no_scheme_is_still_redacted(self) -> None:
+        self.assertEqual(_redact_secret_text("Authorization: rawtokenvalue123"), "Authorization: [redacted]")
+
+    def test_the_assignment_spelling_is_covered(self) -> None:
+        self.assertEqual(
+            _redact_secret_text("authorization=Basic YWRtaW46aHVudGVyMg=="),
+            "authorization=Basic [redacted]",
+        )
+
+    def test_surrounding_text_survives(self) -> None:
+        # The credential ends at whitespace or closing punctuation, so a header
+        # quoted inside a sentence must not take the sentence with it.
+        for text, expected in (
+            (
+                "curl -H 'Authorization: Basic YWRtaW4=' https://api.example.com",
+                "curl -H 'Authorization: Basic [redacted] https://api.example.com",
+            ),
+            (
+                "request failed: Authorization: Basic YWRtaW4=, retrying in 5s",
+                "request failed: Authorization: Basic [redacted], retrying in 5s",
+            ),
+            (
+                "HTTP 401 (Authorization: Bearer tok9) rejected",
+                "HTTP 401 (Authorization: Bearer [redacted]) rejected",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_redact_secret_text(text), expected)
+
+    def test_redacting_twice_changes_nothing(self) -> None:
+        # An optional scheme group that can backtrack past the already-redacted
+        # guard used to consume the scheme on a second pass, turning
+        # ``Bearer [redacted]`` into ``[redacted] [redacted]``. Values are
+        # re-redacted on the way back out of an experiment store, so this ran on
+        # every read.
+        for header in (
+            "Authorization: Bearer abc123def456",
+            "Authorization: Basic YWRtaW46aHVudGVyMg==",
+            'Authorization: Digest username="admin", response="deadbeef"',
+            "Authorization: rawtokenvalue123",
+        ):
+            with self.subTest(header=header):
+                once = _redact_secret_text(header)
+                self.assertEqual(_redact_secret_text(once), once)
+
+    def test_scheme_survives_a_round_trip_through_an_experiment_store(self) -> None:
+        from bir.evals import load_experiment
+
+        with temporary_workdir() as workdir:
+            configure(capture_inputs=True, capture_outputs=True)
+            result_path = workdir / "experiment.jsonl"
+            run_experiment(
+                "auth",
+                dataset=[DatasetExample(id="q0", input={"headers": "Authorization: Basic YWRtaW46aHVudGVyMg=="})],
+                task=lambda headers: headers,
+                evaluators=[exact_match("x")],
+                path=result_path,
+            )
+
+            raw = result_path.read_text(encoding="utf-8")
+            self.assertNotIn("YWRtaW46aHVudGVyMg==", raw)
+            loaded = load_experiment(result_path)
+            self.assertEqual(loaded.results[0].input, {"headers": "Authorization: Basic [redacted]"})
+
+    def test_credential_is_gone_from_the_trace_file(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+
+            @observe(name="call")
+            def call(headers: dict[str, str]) -> str:
+                return 'Authorization: Digest username="admin", response="deadbeef"'
+
+            call({"Authorization": "Basic YWRtaW46aHVudGVyMg=="})
+
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("YWRtaW46aHVudGVyMg==", raw)
+            self.assertNotIn("deadbeef", raw)
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertEqual(event["output"], "Authorization: Digest [redacted]")
+
+    def test_cost_stays_linear_in_the_size_of_the_auth_param_list(self) -> None:
+        # The parameterized branch repeats over a comma-separated list, so it is
+        # the one group in this rule that could backtrack. Timed against prose of
+        # the same length so the bound calibrates itself to the machine.
+        length = 128_000
+        params = "Authorization: Digest " + ", ".join(f'k{index}="v{index}"' for index in range(length // 12))
+        params = params[:length]
+        prose = ("lorem ipsum dolor sit amet consectetur " * (length // 39))[:length]
+
+        def best_seconds(text: str) -> float:
+            timings = []
+            for _ in range(5):
+                started = time.perf_counter()
+                _redact_secret_text(text)
+                timings.append(time.perf_counter() - started)
+            return min(timings)
+
+        baseline = best_seconds(prose)
+        listed = best_seconds(params)
+        self.assertLess(
+            listed,
+            baseline * 10,
+            f"redacting a {length}-character auth-param list took {listed:.3f}s against {baseline:.3f}s "
+            f"for the same length of prose; the repeated group is not linear in value size",
+        )
+
+
 class PrivateKeyBlockPairingTests(unittest.TestCase):
     """How a header is paired with a footer, and what that pairing costs.
 
