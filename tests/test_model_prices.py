@@ -284,6 +284,120 @@ class ModelPriceCostFillTests(unittest.TestCase):
             self.assertEqual(event["cost"], {"input_cost": 0.000005 * 10})
 
 
+class DerivedCostOverflowTests(unittest.TestCase):
+    """A cost that cannot be represented is left off, not raised at the caller.
+
+    Every price and token count here passes the validation it is given: the
+    configured rates are finite and non-negative, and so are the token counts.
+    Only the arithmetic between them leaves the representable range. Deriving a
+    cost is bookkeeping about the call rather than part of it, so an
+    unrepresentable one is dropped the way a failed write is -- the traced
+    function keeps its result either way.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_a_product_that_overflows_leaves_cost_unset(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(model_prices={"m": {"input": 1e308, "output": 1e308}})
+
+            @observe()
+            def answer() -> str:
+                with generation("chat", model="m") as gen:
+                    gen.set_usage(input_tokens=1000, output_tokens=1000)
+                return "business result"
+
+            self.assertEqual(answer(), "business result")
+
+            event = generation_events(workdir)["chat"]
+            self.assertNotIn("cost", event)
+            self.assertEqual(event["status"], "success")
+
+    def test_a_total_that_overflows_leaves_cost_unset(self) -> None:
+        # Each side stays finite here; only their sum does not, which is the
+        # total ``set_cost`` derives rather than one it was handed.
+        with temporary_workdir() as workdir:
+            configure(model_prices={"m": {"input": 1e305, "output": 1e305}})
+
+            @observe()
+            def answer() -> str:
+                with generation("chat", model="m") as gen:
+                    gen.set_usage(input_tokens=1000, output_tokens=1000)
+                return "business result"
+
+            self.assertEqual(answer(), "business result")
+
+            event = generation_events(workdir)["chat"]
+            self.assertNotIn("cost", event)
+
+    def test_a_huge_integer_price_is_still_recorded(self) -> None:
+        # Python ints are unbounded, so this one is finite and representable and
+        # must not be mistaken for an overflow. It is also why the finiteness
+        # check cannot be ``math.isfinite``, which raises on an int this large.
+        with temporary_workdir() as workdir:
+            configure(model_prices={"m": {"input": 10**400}})
+
+            @observe()
+            def answer() -> None:
+                with generation("chat", model="m") as gen:
+                    gen.set_usage(input_tokens=2)
+
+            answer()
+
+            event = generation_events(workdir)["chat"]
+            self.assertEqual(event["cost"], {"input_cost": 2 * 10**400})
+
+    def test_ordinary_prices_are_unaffected(self) -> None:
+        with temporary_workdir() as workdir:
+            configure(model_prices={"m": {"input": 0.000005, "output": 0.000015}})
+
+            @observe()
+            def answer() -> None:
+                with generation("chat", model="m") as gen:
+                    gen.set_usage(input_tokens=10, output_tokens=20)
+
+            answer()
+
+            event = generation_events(workdir)["chat"]
+            self.assertEqual(
+                event["cost"],
+                {
+                    "input_cost": 0.000005 * 10,
+                    "output_cost": 0.000015 * 20,
+                    "total_cost": 0.000005 * 10 + 0.000015 * 20,
+                },
+            )
+
+    def test_an_explicit_set_cost_still_rejects_an_unrepresentable_total(self) -> None:
+        # The other half of the rule: a caller who passes the values is calling a
+        # documented setter, and a total that cannot be represented is a
+        # programming error rather than bookkeeping.
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("chat", model="m") as gen:
+                    gen.set_cost(input_cost=1.5e308, output_cost=1.5e308)
+
+            with self.assertRaisesRegex(ValueError, "bir total_cost must be finite"):
+                answer()
+
+    def test_an_explicit_set_usage_still_rejects_an_unrepresentable_total(self) -> None:
+        with temporary_workdir():
+
+            @observe()
+            def answer() -> None:
+                with generation("chat", model="m") as gen:
+                    gen.set_usage(input_tokens=1.5e308, output_tokens=1.5e308)
+
+            with self.assertRaisesRegex(ValueError, "bir total_tokens must be finite"):
+                answer()
+
+
 class ModelPriceValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         _reset_config_for_tests()

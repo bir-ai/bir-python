@@ -280,6 +280,15 @@ time, so a bad rate, unknown key, invalid currency, or non-mapping table raises
 immediately. Passing `model_prices` replaces the previous table (an empty mapping
 clears it); with no table configured, cost behavior is unchanged.
 
+A rate and a token count are each validated, but their product is not bounded, so
+a large enough pair multiplies — or adds up — to a number that cannot be
+represented. Deriving a cost is bookkeeping about the call rather than part of
+it, so when that happens the generation is recorded with no cost instead of
+raising at the caller, the same rule a store that cannot be written follows. An
+explicit `set_cost()` still raises: there the values came from the caller, and a
+total that cannot be represented is a mistake worth reporting rather than
+absorbing. `set_usage()` treats an unrepresentable `total_tokens` the same way.
+
 ## When the trace store cannot be written
 
 Recording is bookkeeping about a call, not part of it, so a store Bir cannot

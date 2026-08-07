@@ -36,6 +36,7 @@ from . import _storage as _storage_helpers
 from ._config import (
     _Config,
     _config_from_env,
+    _is_finite_number,
     _ModelPrice,
     _retrieval_document_from_mapping,
     _validate_additional_redaction_patterns,
@@ -1711,7 +1712,12 @@ class _Generation:
         if total_tokens is not None:
             usage["total_tokens"] = _validate_non_negative_number(total_tokens, "total_tokens")
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
-            usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            # Validated like a supplied total: two finite counts can still add up
+            # to infinity, and an unchecked sum reaches the writer, where the
+            # event fails to serialize and is dropped with the store blamed for it.
+            usage["total_tokens"] = _validate_non_negative_number(
+                usage["input_tokens"] + usage["output_tokens"], "total_tokens"
+            )
         self.usage = usage
 
     def set_cost(
@@ -1733,7 +1739,9 @@ class _Generation:
         if total_cost is not None:
             cost["total_cost"] = _validate_non_negative_number(total_cost, "total_cost")
         if total_cost is None and input_cost is not None and output_cost is not None:
-            cost["total_cost"] = cost["input_cost"] + cost["output_cost"]
+            # Validated like a supplied total, for the same reason as the token
+            # sum above: two finite costs can add up to infinity.
+            cost["total_cost"] = _validate_non_negative_number(cost["input_cost"] + cost["output_cost"], "total_cost")
         validated_currency = _validate_currency(currency)
         self.cost = cost
         self.currency = validated_currency
@@ -1761,6 +1769,15 @@ class _Generation:
         input_cost = price.input * input_tokens if price.input is not None and input_tokens is not None else None
         output_cost = price.output * output_tokens if price.output is not None and output_tokens is not None else None
         if input_cost is None and output_cost is None:
+            return
+        # A finite price and a finite token count can still multiply, or add up,
+        # to infinity, and ``set_cost`` rejects that -- correctly, for a caller who
+        # passed it. Here nobody passed anything: the cost was derived from
+        # configuration, and deriving it is bookkeeping about the call rather than
+        # part of it. So an unrepresentable cost is left off the event instead of
+        # raised at the caller, which is the same rule a failed write follows.
+        derived = [value for value in (input_cost, output_cost) if value is not None]
+        if not all(_is_finite_number(value) for value in derived) or not _is_finite_number(sum(derived)):
             return
         self.set_cost(input_cost=input_cost, output_cost=output_cost, currency=price.currency)
 

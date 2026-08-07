@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,609 lines of runtime source across 19 dependency-free integration modules
+- 17,639 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,664 tests in 47 files at 93.93% branch coverage, with a CI floor, strict
+- 1,670 tests in 47 files at 93.94% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -54,61 +54,29 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| 4 | Keep derived cost from failing the traced call | P3 | XS | The last unguarded raise leaves the recording path | — |
+Nothing is open. Every item from this audit has shipped and is in
+`CHANGELOG.md`: the `Authorization` credential leak, the export that reported
+success without exporting anything, the credential formats redaction did not
+recognize, the `Cookie` header, and the derived cost that could fail the call it
+was recording.
 
-Everything else has shipped and is in `CHANGELOG.md`: the `Authorization`
-credential leak, the export that reported success without exporting anything, the
-credential formats redaction did not recognize, and the `Cookie` header. The
-numbering is kept so the one that is left stays citable.
+Two things are worth carrying into the next audit rather than losing with the
+list.
 
-Redaction is now the audited part of the SDK with the most work behind it. Four
-of the five shipped items were in it, and each was found by the same sweep rather
-than by a report, so the next audit should treat one sweep as one sample and not
-as a clean bill.
+Redaction was where the work was: four of the five items were in it, and every
+one was found by the same twenty-format sweep rather than by a report. One sweep
+is one sample, not a clean bill.
 
-## Work item details
-
-### 4. Keep derived cost from failing the traced call
-
-**Why:** `_Generation.__exit__` calls `_fill_cost_from_prices()`
-(`src/bir/_sdk.py:1637`) before it builds the event, outside the guard that keeps
-a recording failure away from the caller. `configure(model_prices=...)` validates
-each price is finite and non-negative — it correctly rejects a negative, `inf`, or
-non-numeric price — but the *product* of a price and a token count is not
-bounded, and `set_cost` rejects the `inf` it produces. Measured:
-
-```
-  configure(model_prices={"m": {"input": 1e308, "output": 1e308}})
-  @observe def chat(): … set_usage(input_tokens=1000, output_tokens=1000)
-
-  chat() -> ValueError: bir input_cost must be finite
-```
-
-The traced function loses its return value to an exception raised by the
-bookkeeping about it. A price of `1e305` stays finite and records normally, so
-the threshold is absurd and no real price table reaches it.
-
-The reason to fix it anyway is that the invariant is now explicit. The previous
-release established that a store that cannot be written must not decide whether
-a call succeeded, and `_write_event` is wrapped accordingly; this is the one
-remaining path in the exit sequence that can still raise into the caller. It is
-cheap to close and it stops the invariant from being true only by accident.
-
-**Scope:**
-
-- Derive no cost rather than raising when the product is not finite.
-- Keep an explicit `set_cost()` raising: that is a caller passing bad values to a
-  documented setter, which is a programming error and not bookkeeping.
-
-**Done when:** no price table and token count can make a traced call raise, and
-`set_cost()` still validates as it does today.
+Three of the five items grew once they were measured. The `Authorization` fix
+also had to make redaction idempotent, the `Cookie` and connection-URI rules were
+one item that turned out to be two defects with different shapes, and the derived
+cost turned out to share a root with two unvalidated sums that were dropping whole
+events. An item's Why is where the evidence stops, not where the defect does.
 
 ## Sequencing
 
-One item is left and it depends on nothing. It touches nothing outside
-`src/bir/_sdk.py`, so no cross-repo coordination remains on this list.
+Nothing is queued. The next list has to be re-derived from the code rather than
+continued from this one.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -136,9 +104,10 @@ whose end callback never arrived, reading a damaged experiment store with
 are seen, reporting rather than raising a failed trace-store write, flushing
 each finished example's result row so an interrupted experiment keeps it,
 redacting the credential rather than the scheme in an `Authorization` header,
-reporting a failed OTLP export instead of counting the spans it built, and
-redacting fine-grained GitHub tokens, the password inside a connection URI, and
-the values in a `Cookie` or `Set-Cookie` header.
+reporting a failed OTLP export instead of counting the spans it built, redacting
+fine-grained GitHub tokens, the password inside a connection URI, and the values
+in a `Cookie` or `Set-Cookie` header, and leaving an unrepresentable derived cost
+off an event rather than raising it at the caller.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence. The two entries about `bir export-otel` are separate pieces of work and
 neither reopens the other: streaming was about the memory the export holds, and
@@ -162,6 +131,10 @@ This audit looked at five more things and declined them:
   breadth of that `except Exception` is deliberate and documented
   (`src/bir/_sdk.py:2025`); only the wording of the diagnosis is wrong, and the
   path is reachable only through the bypass above, so it rides on that decision.
+  That last claim is now load-bearing rather than incidental: the derived-cost
+  item closed the two routes to it that did *not* need the bypass, an
+  unvalidated `total_cost` and an unvalidated `total_tokens`, both of which were
+  dropping whole events and blaming the store for it.
 - Redacting personal data. Emails and government identifiers pass through
   unchanged. That matches the documented scope, which is credentials, and
   redacting every email would destroy legitimate trace content.

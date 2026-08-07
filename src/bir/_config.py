@@ -188,6 +188,19 @@ def _validate_number(value: Any, field: str) -> int | float:
     return value
 
 
+def _is_finite_number(value: int | float) -> bool:
+    """Whether :func:`_validate_number` would accept ``value`` as finite.
+
+    Mirrors the check inside it so a caller can ask the question without having
+    to catch the exception. Only a float can be ``inf`` or ``nan``; a Python int
+    is unbounded and always finite, which is also why this cannot be
+    ``math.isfinite`` -- that raises ``OverflowError`` on an int too large to
+    convert to a float, and such an int is a perfectly recordable number.
+    """
+
+    return not (isinstance(value, float) and not math.isfinite(value))
+
+
 def _validate_non_negative_number(value: Any, field: str) -> int | float:
     numeric_value = _validate_number(value, field)
     if numeric_value < 0:

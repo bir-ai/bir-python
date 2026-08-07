@@ -10,6 +10,41 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A derived cost can no longer fail the call it was recording. `configure(model_prices=...)`
+  validates every rate as finite and non-negative, and `set_usage()` validates
+  every token count the same way, but the arithmetic between them was not
+  bounded. Measured:
+
+  ```
+  configure(model_prices={"m": {"input": 1e308, "output": 1e308}})
+  @observe def chat(): … set_usage(input_tokens=1000, output_tokens=1000)
+
+  chat() -> ValueError: bir input_cost must be finite
+  ```
+
+  The traced function lost its return value to an exception raised by the
+  bookkeeping about it. This was the last path in the generation exit sequence
+  that could still raise at the caller; the store write beside it has been
+  wrapped since the previous release. An unrepresentable derived cost is now left
+  off the event instead, which is the rule that already applied to a store that
+  cannot be written.
+
+  Two smaller things came out of the same measurement, both of which lost a whole
+  event rather than raising. `set_cost()` and `set_usage()` derive `total_cost`
+  and `total_tokens` by adding the two sides they were given, and neither sum was
+  validated — so two finite costs adding to infinity produced an event that could
+  not be serialized, which was then reported as the *trace store* failing, since
+  that is where the failure surfaced. Both sums are now validated like a supplied
+  total. An explicit `set_cost()` or `set_usage()` therefore still raises, which
+  is right: those values came from the caller, and a total that cannot be
+  represented is a mistake worth reporting rather than absorbing. Only the
+  derived path, where nobody passed anything, stays silent.
+
+  The finiteness check deliberately is not `math.isfinite`. A Python int is
+  unbounded and always finite, and `math.isfinite` raises `OverflowError` on one
+  too large to convert to a float — so a price of `10**400` would have crashed
+  the check that exists to prevent crashes. It is recorded normally.
+
 - `bir export-otel` no longer reports success when it exported nothing. Measured
   against an endpoint with nothing listening, and again against a server
   answering every POST with HTTP 500:
