@@ -8,6 +8,54 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Fixed
+
+- `bir export-otel` no longer reports success when it exported nothing. Measured
+  against an endpoint with nothing listening, and again against a server
+  answering every POST with HTTP 500:
+
+  ```
+  $ bir export-otel --endpoint http://127.0.0.1:9/v1/traces --json
+  { "endpoint": "…", "spans": 8, "traces": 4 }
+  exit=0
+  ```
+
+  Zero spans were delivered in either run, and the default run against the dead
+  endpoint spent 58 seconds retrying before printing that. `bir send`, which
+  exists to do the same job, already reported both failures correctly with a
+  non-zero exit.
+
+  Three things dropped the failure. `SimpleSpanProcessor` calls the exporter once
+  per span and discards the `SpanExportResult`; `TracerProvider.force_flush`
+  returns a bool nobody read; and the reported number counted spans *built*, so
+  it was the same whether or not anything arrived — which also made the
+  documented "number of spans exported" describe something the function did not
+  measure.
+
+  The exporter's own answers are now counted. `bir export-otel` reports the spans
+  the endpoint accepted, and an export that did not deliver everything exits
+  non-zero with a message naming the endpoint and how much arrived, writing
+  nothing to stdout so a pipeline reading the `--json` contract never sees a span
+  count for spans that are not there. A partial delivery is a failure too.
+
+  `export_traces_to_otlp()` now returns the accepted count and raises
+  `RuntimeError` on an incomplete export. Its signature is unchanged. Exporting
+  is an operation invoked for its effect, so this is the rule `send_events`,
+  `prune`, and the loaders already follow, and it is the only way a caller
+  replaying a store into a collector can learn the data did not arrive.
+
+  A batch counts as delivered unless the exporter *said* it failed. OpenTelemetry
+  asks `export` to return a `SpanExportResult`, but an exporter that returns
+  something else is not evidence of a failure, and reporting one would break a
+  working pipeline over a technicality the OpenTelemetry SDK itself ignores. Only
+  a stated failure — what the OTLP exporter returns once its retries are
+  exhausted — is treated as one. `force_flush` is still called, but its result is
+  not the signal: with `SimpleSpanProcessor` the spans are already exported
+  synchronously, so it answers `True` without consulting the exporter.
+
+  Measured cost: `export_otel` 82.4 µs/unit against 81.0 before, one delegation
+  per span, with peak memory unchanged at 363 KiB.
+
 ### Security
 
 - An `Authorization` header no longer leaks its credential for any scheme other

@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,435 lines of runtime source across 19 dependency-free integration modules
+- 17,527 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,637 tests in 47 files at 93.91% branch coverage, with a CI floor, strict
+- 1,646 tests in 47 files at 93.92% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -56,71 +56,16 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 2 | Make `bir export-otel` report what it actually exported | P1 | S | A failed export stops looking like a successful one | — |
 | 3 | Recognize credential formats that have become standard | P2 | S | Fine-grained GitHub tokens and connection URIs are redacted | — |
 | 4 | Keep derived cost from failing the traced call | P3 | XS | The last unguarded raise leaves the recording path | — |
 
-Item 1, the `Authorization` credential leak, has shipped and is in
-`CHANGELOG.md`. Numbering is kept so the remaining items stay citable. Item 3 no
-longer depends on it, but it edits the same redaction rules and the same shared
-fixture, so it should be read against the code as it now stands rather than
-against the note below.
+Both P1s have shipped and are in `CHANGELOG.md`: the `Authorization` credential
+leak and the export that reported success without exporting anything. Numbering
+is kept so the remaining items stay citable. Item 3 edits the same redaction
+rules the shipped `Authorization` fix touched, so it should be read against the
+code as it now stands.
 
 ## Work item details
-
-### 2. Make `bir export-otel` report what it actually exported
-
-**Why:** The command reports success when nothing reaches the endpoint. Measured
-against an endpoint with nothing listening, and again against a server answering
-every POST with HTTP 500:
-
-```
-  $ bir export-otel --endpoint http://127.0.0.1:9/v1/traces --timeout 1 --json
-  { "endpoint": "…", "spans": 8, "traces": 4 }
-  exit=0
-
-  # stderr, from the OTel SDK's own logger:
-  #   Failed to export span batch due to timeout, max retries or shutdown.
-```
-
-Zero spans were delivered in either run. The default run against the dead
-endpoint spent 58 seconds retrying and still printed
-`exported 4 trace(s) (8 spans)` and exited 0.
-
-`bir send`, which has the same job, gets this right against the same server:
-
-```
-  $ bir send --server http://127.0.0.1:8931
-  bir: bir server rejected event batch with HTTP 500:
-  exit=1
-```
-
-Three things drop the failure. `src/bir/integrations/otel.py:192` discards the
-bool from `provider.force_flush()`. `SimpleSpanProcessor` discards each
-`SpanExportResult`. And `exported` counts spans handed to the tracer, so the
-number is spans *built*, not spans accepted — which also makes the docstring at
-`otel.py:104`, "Returns the number of spans exported", describe something the
-function does not measure.
-
-The cost lands on exactly the use this command exists for. Replaying a local
-store into a collector is a scripted, one-shot operation, and `{traces, spans}`
-plus the exit code is the whole machine-readable contract
-(`docs/site/cli-env.md:226`) a CI job or migration script has to decide whether
-its data arrived.
-
-**Scope:**
-
-- Detect a failed export and report it: a non-zero exit and a message naming the
-  endpoint, matching what `bir send` already does.
-- Report delivered spans rather than built spans, or rename the field and fix the
-  docstring so the number means what it says.
-- Cover the public `export_traces_to_otlp` too — the CLI is a thin wrapper, and
-  its return value carries the same claim.
-- A test with an injected exporter that fails, asserting the failure is visible
-  in both the exit code and the JSON output.
-
-**Done when:** an export that delivers nothing exits non-zero and says so, and
-the reported span count never exceeds what the exporter accepted.
 
 ### 3. Recognize credential formats that have become standard
 
@@ -199,10 +144,10 @@ cheap to close and it stops the invariant from being true only by accident.
 
 ## Sequencing
 
-Nothing that is left depends on anything else, so items 2, 3, and 4 can go in any
-order. Item 3 changes the shared redaction fixture again, which means another
-`scripts/fixtures.py sync` and another paired commit in the `bir` repo; that is
-the only coordination cost remaining on this list.
+Neither of the two left depends on the other. Item 3 changes the shared redaction
+fixture again, which means another `scripts/fixtures.py sync` and another paired
+commit in the `bir` repo; that is the only coordination cost remaining on this
+list. Item 4 touches nothing outside `src/bir/_sdk.py`.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -228,12 +173,13 @@ whose end callback never arrived, reading a damaged experiment store with
 `--skip-invalid`, compacting the upload sidecar on prune, streaming
 `bir export-otel`, attaching the log-correlation filter where propagated records
 are seen, reporting rather than raising a failed trace-store write, flushing
-each finished example's result row so an interrupted experiment keeps it, and
-redacting the credential rather than the scheme in an `Authorization` header.
+each finished example's result row so an interrupted experiment keeps it,
+redacting the credential rather than the scheme in an `Authorization` header, and
+reporting a failed OTLP export instead of counting the spans it built.
 Regressions in those areas are bugs; new scope requires a new issue with current
-evidence. Note that item 2 above is not a reopening of streaming
-`bir export-otel`: that item was about the memory the export holds, this one is
-about whether it tells the truth.
+evidence. The two entries about `bir export-otel` are separate pieces of work and
+neither reopens the other: streaming was about the memory the export holds, and
+the delivery report was about whether it tells the truth.
 
 This audit looked at five more things and declined them:
 

@@ -725,8 +725,14 @@ def _cmd_export_otel(args: argparse.Namespace) -> int:
     except ImportError as exc:
         print(f"bir: {exc}", file=sys.stderr)
         return 1
-    if skipped is not None:
-        skipped.report()
+    finally:
+        # Also reported when the export failed part-way through, because damaged
+        # lines are what ``--skip-invalid`` was asked to surface and the failure
+        # does not make them less true. An export that did not deliver everything
+        # raises RuntimeError, which ``main`` already reports as ``bir: …`` with a
+        # non-zero exit, exactly as it does for ``bir send``.
+        if skipped is not None:
+            skipped.report()
     if args.json:
         _dump_json({"traces": counts.traces, "spans": counts.spans, "endpoint": args.endpoint}, sys.stdout)
         return 0

@@ -101,7 +101,17 @@ def export_traces_to_otlp(
     exporter) and by callers who need a different transport. An injected exporter
     is owned by the caller and is not shut down here.
 
-    Returns the number of spans exported (one per Bir event across all traces).
+    Returns the number of spans the exporter accepted (one per Bir event across
+    all traces when everything arrives).
+
+    Raises :class:`RuntimeError` when the exporter did not accept every span,
+    naming the endpoint and how much of the export arrived. Exporting is an
+    operation invoked for its effect, like
+    ``send_events`` and ``prune``, so a failure to produce that effect is raised
+    rather than reported — a caller replaying a store into a collector has no
+    other way to learn the data is not there. The count previously returned was
+    the number of spans *built*, which stayed the same whether or not anything
+    reached the endpoint.
 
     Raises :class:`ImportError` with an actionable message when the ``otel`` extra
     is not installed.
@@ -120,12 +130,13 @@ def export_traces_to_otlp(
 
 @dataclass(frozen=True)
 class _ExportCounts:
-    """How much one export covered: whole traces read, and spans emitted.
+    """How much one export delivered: whole traces read, and spans accepted.
 
     :func:`export_traces_to_otlp` returns the span count alone, which is its
     documented contract. The CLI reports both, and counting the traces itself
     would mean a third pass over the store, so the internal entry point returns
-    the pair.
+    the pair. Both are only ever produced by an export that fully succeeded; a
+    partial one raises instead, so neither number can overstate what arrived.
     """
 
     traces: int
@@ -158,7 +169,11 @@ def _export_traces(
     context = _resolve_resource_context(reader.roots(), environment)
 
     owns_exporter = span_exporter is None
-    exporter = span_exporter if span_exporter is not None else _build_default_exporter(endpoint, headers, timeout)
+    delivered = _CountingExporter(
+        span_exporter if span_exporter is not None else _build_default_exporter(endpoint, headers, timeout),
+        failure=api.SpanExportResult.FAILURE,
+    )
+    exporter = delivered
 
     resource_attributes: dict[str, Any] = {api.SERVICE_NAME: service_name}
     if context.environment is not None:
@@ -171,7 +186,7 @@ def _export_traces(
     tracer = provider.get_tracer("bir")
 
     try:
-        exported = 0
+        built = 0
         trace_count = 0
         # Second pass: each trace is built, exported, and released before the
         # next one is read.
@@ -182,13 +197,18 @@ def _export_traces(
             # Resource and adds nothing to the spans themselves.
             span_environment = _trace_environment(trace.root) if context.per_span_environment else None
             span_source = _trace_source(trace.root) if context.per_span_source else None
-            exported += _export_one_trace(
+            built += _export_one_trace(
                 trace,
                 tracer=tracer,
                 api=api,
                 span_environment=span_environment,
                 span_source=span_source,
             )
+        # Kept because it is how a processor is told the batch is over. Its
+        # return value is not the delivery signal: ``SimpleSpanProcessor``
+        # exports synchronously in ``on_end``, so by here there is nothing left
+        # to flush and it answers ``True`` without consulting the exporter. What
+        # the exporter accepted is counted below instead.
         provider.force_flush()
     finally:
         # Only tear down the provider (and, through it, the exporter) when we
@@ -196,7 +216,22 @@ def _export_traces(
         # caller, so we leave it open for them to reuse or shut down.
         if owns_exporter:
             provider.shutdown()
-    return _ExportCounts(traces=trace_count, spans=exported)
+
+    # A span the exporter did not accept is a span that is not there. The caller
+    # asked for the data to be somewhere else and it is not, which is a failed
+    # operation rather than a recording mishap, so it raises: the same rule
+    # ``bir send``, ``prune``, and the loaders follow.
+    if delivered.accepted != built:
+        raise RuntimeError(_export_failure_message(built, delivered.accepted, endpoint))
+    return _ExportCounts(traces=trace_count, spans=delivered.accepted)
+
+
+def _export_failure_message(built: int, accepted: int, endpoint: str | None) -> str:
+    """Say how much of the export arrived, and where it was going."""
+
+    destination = f" to {endpoint}" if endpoint else ""
+    arrived = f"none of {built}" if accepted == 0 else f"only {accepted} of {built}"
+    return f"bir could not export traces{destination}: {arrived} span(s) were accepted"
 
 
 class _TraceReader:
@@ -562,6 +597,7 @@ class _OtelApi:
     StatusCode: Any
     TracerProvider: Any
     SimpleSpanProcessor: Any
+    SpanExportResult: Any
     Resource: Any
     SERVICE_NAME: Any
 
@@ -575,7 +611,10 @@ def _import_otel_api() -> _OtelApi:
         from opentelemetry import trace as otel_trace  # type: ignore[import-not-found]
         from opentelemetry.sdk.resources import SERVICE_NAME, Resource  # type: ignore[import-not-found]
         from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-not-found]
-        from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # type: ignore[import-not-found]
+        from opentelemetry.sdk.trace.export import (  # type: ignore[import-not-found]
+            SimpleSpanProcessor,
+            SpanExportResult,
+        )
         from opentelemetry.trace import SpanKind, Status, StatusCode  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via patched import in tests
         raise ImportError(_INSTALL_HINT) from exc
@@ -587,9 +626,56 @@ def _import_otel_api() -> _OtelApi:
         StatusCode=StatusCode,
         TracerProvider=TracerProvider,
         SimpleSpanProcessor=SimpleSpanProcessor,
+        SpanExportResult=SpanExportResult,
         Resource=Resource,
         SERVICE_NAME=SERVICE_NAME,
     )
+
+
+class _CountingExporter:
+    """Delegate to the real exporter and record what it actually accepted.
+
+    Nothing downstream reported a failed delivery. ``SimpleSpanProcessor`` calls
+    ``export`` once per span and discards the ``SpanExportResult`` it returns,
+    and ``TracerProvider.force_flush`` returns a bool nobody read, so an export
+    that reached no endpoint at all still counted every span it had built and
+    reported them as exported. Counting the exporter's own answers is what makes
+    the reported number mean *delivered*.
+
+    Wrapping rather than replacing ``SimpleSpanProcessor`` keeps the failure
+    handling the OpenTelemetry SDK already has: it logs a rejected batch and
+    keeps going, and an injected exporter behaves for its caller exactly as it
+    did before.
+
+    Only ``export`` and ``shutdown`` are implemented, because those are the two
+    a ``SimpleSpanProcessor`` calls on the exporter it holds. This is an internal
+    wrapper around a caller's exporter, never one handed back out.
+
+    A batch counts as delivered unless the exporter *said* it failed. The
+    OpenTelemetry contract asks ``export`` to return a ``SpanExportResult``, but
+    an exporter that returns something else is not evidence of a failure, and
+    reporting one would be its own bug -- it would break a working pipeline over
+    a technicality the OpenTelemetry SDK itself ignores. Only a stated failure,
+    which is what the OTLP exporter returns once its retries are exhausted, is
+    treated as one.
+    """
+
+    def __init__(self, exporter: Any, *, failure: Any) -> None:
+        self._exporter = exporter
+        self._failure = failure
+        self.accepted = 0
+
+    def export(self, spans: Any) -> Any:
+        # A raising exporter is caught and logged by ``SimpleSpanProcessor``, so
+        # the export continues either way. Nothing is counted here because the
+        # increment never runs, which is the right answer: the spans are gone.
+        result = self._exporter.export(spans)
+        if result != self._failure:
+            self.accepted += len(spans)
+        return result
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
 
 
 def _build_default_exporter(endpoint: str | None, headers: Mapping[str, str] | None, timeout: float | None) -> Any:

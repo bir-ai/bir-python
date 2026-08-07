@@ -147,4 +147,7 @@ Python API.
 
 To forward traces to an OpenTelemetry backend instead of a Bir server, use
 `bir export-otel` (or `export_traces_to_otlp()`); see
-[CLI & Environment Config](cli-env.md).
+[CLI & Environment Config](cli-env.md). Like `send_events()`, it is invoked for
+its effect: it returns the number of spans the endpoint accepted and raises
+`RuntimeError` if any of them were not, naming the endpoint and how much of the
+export arrived.

@@ -11,7 +11,9 @@ paths run regardless so the local-first guarantees stay enforced even where the
 from __future__ import annotations
 
 import builtins
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -677,6 +679,169 @@ class DefaultExporterTests(unittest.TestCase):
         self.assertEqual(constructed["endpoint"], "http://collector.example:4318/v1/traces")
         self.assertEqual(constructed["headers"], {"x-api-key": "secret"})
         self.assertEqual(constructed["timeout"], 5.0)
+
+
+class _RecordingExporter:
+    """A span exporter that accepts a fixed number of spans and refuses the rest."""
+
+    def __init__(self, *, accept: int | None = None, raises: bool = False) -> None:
+        from opentelemetry.sdk.trace.export import SpanExportResult  # type: ignore[import-not-found]
+
+        self._results = SpanExportResult
+        self._accept = accept
+        self._raises = raises
+        self.accepted = 0
+        self.shutdown_calls = 0
+
+    def export(self, spans: Any) -> Any:
+        if self._raises:
+            raise RuntimeError("collector unreachable")
+        if self._accept is not None and self.accepted >= self._accept:
+            return self._results.FAILURE
+        self.accepted += len(spans)
+        return self._results.SUCCESS
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+@unittest.skipUnless(_OTEL_AVAILABLE, "opentelemetry is not installed")
+class ExportDeliveryReportingTests(unittest.TestCase):
+    """An export reports what arrived, not what it built.
+
+    ``SimpleSpanProcessor`` discards the ``SpanExportResult`` of every span it
+    exports, so a run against an endpoint that accepted nothing still counted
+    each span it had constructed and returned that as the number exported. The
+    count now comes from the exporter's own answers, and an export that did not
+    deliver everything raises -- exporting is invoked for its effect, so a
+    failure to produce that effect is the operation failing.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_a_rejected_export_raises_and_names_the_endpoint(self) -> None:
+        exporter = _RecordingExporter(accept=0)
+        with self.assertRaises(RuntimeError) as caught:
+            export_traces_to_otlp(
+                load_traces(str(FIXTURE))[0],
+                endpoint="http://collector.example:4318/v1/traces",
+                span_exporter=exporter,
+            )
+        self.assertEqual(
+            str(caught.exception),
+            "bir could not export traces to http://collector.example:4318/v1/traces: none of 5 span(s) were accepted",
+        )
+
+    def test_a_partial_export_reports_how_much_arrived(self) -> None:
+        exporter = _RecordingExporter(accept=2)
+        with self.assertRaisesRegex(RuntimeError, r"only 2 of 5 span\(s\) were accepted"):
+            export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=exporter)
+
+    def test_an_exporter_that_returns_no_result_is_not_called_a_failure(self) -> None:
+        # OpenTelemetry asks ``export`` to return a ``SpanExportResult``, and an
+        # exporter that returns something else is not evidence that anything went
+        # wrong. Only a stated failure is treated as one, so a working pipeline
+        # behind a loosely written exporter is never reported as broken.
+        class SilentExporter:
+            def export(self, spans: Any) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        self.assertEqual(export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=SilentExporter()), 5)
+
+    def test_an_exporter_that_raises_is_a_failed_export(self) -> None:
+        # SimpleSpanProcessor catches and logs the exception, so the run reaches
+        # the end either way; nothing was accepted, and that is what decides.
+        exporter = _RecordingExporter(raises=True)
+        with self.assertRaisesRegex(RuntimeError, r"none of 5 span\(s\) were accepted"):
+            with self.assertLogs("opentelemetry.sdk.trace.export", level="ERROR"):
+                export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=exporter)
+
+    def test_a_failure_with_no_endpoint_still_says_what_happened(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, r"^bir could not export traces: none of 5"):
+            export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=_RecordingExporter(accept=0))
+
+    def test_a_delivered_export_returns_what_the_exporter_accepted(self) -> None:
+        exporter = _RecordingExporter()
+        exported = export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=exporter)
+        self.assertEqual(exported, 5)
+        self.assertEqual(exporter.accepted, 5)
+
+    def test_an_injected_exporter_is_still_left_open_after_a_failure(self) -> None:
+        # The ownership rule does not change because the export failed: a caller's
+        # exporter stays theirs to reuse or shut down.
+        exporter = _RecordingExporter(accept=0)
+        with self.assertRaises(RuntimeError):
+            export_traces_to_otlp(load_traces(str(FIXTURE))[0], span_exporter=exporter)
+        self.assertEqual(exporter.shutdown_calls, 0)
+
+    def test_cli_reports_a_failed_export_on_stderr_with_a_non_zero_exit(self) -> None:
+        from bir.cli import main
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+            failing = _RecordingExporter(accept=0)
+
+            def fake_export(*args: Any, **kwargs: Any) -> Any:
+                kwargs["span_exporter"] = failing
+                return _export_traces(*args, **kwargs)
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch("bir.integrations.otel._export_traces", fake_export):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = main(
+                        [
+                            "export-otel",
+                            "--path",
+                            str(trace_path),
+                            "--endpoint",
+                            "http://collector.example:4318/v1/traces",
+                            "--json",
+                        ]
+                    )
+
+            self.assertEqual(code, 1)
+            # Nothing success-shaped on stdout: a pipeline reading the JSON
+            # contract must not find a span count for spans that never arrived.
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("bir: bir could not export traces", stderr.getvalue())
+            self.assertIn("none of 5 span(s) were accepted", stderr.getvalue())
+
+    def test_cli_reports_a_delivered_export_as_before(self) -> None:
+        from bir.cli import main
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+            accepting = _RecordingExporter()
+
+            def fake_export(*args: Any, **kwargs: Any) -> Any:
+                kwargs["span_exporter"] = accepting
+                return _export_traces(*args, **kwargs)
+
+            stdout = io.StringIO()
+            with mock.patch("bir.integrations.otel._export_traces", fake_export):
+                with contextlib.redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "export-otel",
+                            "--path",
+                            str(trace_path),
+                            "--endpoint",
+                            "http://collector.example:4318/v1/traces",
+                            "--json",
+                        ]
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["spans"], 5)
 
 
 if __name__ == "__main__":

@@ -132,9 +132,22 @@ generation spans gain `gen_ai.system` when an integration recorded the provider.
 traces recorded; without it, the value is derived from the traces and, when one run
 mixes environments or sources, the conflicting attribute moves from the `Resource`
 onto each span (`bir.environment` / `bir.source`) instead of being dropped. It
-prints how many traces and spans were exported and exits non-zero with an install
-hint when the extra is missing. The export only reads the local JSONL; it never
-writes to or alters it.
+exits non-zero with an install hint when the extra is missing. The export only
+reads the local JSONL; it never writes to or alters it.
+
+On success it prints how many traces and spans arrived, and the span count is what
+the endpoint accepted rather than what was built. If the endpoint refused or never
+answered, the command exits non-zero and says what did not arrive:
+
+```
+bir: bir could not export traces to http://localhost:4318/v1/traces: none of 8 span(s) were accepted
+```
+
+Nothing is written to stdout in that case, so a pipeline reading the `--json`
+contract never sees a span count for spans that were not delivered. A partial
+delivery is a failure too and reports how much arrived. This matches `bir send`:
+both commands exist to move data somewhere else, and both treat not moving it as
+the command failing.
 
 Like the other read commands, it streams: the store is read in two passes and one
 trace is held at a time, so peak memory scales with a trace rather than with the
@@ -223,7 +236,7 @@ and the rest print a human summary by default and JSON with `--json`:
 | `send` | `{accepted, attempted, skipped}` |
 | `send-experiment` | `{accepted, experiment_id}` |
 | `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, dry_run}` |
-| `export-otel` | `{traces, spans, endpoint}` |
+| `export-otel` | `{traces, spans, endpoint}` (only on a delivered export; a failed one writes nothing to stdout and exits non-zero) |
 | `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, ...}` (always) |
 | `config` | The effective configuration |
 
