@@ -35,6 +35,16 @@
     "expected": "Authorization: Bearer [redacted]"
   },
   {
+    "name": "cookie-request-header",
+    "input": "Cookie: session=abc123; auth_token=xyz789",
+    "expected": "Cookie: session=[redacted]; auth_token=[redacted]"
+  },
+  {
+    "name": "set-cookie-keeps-its-attributes",
+    "input": "Set-Cookie: sid=9f8e7d; Path=/; HttpOnly; Secure",
+    "expected": "Set-Cookie: sid=[redacted]; Path=/; HttpOnly; Secure"
+  },
+  {
     "name": "github-fine-grained-token",
     "input": "github_pat_11EXAMPLE0aaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "expected": "[redacted]"

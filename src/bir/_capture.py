@@ -80,6 +80,44 @@ _AUTH_ANY_SCHEME = f"{_AUTH_SCHEME_TOKEN}|{_AUTH_SCHEME_PARAMS}"
 # scheme and matches the scheme word itself, which destroyed the scheme and left
 # the credential behind it untouched. That is also what makes the rule idempotent
 # -- re-redacting an already-redacted header used to consume its scheme.
+_AUTH_HEADER_RULE = re.compile(
+    rf"(?i)\b(?P<label>authorization\s*[:=]\s*)(?:"
+    rf"(?P<param_scheme>(?:{_AUTH_SCHEME_PARAMS})\s+)"
+    rf"(?!\[redacted\]){_SECRET_VALUE}(?:\s*,\s*{_SECRET_VALUE})*"
+    rf"|"
+    rf"(?P<token_scheme>(?:{_AUTH_SCHEME_TOKEN})\s+)?"
+    rf"(?!\[redacted\])(?!(?:{_AUTH_ANY_SCHEME})\s){_SECRET_VALUE}"
+    rf")"
+)
+
+# Cookie attributes describe a cookie rather than authenticate anything, so they
+# are not credentials and a trace that keeps them is easier to read. Every other
+# name in the header is a cookie whose value is the secret. Deciding by name
+# rather than by position also means one rule covers both headers: ``Set-Cookie``
+# carries one cookie followed by attributes, ``Cookie`` carries only cookies.
+_COOKIE_ATTRIBUTES = frozenset(
+    {
+        "domain",
+        "expires",
+        "httponly",
+        "max-age",
+        "partitioned",
+        "path",
+        "priority",
+        "samesite",
+        "secure",
+        "version",
+    }
+)
+
+# The label is a literal, so finding it is cheap, and the run of pairs after it is
+# bounded by cookie syntax rather than by the end of the line -- a header quoted
+# inside a sentence does not take the sentence with it. The pair group repeats,
+# but each repetition must begin with a ``;`` and a name, so there is no greedy
+# prefix for the engine to backtrack across the way the URI rule once had.
+_COOKIE_PAIR = r"[^\s;=,]+(?:=[^\s;,]*)?"
+_COOKIE_HEADER_RULE = re.compile(rf"(?i)\b(set-cookie|cookie)(\s*[:=]\s*)({_COOKIE_PAIR}(?:\s*;\s*{_COOKIE_PAIR})*)")
+
 # A credential carried in a URI's userinfo, the spelling a connection string
 # uses. The password is the secret; the scheme, user, and host are what make the
 # trace worth reading, so they stay. Requiring the ``:`` and the ``@`` is what
@@ -95,16 +133,6 @@ _AUTH_ANY_SCHEME = f"{_AUTH_SCHEME_TOKEN}|{_AUTH_SCHEME_PARAMS}"
 # against 0.03 ms and 7x here. The scheme is left out of the match entirely; it
 # sits in front of it and is never replaced, so the result is identical.
 _URI_CREDENTIAL_RULE = re.compile(r"(://[^\s/:@]*:)[^\s/@]*(@)")
-
-_AUTH_HEADER_RULE = re.compile(
-    rf"(?i)\b(?P<label>authorization\s*[:=]\s*)(?:"
-    rf"(?P<param_scheme>(?:{_AUTH_SCHEME_PARAMS})\s+)"
-    rf"(?!\[redacted\]){_SECRET_VALUE}(?:\s*,\s*{_SECRET_VALUE})*"
-    rf"|"
-    rf"(?P<token_scheme>(?:{_AUTH_SCHEME_TOKEN})\s+)?"
-    rf"(?!\[redacted\])(?!(?:{_AUTH_ANY_SCHEME})\s){_SECRET_VALUE}"
-    rf")"
-)
 
 
 def _capture_call_input(
@@ -322,6 +350,7 @@ def _safe_error(exc: BaseException, *, config: _Config) -> str:
 def _redact_secret_text(value: str, *, config: _Config) -> str:
     redacted = value
     redacted = _AUTH_HEADER_RULE.sub(_redact_auth_header_match, redacted)
+    redacted = _COOKIE_HEADER_RULE.sub(_redact_cookie_header_match, redacted)
     redacted = re.sub(
         (
             r"(?i)\b(access[_-]?key|api[_-]?key|apikey|auth|client[_-]?secret|credential|credentials|password|"
@@ -433,6 +462,25 @@ def _redact_auth_header_match(match: re.Match[str]) -> str:
 
 def _redact_bearer_secret_match(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_REDACTED}"
+
+
+def _redact_cookie_header_match(match: re.Match[str]) -> str:
+    """Replace every cookie's value, keeping the names and the attributes.
+
+    Splitting the matched run rather than repeating a capture group is what makes
+    each pair reachable: a regex hands back only the last repetition. The parts
+    keep their own spacing, so rejoining on ``;`` restores the header as written.
+    A pair with no ``=`` is a flag such as ``HttpOnly`` and carries nothing.
+    """
+
+    pairs = []
+    for pair in match.group(3).split(";"):
+        name, separator, _value = pair.partition("=")
+        if not separator or name.strip().lower() in _COOKIE_ATTRIBUTES:
+            pairs.append(pair)
+        else:
+            pairs.append(f"{name}={_REDACTED}")
+    return f"{match.group(1)}{match.group(2)}{';'.join(pairs)}"
 
 
 def _redact_uri_credential_match(match: re.Match[str]) -> str:

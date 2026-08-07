@@ -46,6 +46,16 @@ are also scanned for common secret-like text patterns, including:
 - Slack `xox*` tokens.
 - GitHub tokens: the classic `ghp_`, `gho_`, `ghs_`, `ghu_`, and `ghr_` prefixes
   and the fine-grained `github_pat_` form.
+- `Cookie` and `Set-Cookie` headers. Every cookie's value is replaced and the
+  cookie names are kept, so `Cookie: session=abc123; auth_token=xyz789` records as
+  `Cookie: session=[redacted]; auth_token=[redacted]` and the trace still says
+  which cookies a request carried. Cookie attributes are kept because they
+  describe the cookie rather than authenticate anything, so
+  `Set-Cookie: sid=9f8e7d; Path=/; HttpOnly` records as
+  `Set-Cookie: sid=[redacted]; Path=/; HttpOnly`. The attributes recognized by
+  name are `Domain`, `Expires`, `Max-Age`, `Partitioned`, `Path`, `Priority`,
+  `SameSite`, `Secure`, `Version`, and `HttpOnly`; a bare flag with no value is
+  kept whatever it is called.
 - Passwords inside a connection string. In a URI carrying `user:password@`, the
   password is replaced and the scheme, user, and host are kept, so
   `postgres://admin:hunter2@db.internal:5432/prod` records as

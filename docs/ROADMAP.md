@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,561 lines of runtime source across 19 dependency-free integration modules
+- 17,609 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,656 tests in 47 files at 93.92% branch coverage, with a CI floor, strict
+- 1,664 tests in 47 files at 93.93% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -56,58 +56,19 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 5 | Redact the credentials in a `Cookie` header | P2 | S | A captured cookie header stops carrying a live session | — |
 | 4 | Keep derived cost from failing the traced call | P3 | XS | The last unguarded raise leaves the recording path | — |
 
-Three of the original four have shipped and are in `CHANGELOG.md`: the
-`Authorization` credential leak, the export that reported success without
-exporting anything, and the credential formats redaction did not recognize.
-Numbering is kept so the ones that are left stay citable.
+Everything else has shipped and is in `CHANGELOG.md`: the `Authorization`
+credential leak, the export that reported success without exporting anything, the
+credential formats redaction did not recognize, and the `Cookie` header. The
+numbering is kept so the one that is left stays citable.
 
-Item 5 was not on the original list, and that was a bookkeeping error rather than
-a judgement: the audit's own sweep recorded `Cookie:` as leaking, and the list
-then covered neither it nor a reason for leaving it out. It is written up below
-against the code as it now stands.
+Redaction is now the audited part of the SDK with the most work behind it. Four
+of the five shipped items were in it, and each was found by the same sweep rather
+than by a report, so the next audit should treat one sweep as one sample and not
+as a clean bill.
 
 ## Work item details
-
-### 5. Redact the credentials in a `Cookie` header
-
-**Why:** A cookie header passes through untouched. Measured through
-`_safe_capture` after the three shipped redaction items:
-
-```
-  Cookie: session=abc123; auth_token=xyz789      -> unchanged
-  Set-Cookie: sid=9f8e7d; HttpOnly               -> unchanged
-```
-
-A session cookie is a live credential — it is what a request presents *instead*
-of a password — so this is the same class as the `Authorization` header that has
-just been repaired, in the other header an HTTP client sends.
-
-Neither of the two rules that look like they should catch it does. The labeled
-rule lists `token`, but `\b` does not fall between `auth` and `token`, so
-`auth_token=` is not a match; and `session=` is not a listed name at all.
-
-The shape is what makes this its own item rather than another name on that list.
-A cookie header is a `;`-separated sequence of `name=value` pairs, and the shared
-value pattern stops at `;` — correctly, since that is what keeps a redaction from
-swallowing the rest of a sentence. So the rule has to understand the header
-rather than add a keyword.
-
-**Scope:**
-
-- Replace every cookie value in a `Cookie` or `Set-Cookie` header while keeping
-  the cookie names, which are what make the trace readable, and keeping the
-  `Set-Cookie` attributes (`HttpOnly`, `Path`, `Expires`) that are not values.
-- Stay linear in the size of the value, and pin it the way the private-key and
-  URI rules are pinned. A `;`-separated list invites a repeated group, which is
-  where the URI rule went quadratic.
-- Fixture cases, and the documented list updated to name the header. That means
-  another `scripts/fixtures.py sync` and a paired commit in the `bir` repo.
-
-**Done when:** a captured `Cookie` header carries no values, the cookie names and
-`Set-Cookie` attributes survive, and the documented list names it.
 
 ### 4. Keep derived cost from failing the traced call
 
@@ -146,10 +107,8 @@ cheap to close and it stops the invariant from being true only by accident.
 
 ## Sequencing
 
-Neither of the two left depends on the other. Item 5 changes the shared redaction
-fixture again, which means another `scripts/fixtures.py sync` and another paired
-commit in the `bir` repo; that is the only coordination cost on this list. Item 4
-touches nothing outside `src/bir/_sdk.py`.
+One item is left and it depends on nothing. It touches nothing outside
+`src/bir/_sdk.py`, so no cross-repo coordination remains on this list.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -176,9 +135,10 @@ whose end callback never arrived, reading a damaged experiment store with
 `bir export-otel`, attaching the log-correlation filter where propagated records
 are seen, reporting rather than raising a failed trace-store write, flushing
 each finished example's result row so an interrupted experiment keeps it,
-redacting the credential rather than the scheme in an `Authorization` header, and
+redacting the credential rather than the scheme in an `Authorization` header,
 reporting a failed OTLP export instead of counting the spans it built, and
-redacting fine-grained GitHub tokens and the password inside a connection URI.
+redacting fine-grained GitHub tokens, the password inside a connection URI, and
+the values in a `Cookie` or `Set-Cookie` header.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence. The two entries about `bir export-otel` are separate pieces of work and
 neither reopens the other: streaming was about the memory the export holds, and
@@ -228,11 +188,11 @@ Five areas were checked and found sound, so they need no item:
 - Rotation. Forty traces against `max_bytes=4000, backup_count=3` produced four
   files, and `--include-rotated` agreed across commands: `bir traces` and
   `bir stats` both reported 20 traces with it and 5 without.
-- Redaction of the formats it does claim. Seventeen of the twenty credential
+- Redaction of the formats it does claim. Eighteen of the twenty credential
   shapes swept are replaced, including the AWS, Google, Slack, Stripe, JWT, PEM,
-  and Luhn-checked card cases, plus everything the three shipped items above
-  repaired. Of the three that survive, two are the personal data declined below;
-  the third is item 5.
+  and Luhn-checked card cases, plus everything the four shipped redaction items
+  repaired. The two that survive are the personal data declined below, which is
+  deliberate.
 - The documented capture path against values JSON cannot hold.
   `set_output(float("inf"))` records `'inf'`, `set_output(b"bytes")` and an
   arbitrary object record their `repr`, and a `set` records a list. No event was

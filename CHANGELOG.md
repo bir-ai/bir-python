@@ -58,6 +58,45 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- `Cookie` and `Set-Cookie` headers no longer pass through untouched. A session
+  cookie is a live credential — it is what a request presents *instead* of a
+  password — so this was the same class as the `Authorization` header repaired
+  below, in the other header an HTTP client sends:
+
+  ```
+  Cookie: session=abc123; auth_token=xyz789   -> unchanged
+  Set-Cookie: sid=9f8e7d; HttpOnly            -> unchanged
+  ```
+
+  Neither rule that looks like it should have caught this did. The labeled rule
+  lists `token`, but `\b` does not fall between `auth` and `token`, so
+  `auth_token=` was never a match, and `session=` is not a listed name at all.
+
+  Every cookie's value is now replaced and the names are kept, so the trace still
+  says which cookies a request carried. Cookie attributes are kept too, because
+  they describe the cookie rather than authenticate anything:
+  `Set-Cookie: sid=9f8e7d; Path=/; HttpOnly` records as
+  `Set-Cookie: sid=[redacted]; Path=/; HttpOnly`. Attributes are recognized by
+  name rather than by position, which is what lets one rule cover both headers
+  without knowing which it is looking at — `Cookie` carries only cookies,
+  `Set-Cookie` carries one cookie and then attributes. A bare flag with no value
+  carries nothing and is kept whatever it is called. An `Expires` date ends the
+  run of pairs at its comma, and everything after it is left as written.
+
+  The run of pairs is bounded by cookie syntax rather than by the end of the
+  line, so a header quoted inside a sentence does not take the sentence with it.
+  Values are replaced by splitting the matched run rather than by repeating a
+  capture group, since a regex hands back only the last repetition.
+
+  Measured cost: `capture_large_value` 85.9 ms against 79.3 before, the price of
+  one more pass over the value — three spellings were compared and the one that
+  shipped has the cheapest no-match scan. `capture_redaction` is 31.0 µs/unit
+  against 30.3. A test pins the linearity, because a `;`-separated list invites
+  the repeated group that made the URI rule quadratic.
+
+  `tests/fixtures/redaction-cases.json` gains two cases, synced into the `bir`
+  repo with `scripts/fixtures.py sync`.
+
 - Built-in redaction now recognizes two credential formats it was missing.
 
   GitHub's fine-grained personal access tokens (`github_pat_…`) were not

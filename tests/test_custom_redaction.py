@@ -284,6 +284,127 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
         self.assertEqual(_redact_secret_text(self.GITHUB_FINE_GRAINED), "[redacted]")
 
 
+class CookieHeaderRedactionTests(unittest.TestCase):
+    """The other header an HTTP client sends, and what survives in it.
+
+    A session cookie is a live credential -- it is what a request presents
+    *instead* of a password -- and the header passed through untouched. Neither
+    rule that looks like it should have caught it did: ``\\b`` does not fall
+    between ``auth`` and ``token``, so the labeled rule never saw ``auth_token=``,
+    and ``session=`` is not a listed name at all.
+
+    Values go; names and attributes stay, because a trace saying which cookies a
+    request carried is worth having and a ``Path`` or ``HttpOnly`` is not a
+    secret. Attributes are recognized by name rather than by position, so one
+    rule covers ``Cookie`` (all cookies) and ``Set-Cookie`` (one cookie, then
+    attributes) without knowing which it is looking at.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_every_cookie_value_in_a_request_header_goes(self) -> None:
+        self.assertEqual(
+            _redact_secret_text("Cookie: session=abc123; auth_token=xyz789"),
+            "Cookie: session=[redacted]; auth_token=[redacted]",
+        )
+
+    def test_set_cookie_keeps_its_attributes_and_flags(self) -> None:
+        for header, expected in (
+            (
+                "Set-Cookie: sid=9f8e7d; Path=/; HttpOnly; Secure",
+                "Set-Cookie: sid=[redacted]; Path=/; HttpOnly; Secure",
+            ),
+            (
+                "Set-Cookie: sid=9f8e7d; Max-Age=3600; SameSite=Strict",
+                "Set-Cookie: sid=[redacted]; Max-Age=3600; SameSite=Strict",
+            ),
+            (
+                "Set-Cookie: sid=9f8e7d; Domain=example.com; Path=/app",
+                "Set-Cookie: sid=[redacted]; Domain=example.com; Path=/app",
+            ),
+        ):
+            with self.subTest(header=header):
+                self.assertEqual(_redact_secret_text(header), expected)
+
+    def test_an_expires_attribute_survives_its_commas(self) -> None:
+        # ``Expires`` carries a date with spaces and a comma, which ends the run
+        # of pairs. What follows it is outside the match and simply kept.
+        self.assertEqual(
+            _redact_secret_text("Set-Cookie: sid=9f8e7d; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT"),
+            "Set-Cookie: sid=[redacted]; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT",
+        )
+
+    def test_a_header_inside_a_sentence_keeps_the_sentence(self) -> None:
+        self.assertEqual(
+            _redact_secret_text("request had Cookie: sess=deadbeef and then failed"),
+            "request had Cookie: sess=[redacted] and then failed",
+        )
+
+    def test_the_word_cookie_on_its_own_is_not_a_header(self) -> None:
+        for benign in ("cookie: I ate one", "the cookie jar is empty", "cookies=enabled", "set-cookie"):
+            with self.subTest(benign=benign):
+                self.assertEqual(_redact_secret_text(benign), benign)
+
+    def test_redacting_twice_changes_nothing(self) -> None:
+        for header in (
+            "Cookie: session=abc123; auth_token=xyz789",
+            "Set-Cookie: sid=9f8e7d; Path=/; HttpOnly",
+        ):
+            with self.subTest(header=header):
+                once = _redact_secret_text(header)
+                self.assertEqual(_redact_secret_text(once), once)
+
+    def test_cookie_is_gone_from_the_trace_file(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+
+            @observe(name="request")
+            def request(headers: list[str]) -> str:
+                return "ok"
+
+            request(["Cookie: session=abc123; auth_token=xyz789"])
+
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn("abc123", raw)
+            self.assertNotIn("xyz789", raw)
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertEqual(
+                event["input"]["headers"],
+                ["Cookie: session=[redacted]; auth_token=[redacted]"],
+            )
+
+    def test_cost_stays_linear_in_the_size_of_the_value(self) -> None:
+        # A ``;``-separated list invites a repeated group, which is where the URI
+        # rule went quadratic. Timed against prose of the same length so the bound
+        # calibrates itself to whatever machine runs it.
+        length = 128_000
+        pairs = "Cookie: " + "; ".join(f"k{index}=v{index}" for index in range(length // 12))
+        pairs = pairs[:length]
+        prose = ("lorem ipsum dolor sit amet consectetur " * (length // 39))[:length]
+
+        def best_seconds(text: str) -> float:
+            timings = []
+            for _ in range(5):
+                started = time.perf_counter()
+                _redact_secret_text(text)
+                timings.append(time.perf_counter() - started)
+            return min(timings)
+
+        baseline = best_seconds(prose)
+        listed = best_seconds(pairs)
+        self.assertLess(
+            listed,
+            baseline * 10,
+            f"redacting a {length}-character cookie header took {listed:.3f}s against {baseline:.3f}s for the "
+            f"same length of prose; the cookie rule is not linear in value size",
+        )
+
+
 class UriCredentialRedactionTests(unittest.TestCase):
     """The password inside a connection string, and what that rule costs.
 
