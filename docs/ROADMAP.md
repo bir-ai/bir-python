@@ -15,7 +15,7 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,395 lines of runtime source across 19 dependency-free integration modules
+- 17,399 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
 - 1,627 tests in 47 files at 93.90% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
@@ -27,11 +27,12 @@ At this audit the repository has:
   a benchmark harness with baseline comparison, and a recorded decision on
   distributed trace context.
 
-Every item from the 2026-08-06 list shipped, and so has every item from the
-2026-08-07 list that replaced it. That list was re-derived from the current code,
-from a coverage run, from `scripts/benchmarks.py --repeat 3`, from driving the CLI
-against stores built for the purpose, and from measurements written for the audit;
-the next one has to be derived the same way rather than continued from it.
+Every item from the previous list shipped and is in `CHANGELOG.md`. This list is
+not a continuation of it. It was re-derived by driving the SDK: a coverage run,
+`scripts/benchmarks.py --repeat 3`, the CLI run against stores and experiments
+built for the purpose, a redaction sweep over twenty credential formats, and
+probes written for this audit. Each item states what was run and what it
+produced.
 
 ## Product and engineering guardrails
 
@@ -53,23 +54,215 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Nothing is open. Every item from the 2026-08-07 list has shipped — the
-log-correlation filter, the store that could not be written, and experiment
-results surviving a stopped process — and all three are in `CHANGELOG.md`.
+| # | Improvement | Priority | Size | Primary outcome | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Redact the credential in every `Authorization` scheme | P1 | S | A captured auth header stops leaking its secret | — |
+| 2 | Make `bir export-otel` report what it actually exported | P1 | S | A failed export stops looking like a successful one | — |
+| 3 | Recognize credential formats that have become standard | P2 | S | Fine-grained GitHub tokens and connection URIs are redacted | 1 |
+| 4 | Keep derived cost from failing the traced call | P3 | XS | The last unguarded raise leaves the recording path | — |
 
-Two of them carry a lesson worth keeping. The store item's Why said no test
-pinned the old behavior; that was wrong, because
-`test_storage_errors_are_not_swallowed` pinned it deliberately. The experiment
-item did not claim there was no such test, and there was one:
-`test_cancellation_cleans_up_children_without_writing_summary` pinned that a
-cancelled async run left no result file at all, which streaming rows changes.
-Check for a pinning test before starting, and when one exists, say whether the
-work fills a gap or reverses a decision.
+Items 1 and 3 both edit the redaction rules and the shared fixture; doing 1
+first keeps the fixture coordination to one round.
+
+## Work item details
+
+### 1. Redact the credential in every `Authorization` scheme
+
+**Why:** The first redaction rule (`src/bir/_capture.py:276`) redacts the wrong
+half of a non-`Bearer` auth header. Measured through `_safe_capture`:
+
+```
+  Authorization: Bearer abc123secret        -> Authorization: Bearer [redacted]
+  Authorization: Basic YWRtaW46aHVudGVyMg== -> Authorization: [redacted] YWRtaW46aHVudGVyMg==
+  Authorization: Token 9f8e7d6c5b4a32109f8e -> Authorization: [redacted] 9f8e7d6c5b4a32109f8e
+  Authorization: ApiKey k-live-abcdefghij   -> Authorization: [redacted] k-live-abcdefghij
+  Authorization: Digest username="admin", response="deadbeef"
+                                            -> Authorization: [redacted] username="admin", response="deadbeef"
+```
+
+The surviving base64 decodes to `admin:hunter2`.
+
+The rule is `(authorization\s*[:=]\s*)(bearer\s+)?…[^\s,;\)\]\}]+`, and
+`_redact_labeled_secret_match` keeps groups 1 and 2 and replaces what follows.
+`Bearer` is named explicitly, so it is preserved and the token after it is
+replaced. Any other scheme is not matched by group 2, so the value pattern —
+which stops at the first space — matches the *scheme word*, and that is what gets
+replaced. The credential is the part left behind.
+
+Only the text path is affected, and it is worth being exact about which shapes
+reach it, because the mapping-key rule is a different rule and it is sound:
+
+```
+  {"authorization": "Basic YWRtaW46aHVudGVyMg=="}   -> {"authorization": "[redacted]"}      safe
+  {"headers": ["Authorization: Basic YWRtaW46…"]}   -> ["Authorization: [redacted] YWRtaW46…"]
+  "request failed: Authorization: Basic YWRtaW46…"  -> "request failed: Authorization: [redacted] YWRtaW46…"
+```
+
+A header captured as a dict key is replaced whole. A header captured as text — in
+a list of headers, inside an error message, or in the `repr` of a request object —
+keeps its credential. Those are the ordinary shapes: a client library's exception
+string and a captured request are both text.
+
+`docs/site/capture-privacy.md:27` tells users Bir redacts `authorization`. This
+is a broken promise rather than a coverage gap, and it lands in the one layer the
+guardrails require to stay non-disableable.
+
+No test pins the current behavior. Of the seventeen `Authorization` references
+under `tests/`, fifteen use `Bearer` — including
+`{"headers": ["Authorization: Bearer sk-input-header"]}` at
+`tests/test_sdk.py:4958`, which is exactly the leaking shape, tested with the one
+scheme that works. The other two assert the mapping-key rule. The shared
+fixture's single case is `authorization-bearer-header`. This fills a gap; it
+reverses nothing.
+
+**Scope:**
+
+- Redact the credential for any scheme, not only `Bearer`, keeping the scheme
+  itself readable — a trace that says `Basic` or `Digest` is worth more than one
+  that says `[redacted]`.
+- Keep `Bearer` byte-for-byte as it is; it is in the shared fixture.
+- Cover the `authorization=` spelling as well as `authorization:`, since both
+  reach the same rule.
+- Fixture cases for the schemes above. `tests/fixtures/redaction-cases.json` is
+  the parity contract with `bir-app`, so adding cases needs the coordinated
+  change the guardrails call for.
+
+**Done when:** for every common scheme, the credential is replaced and the scheme
+survives, and the redaction fixture covers more than `Bearer`.
+
+### 2. Make `bir export-otel` report what it actually exported
+
+**Why:** The command reports success when nothing reaches the endpoint. Measured
+against an endpoint with nothing listening, and again against a server answering
+every POST with HTTP 500:
+
+```
+  $ bir export-otel --endpoint http://127.0.0.1:9/v1/traces --timeout 1 --json
+  { "endpoint": "…", "spans": 8, "traces": 4 }
+  exit=0
+
+  # stderr, from the OTel SDK's own logger:
+  #   Failed to export span batch due to timeout, max retries or shutdown.
+```
+
+Zero spans were delivered in either run. The default run against the dead
+endpoint spent 58 seconds retrying and still printed
+`exported 4 trace(s) (8 spans)` and exited 0.
+
+`bir send`, which has the same job, gets this right against the same server:
+
+```
+  $ bir send --server http://127.0.0.1:8931
+  bir: bir server rejected event batch with HTTP 500:
+  exit=1
+```
+
+Three things drop the failure. `src/bir/integrations/otel.py:192` discards the
+bool from `provider.force_flush()`. `SimpleSpanProcessor` discards each
+`SpanExportResult`. And `exported` counts spans handed to the tracer, so the
+number is spans *built*, not spans accepted — which also makes the docstring at
+`otel.py:104`, "Returns the number of spans exported", describe something the
+function does not measure.
+
+The cost lands on exactly the use this command exists for. Replaying a local
+store into a collector is a scripted, one-shot operation, and `{traces, spans}`
+plus the exit code is the whole machine-readable contract
+(`docs/site/cli-env.md:226`) a CI job or migration script has to decide whether
+its data arrived.
+
+**Scope:**
+
+- Detect a failed export and report it: a non-zero exit and a message naming the
+  endpoint, matching what `bir send` already does.
+- Report delivered spans rather than built spans, or rename the field and fix the
+  docstring so the number means what it says.
+- Cover the public `export_traces_to_otlp` too — the CLI is a thin wrapper, and
+  its return value carries the same claim.
+- A test with an injected exporter that fails, asserting the failure is visible
+  in both the exit code and the JSON output.
+
+**Done when:** an export that delivers nothing exits non-zero and says so, and
+the reported span count never exceeds what the exporter accepted.
+
+### 3. Recognize credential formats that have become standard
+
+**Why:** Two formats a traced application is likely to hold survive the sweep.
+Measured through `_safe_capture` over twenty credential shapes:
+
+```
+  github_pat_11ABCDE0aaaa…            -> unchanged   (fine-grained GitHub PAT)
+  postgres://admin:hunter2@db:5432/x  -> unchanged
+  redis://:mypassword@127.0.0.1:6379  -> unchanged
+  https://user:secret@example.com     -> unchanged
+  password=hunter2                    -> password=[redacted]
+```
+
+The GitHub rule covers `ghp_`, `gho_`, `ghs_`, `ghu_`, and `ghr_` — the classic
+tokens — and `github_pat_` is the fine-grained format GitHub now steers users
+toward, so the rule reads as current while missing the type most likely to be
+issued today.
+
+The URI case is the sharper one, because the same secret is redacted in one
+spelling and not the other: `password=hunter2` is replaced, and the same password
+in `postgres://admin:hunter2@…` is not. Connection strings reach traces through
+config objects and through the error messages of the client libraries that raise
+them.
+
+Unlike item 1 this is a coverage gap, not a broken promise:
+`docs/site/capture-privacy.md` enumerates exactly what is covered and warns that
+redaction is best-effort. That is why it sits below item 1 and not beside it.
+
+**Scope:**
+
+- `github_pat_` tokens.
+- The `user:password@` credential in a URI, replacing the password and keeping
+  the scheme and host, which are what make the trace useful.
+- Fixture cases for both, and the documented list updated to match — the list is
+  the promise, so a rule that is not written down is not finished.
+
+**Done when:** both formats are redacted, the documented list names them, and the
+shared fixture covers them.
+
+### 4. Keep derived cost from failing the traced call
+
+**Why:** `_Generation.__exit__` calls `_fill_cost_from_prices()`
+(`src/bir/_sdk.py:1637`) before it builds the event, outside the guard that keeps
+a recording failure away from the caller. `configure(model_prices=...)` validates
+each price is finite and non-negative — it correctly rejects a negative, `inf`, or
+non-numeric price — but the *product* of a price and a token count is not
+bounded, and `set_cost` rejects the `inf` it produces. Measured:
+
+```
+  configure(model_prices={"m": {"input": 1e308, "output": 1e308}})
+  @observe def chat(): … set_usage(input_tokens=1000, output_tokens=1000)
+
+  chat() -> ValueError: bir input_cost must be finite
+```
+
+The traced function loses its return value to an exception raised by the
+bookkeeping about it. A price of `1e305` stays finite and records normally, so
+the threshold is absurd and no real price table reaches it.
+
+The reason to fix it anyway is that the invariant is now explicit. The previous
+release established that a store that cannot be written must not decide whether
+a call succeeded, and `_write_event` is wrapped accordingly; this is the one
+remaining path in the exit sequence that can still raise into the caller. It is
+cheap to close and it stops the invariant from being true only by accident.
+
+**Scope:**
+
+- Derive no cost rather than raising when the product is not finite.
+- Keep an explicit `set_cost()` raising: that is a caller passing bad values to a
+  documented setter, which is a programming error and not bookkeeping.
+
+**Done when:** no price table and token count can make a traced call raise, and
+`set_cost()` still validates as it does today.
 
 ## Sequencing
 
-Nothing is queued. The next list has to be re-derived from the code rather than
-continued from this one.
+Items 1, 2, and 4 depend on nothing and can go in any order. Item 3 touches the
+same rules and the same shared fixture as item 1, so running it after 1 keeps the
+`bir-app` coordination to a single round.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -97,37 +290,66 @@ whose end callback never arrived, reading a damaged experiment store with
 are seen, reporting rather than raising a failed trace-store write, and flushing
 each finished example's result row so an interrupted experiment keeps it.
 Regressions in those areas are bugs; new scope requires a new issue with current
-evidence.
+evidence. Note that item 2 above is not a reopening of streaming
+`bir export-otel`: that item was about the memory the export holds, this one is
+about whether it tells the truth.
 
-This audit looked at four more things and declined them:
+This audit looked at five more things and declined them:
 
-- Recording an early-closed provider stream as an error. A consumer that stops
-  reading mid-stream leaves the generation with `status="error"` and an empty
-  message, which reads oddly beside `@observe`, where closing a generator early is
-  recorded as a *successful* trace. It is not a defect: the shared wrapper
-  contract asserts the error status deliberately
-  (`tests/integration_contract.py:668`), with the reasoning written down. Whether
-  the two should agree is a product question for an issue. The empty message is
-  the part worth revisiting there, since `str(GeneratorExit())` is `""` and the
-  event says nothing about why it failed.
-- Clearing a configured scalar. `configure(service_name=None)` cannot unset a
-  previously configured `service_name`, because `None` is the "leave unchanged"
-  sentinel; the collection-valued options each document an empty value that
-  clears them, and the scalars have no equivalent. Measured: setting then
-  "clearing" leaves `checkout-api` in place. That is an API-shape proposal, not a
-  repair.
-- Raising coverage on the framework bridges for its own sake. They remain the
-  package's weakest modules — `llamaindex` 82.51%, `langchain` 85.71%, `crewai`
-  86.79%, `autogen` 88.41%, against a 93.90% total — but the missing lines are
-  alternative provider-shape readers, which the stability page already frames as
-  environment-specific.
-- A public streaming read API. `load_events` peaks at 22,761 KiB and `load_traces`
-  at 24,162 KiB for 5,000 events in this audit's benchmark run, but both are
-  documented to return complete lists and the internal iterator already serves
-  every caller inside the package. Changing that is an API proposal.
+- Recording contexts accepting any attribute. The classes have no `__slots__` and
+  no properties, so assignment bypasses the validating setters: `gen.usage =
+  {"input_tokens": -5}` writes a negative token count that `set_usage` rejects,
+  `gen.model = 12345` writes a non-string model, and `r.documents = [...]` on a
+  retrieval is silently dropped because the reader is `set_documents`. Every
+  shipped integration assigns `gen.model` directly but guards its own value
+  through `_string_or_none`, and the documentation uses the setters throughout.
+  Closing this means slots or properties on six public context types — an
+  API-shape proposal, not a repair.
+- A serialization failure reported as a store outage. `gen.usage = {"input_tokens":
+  float("inf")}` produces `bir could not write to the trace store … Recording is
+  paused and events are being dropped`, immediately followed by `bir resumed
+  writing`. The store was never the problem and recording was never paused. The
+  breadth of that `except Exception` is deliberate and documented
+  (`src/bir/_sdk.py:2025`); only the wording of the diagnosis is wrong, and the
+  path is reachable only through the bypass above, so it rides on that decision.
+- Redacting personal data. Emails and government identifiers pass through
+  unchanged. That matches the documented scope, which is credentials, and
+  redacting every email would destroy legitimate trace content.
+  `additional_secret_keys` and `additional_redaction_patterns` already cover the
+  applications that need it.
+- CLI argument asymmetry. `eval-gate` takes result *paths* while
+  `experiment-show` and `experiment-report` take experiment *ids*, and
+  `eval-gate` prints JSON by default where every other command prints a table.
+  Both are consistent within each command and the errors are clear. It is a UX
+  proposal for an issue.
+- Float noise in machine-readable output. `bir traces --json` reports
+  `"duration_ms": 0.11699999999999999` beside a neighbouring `0.106`. Cosmetic;
+  consumers parse it as a float either way.
 
-Two areas were checked and found sound, so they need no item: concurrent recording
-into a rotating store from eight threads produced 145 events with no torn lines
-and no exceptions, and `run_experiment(max_workers=4, record_traces=True)` gave
-each example its own isolated trace. `grep -rn "TODO\|FIXME\|XXX" src/` is still
-empty; it stays a dead end.
+The four the previous audit declined were re-measured where measuring was cheap
+and none of them moved: `load_events` still peaks at 22,761 KiB and `load_traces`
+at 24,162 KiB for 5,000 events, and the framework bridges are still the weakest
+modules at `llamaindex` 82.51%, `langchain` 85.71%, `crewai` 86.79%, and
+`autogen` 88.41%. The early-closed-stream status and the inability to clear a
+configured scalar are unchanged and remain API questions for issues.
+
+Five areas were checked and found sound, so they need no item:
+
+- Rotation. Forty traces against `max_bytes=4000, backup_count=3` produced four
+  files, and `--include-rotated` agreed across commands: `bir traces` and
+  `bir stats` both reported 20 traces with it and 5 without.
+- Redaction of the formats it does claim. Fourteen of the twenty credential
+  shapes swept were replaced, including the AWS, Google, Slack, Stripe, JWT,
+  classic GitHub, PEM, and Luhn-checked card cases.
+- The documented capture path against values JSON cannot hold.
+  `set_output(float("inf"))` records `'inf'`, `set_output(b"bytes")` and an
+  arbitrary object record their `repr`, and a `set` records a list. No event was
+  dropped and nothing raised.
+- Log correlation. With `install_trace_id_filter()`, records from `myapp` and
+  `myapp.sub` both carried the trace id inside a trace and `None` outside it.
+- Sampling. `sample_rate=0.0` wrote 0 events and `1.0` wrote 20;
+  `sample_rules={"noisy": 0.0}` dropped all ten `noisy` traces and kept all ten
+  `important` ones.
+
+Benchmarks were stable and unchanged against the previous audit's run.
+`grep -rn "TODO\|FIXME\|XXX" src/` is still empty; it stays a dead end.
