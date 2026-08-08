@@ -1,6 +1,6 @@
 # Bir Python SDK — Improvement Roadmap
 
-> Current baseline: **v0.3.0**, audited **2026-08-07**.
+> Current baseline: **v0.3.0**, audited **2026-08-08**.
 >
 > This document contains only work that is still open. Completed work belongs in
 > `CHANGELOG.md`; implementation details and copy-paste task prompts belong in
@@ -29,10 +29,16 @@ At this audit the repository has:
 
 Every item from the previous list shipped and is in `CHANGELOG.md`. This list is
 not a continuation of it. It was re-derived by driving the SDK: a coverage run,
-`scripts/benchmarks.py --repeat 3`, the CLI run against stores and experiments
-built for the purpose, a redaction sweep over twenty credential formats, and
-probes written for this audit. Each item states what was run and what it
+`scripts/benchmarks.py --repeat 3`, the CLI run under a pipe and under a
+terminal, a second redaction sweep using value *shapes* rather than credential
+formats, and probes written for this audit against `capture_traces`, the
+send/prune/sidecar chain, generator finalization, `eval-gate`, environment
+precedence, and damaged stores. Each item states what was run and what it
 produced.
+
+The previous list was almost entirely redaction, and its closing note said one
+sweep is one sample. That held: this audit's redaction finding came from sweeping
+a different axis, and the other two came from areas the last audit never drove.
 
 ## Product and engineering guardrails
 
@@ -54,29 +60,165 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Nothing is open. Every item from this audit has shipped and is in
-`CHANGELOG.md`: the `Authorization` credential leak, the export that reported
-success without exporting anything, the credential formats redaction did not
-recognize, the `Cookie` header, and the derived cost that could fail the call it
-was recording.
+| # | Improvement | Priority | Size | Primary outcome | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Flush `bir tail` so a redirected follow shows anything | P1 | XS | `bir tail \| grep` stops being silent | — |
+| 2 | Redact a secret used as a mapping key | P2 | S | The one position redaction does not reach is closed | — |
+| 3 | Stop recorded text from steering the terminal | P3 | S | A name cannot erase or repaint a `bir` command's output | — |
 
-Two things are worth carrying into the next audit rather than losing with the
-list.
+Nothing here depends on anything else. Item 1 is a one-line fix with a test that
+has to work around its own seam; item 2 has a cost question to settle before it
+lands; item 3 is a rendering change, not a validation one.
 
-Redaction was where the work was: four of the five items were in it, and every
-one was found by the same twenty-format sweep rather than by a report. One sweep
-is one sample, not a clean bill.
+## Work item details
 
-Three of the five items grew once they were measured. The `Authorization` fix
-also had to make redaction idempotent, the `Cookie` and connection-URI rules were
-one item that turned out to be two defects with different shapes, and the derived
-cost turned out to share a root with two unvalidated sums that were dropping whole
-events. An item's Why is where the evidence stops, not where the defect does.
+### 1. Flush `bir tail` so a redirected follow shows anything
+
+**Why:** `bir tail` writes nothing at all when its output is not a terminal.
+Measured by following a store while 400 events were written to it:
+
+```
+  bir tail --path t8/traces.jsonl > t8.out
+    t+1s   0 bytes, 0 of 400 events visible
+    t+2s   0 bytes
+    t+3s   0 bytes
+    after SIGTERM   0 bytes
+
+  PYTHONUNBUFFERED=1, same workload
+    22,690 bytes, 400 of 400 events (~56 bytes per line)
+```
+
+Not a partial delay: nothing arrives. `grep -n flush src/bir/cli.py` returns
+nothing, so the `print(rendered, file=out)` at `src/bir/cli.py:940` lands in
+Python's block buffer for a redirected stdout and stays there. A plain Python
+script writing the same 22,445 bytes to a redirected stdout behaves identically —
+0 bytes while running, everything at exit — so the buffer is larger than a
+realistic tail session ever fills.
+
+That leaves exit as the only thing that drains it, and `tail` is the one command
+built to run until it is interrupted. Anything automated stops it with `SIGTERM`,
+which discards the buffer without unwinding, so a piped `bir tail` can produce
+nothing at all for its whole life. The ordinary way to use a follow command —
+`bir tail | grep error`, or redirecting it to a file — is the way that does not
+work.
+
+No test can see this. `_follow_trace` is exercised with `out=io.StringIO()`
+(`tests/test_cli.py:2022`), which has no buffering to get wrong; the seam that
+makes the loop testable is exactly what hides the defect.
+
+This is the same defect as the shipped experiment-row flush, on the other side of
+the store: there a writer held finished rows behind a buffer that only drained on
+a clean close, here a reader does.
+
+**Scope:**
+
+- Flush after each batch of emitted lines, so an event is visible as soon as it
+  is read.
+- Keep the injected-`out` seam intact — the tests pass a `StringIO`, which has a
+  `flush`, so the existing cases keep working unchanged.
+- A test that reads the output while the follow is still running rather than
+  after it ends. A `StringIO` cannot show the difference, so this one needs a
+  real pipe.
+
+**Done when:** a redirected `bir tail` shows each event as it is written, and a
+run ended by `SIGTERM` has already delivered everything it printed.
+
+### 2. Redact a secret used as a mapping key
+
+**Why:** A mapping key is the one position a secret survives. Sweeping twelve
+value *shapes* rather than credential formats, eleven were redacted and one was
+not:
+
+```
+  {"sk-ABCD…": "value"}          -> {"sk-ABCD1234efgh5678": "value"}    leaks
+  ("sk-ABCD…", "b")              -> ["[redacted]", "b"]
+  {"sk-ABCD…"}  (a set)          -> ["[redacted]"]
+  Cfg(api_key='sk-ABCD…')        -> "Cfg(api_key=[redacted])"
+  b"sk-ABCD…"                    -> "b'[redacted]'"
+  raise … from ValueError(…)     -> cause message redacted
+  eight levels deep              -> cut at [max_depth] before it appears
+```
+
+It reaches the trace file. A function taking `{"sk-…": {"remaining": 3}}` and
+returning `{"sk-…": "exhausted"}` records the key verbatim in both `input` and
+`output`.
+
+`_safe_key` (`src/bir/_capture.py:320`) is `str(value)` and nothing else. Its
+immediate neighbour `_safe_repr` (`:327`) is the same shape and *does* call
+`_redact_secret_text`. Keys already drive detection — `_is_secret_key` is what
+makes `{"api_key": …}` redact its value — so the key is read, just never
+rewritten.
+
+The shape is narrower than a header: it needs a dict keyed by the credential
+itself, such as a per-token rate-limit map or a token-to-session cache. That is
+why it is a P2 and the header leaks were P1s. Nothing pins it; no test references
+`_safe_key`.
+
+**Scope:**
+
+- Redact the rendered key text the way every other captured string is redacted.
+- Keep `_is_secret_key` detection working on the original key name; it decides
+  whether the *value* is replaced and must not start matching `[redacted]`.
+- Settle the cost first. This adds a redaction pass per mapping entry, where
+  today there is one per value, and the last three redaction items each moved a
+  benchmark. Measure `capture_redaction` and a wide-mapping case before choosing
+  the spelling — redacting only keys that could contain a secret may be the way
+  in, since most keys are short identifiers.
+
+**Done when:** a secret is redacted wherever it appears in a captured value,
+including as a mapping key, and the per-entry cost is measured and stated.
+
+### 3. Stop recorded text from steering the terminal
+
+**Why:** Recorded text is printed to the terminal exactly as stored, control
+characters included. A trace recorded under the name
+`\x1b[2K\x1b[31mFAKE ERROR\x1b[0m` comes back out of `bir traces` intact — shown
+here through `cat -v`, which is the only reason the escapes are visible:
+
+```
+  START                             STATUS   DURATION  EVENTS  NAME
+  2026-08-08T03:05:25.719851+00:00  success  0.0ms     1       ok
+  2026-08-08T03:05:25.719254+00:00  success  0.2ms     1       ^[[2K^[[31mFAKE ERROR^[[0m
+```
+
+On a real terminal `\x1b[2K` erases the line the cursor is on, so a row can wipe
+the row above it, and `\x1b[31m` repaints what follows. A name containing a
+newline splits the table row in two on its own.
+
+`_validate_event_name` (`src/bir/_config.py:169`) checks that a name is a
+non-empty string and nothing more, which is the right place to be permissive: a
+name is data, and rejecting an odd one would refuse to record a call over its
+label. The problem is at the other end, where the data is printed.
+
+Names are not always literals. `tool_call(name=…)` in a bridge takes the tool the
+model chose, `trace(name=…)` often takes a route or an operation from a request,
+and `generation(model=…)` takes what the provider returned. Those are outside
+inputs arriving in a field the CLI prints, and `bir traces` and `bir show` are
+read with a terminal attached.
+
+Worth being honest about the ceiling: this is display spoofing and log injection,
+not execution. It earns a P3 rather than a P2 because reading it wrong costs
+trust in the output rather than a credential.
+
+**Scope:**
+
+- Escape or strip control characters when rendering, not when recording. The
+  stored event keeps what the application passed; only the printed form changes.
+- Cover both renderers — the `traces`/`experiments` tables and the `show` event
+  tree — and the fields that carry outside data: names, models, and any captured
+  value that reaches a terminal.
+- Leave `--json` alone. Its consumer is a parser, not a terminal, and escaping
+  there would corrupt the value a pipeline reads.
+
+**Done when:** no recorded value can move the cursor, clear a line, or set a
+colour in the output of a `bir` command, and `--json` still round-trips the value
+as stored.
 
 ## Sequencing
 
-Nothing is queued. The next list has to be re-derived from the code rather than
-continued from this one.
+The three are independent and can go in any order. Item 1 is the smallest and
+the most disproportionate — one flush against a command that currently produces
+nothing when piped.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -101,80 +243,56 @@ rule, reporting events whose trace root is missing, reclaiming a framework run
 whose end callback never arrived, reading a damaged experiment store with
 `--skip-invalid`, compacting the upload sidecar on prune, streaming
 `bir export-otel`, attaching the log-correlation filter where propagated records
-are seen, reporting rather than raising a failed trace-store write, flushing
-each finished example's result row so an interrupted experiment keeps it,
-redacting the credential rather than the scheme in an `Authorization` header,
-reporting a failed OTLP export instead of counting the spans it built, redacting
-fine-grained GitHub tokens, the password inside a connection URI, and the values
-in a `Cookie` or `Set-Cookie` header, and leaving an unrepresentable derived cost
-off an event rather than raising it at the caller.
-Regressions in those areas are bugs; new scope requires a new issue with current
-evidence. The two entries about `bir export-otel` are separate pieces of work and
-neither reopens the other: streaming was about the memory the export holds, and
-the delivery report was about whether it tells the truth.
+are seen, reporting rather than raising a failed trace-store write, flushing each
+finished example's result row so an interrupted experiment keeps it, redacting the
+credential rather than the scheme in an `Authorization` header, reporting a failed
+OTLP export instead of counting the spans it built, redacting fine-grained GitHub
+tokens, the password inside a connection URI, and the values in a `Cookie` or
+`Set-Cookie` header, and leaving an unrepresentable derived cost off an event
+rather than raising it at the caller. Regressions in those areas are bugs; new
+scope requires a new issue with current evidence.
 
-This audit looked at five more things and declined them:
+Item 1 above is not a reopening of streaming the CLI read commands: that was
+about how much of the store those commands hold in memory, this is about whether
+`tail` emits what it has already rendered.
 
-- Recording contexts accepting any attribute. The classes have no `__slots__` and
-  no properties, so assignment bypasses the validating setters: `gen.usage =
-  {"input_tokens": -5}` writes a negative token count that `set_usage` rejects,
-  `gen.model = 12345` writes a non-string model, and `r.documents = [...]` on a
-  retrieval is silently dropped because the reader is `set_documents`. Every
-  shipped integration assigns `gen.model` directly but guards its own value
-  through `_string_or_none`, and the documentation uses the setters throughout.
-  Closing this means slots or properties on six public context types — an
-  API-shape proposal, not a repair.
-- A serialization failure reported as a store outage. `gen.usage = {"input_tokens":
-  float("inf")}` produces `bir could not write to the trace store … Recording is
-  paused and events are being dropped`, immediately followed by `bir resumed
-  writing`. The store was never the problem and recording was never paused. The
-  breadth of that `except Exception` is deliberate and documented
-  (`src/bir/_sdk.py:2025`); only the wording of the diagnosis is wrong, and the
-  path is reachable only through the bypass above, so it rides on that decision.
-  That last claim is now load-bearing rather than incidental: the derived-cost
-  item closed the two routes to it that did *not* need the bypass, an
-  unvalidated `total_cost` and an unvalidated `total_tokens`, both of which were
-  dropping whole events and blaming the store for it.
-- Redacting personal data. Emails and government identifiers pass through
-  unchanged. That matches the documented scope, which is credentials, and
-  redacting every email would destroy legitimate trace content.
-  `additional_secret_keys` and `additional_redaction_patterns` already cover the
-  applications that need it.
-- CLI argument asymmetry. `eval-gate` takes result *paths* while
-  `experiment-show` and `experiment-report` take experiment *ids*, and
-  `eval-gate` prints JSON by default where every other command prints a table.
-  Both are consistent within each command and the errors are clear. It is a UX
-  proposal for an issue.
-- Float noise in machine-readable output. `bir traces --json` reports
-  `"duration_ms": 0.11699999999999999` beside a neighbouring `0.106`. Cosmetic;
-  consumers parse it as a float either way.
+This audit looked at two more things and declined them:
 
-The four the previous audit declined were re-measured where measuring was cheap
-and none of them moved: `load_events` still peaks at 22,761 KiB and `load_traces`
-at 24,162 KiB for 5,000 events, and the framework bridges are still the weakest
-modules at `llamaindex` 82.51%, `langchain` 85.71%, `crewai` 86.79%, and
-`autogen` 88.41%. The early-closed-stream status and the inability to clear a
-configured scalar are unchanged and remain API questions for issues.
+- A byte-order mark at the head of a store. `load_events` refuses it with
+  `Invalid JSON in trace file … at line 1`, and `--skip-invalid` skips the line.
+  Bir writes the store itself and never emits a BOM, so such a file came from
+  somewhere else; reading it as `utf-8-sig` would be a courtesy rather than a
+  repair, and the error already names the file and the line.
+- Recording contexts accepting any attribute, and the store-outage wording that
+  rides on it. Both were declined in the previous audit and neither has moved.
+  The wording decline is now firmer, since the derived-cost item closed the two
+  routes to it that did not need the attribute bypass.
 
-Five areas were checked and found sound, so they need no item:
+The four the previous audit declined were re-measured and none of them moved:
+`load_events` still peaks at 22,761 KiB and `load_traces` at 24,162 KiB for 5,000
+events, and the framework bridges are still the weakest modules at `llamaindex`
+82.51%, `langchain` 85.71%, `crewai` 86.79%, and `autogen` 88.41%.
 
-- Rotation. Forty traces against `max_bytes=4000, backup_count=3` produced four
-  files, and `--include-rotated` agreed across commands: `bir traces` and
-  `bir stats` both reported 20 traces with it and 5 without.
-- Redaction of the formats it does claim. Eighteen of the twenty credential
-  shapes swept are replaced, including the AWS, Google, Slack, Stripe, JWT, PEM,
-  and Luhn-checked card cases, plus everything the four shipped redaction items
-  repaired. The two that survive are the personal data declined below, which is
-  deliberate.
-- The documented capture path against values JSON cannot hold.
-  `set_output(float("inf"))` records `'inf'`, `set_output(b"bytes")` and an
-  arbitrary object record their `repr`, and a `set` records a list. No event was
-  dropped and nothing raised.
-- Log correlation. With `install_trace_id_filter()`, records from `myapp` and
-  `myapp.sub` both carried the trace id inside a trace and `None` outside it.
-- Sampling. `sample_rate=0.0` wrote 0 events and `1.0` wrote 20;
-  `sample_rules={"noisy": 0.0}` dropped all ten `noisy` traces and kept all ten
-  `important` ones.
+Six areas were checked and found sound, so they need no item:
 
-Benchmarks were stable and unchanged against the previous audit's run.
+- `capture_traces`. Configuration was restored in full after a clean block and
+  after one whose body raised, including a user-set `trace_path`, the real store
+  was never created, and a nested block redirected to the inner file and restored
+  on the way out.
+- The send, mark-sent, prune, and sidecar chain. A first send accepted 12 events,
+  a second attempted 0, pruning to the last 2 traces compacted the sidecar to 172
+  bytes, and a third send still attempted 0.
+- Generator finalization. Sync and async generators, each fully consumed and each
+  closed early, plus one raising mid-stream: five runs, five events, statuses
+  `success`/`success`/`error` as documented, none lost.
+- `eval-gate`. A 0.90 → 0.50 regression exits 1; no change and an improvement
+  exit 0; a candidate that dropped the evaluator entirely exits 0 under the
+  default policy and 1 under `--missing-score regress`.
+- Environment precedence. `BIR_*` supplies defaults, `configure()` overrides
+  them, and an explicit `configure(capture_inputs=False)` wins over
+  `BIR_CAPTURE_INPUTS=true`.
+- Damaged and foreign stores. A store with CRLF line endings loads normally; a
+  BOM and an embedded NUL each fail with the file and line named, and
+  `--skip-invalid` skips them.
+
 `grep -rn "TODO\|FIXME\|XXX" src/` is still empty; it stays a dead end.
