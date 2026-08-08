@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,725 lines of runtime source across 19 dependency-free integration modules
+- 17,763 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,681 tests in 47 files at 93.95% branch coverage, with a CI floor, strict
+- 1,688 tests in 47 files at 93.96% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -60,70 +60,31 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| 3 | Stop recorded text from steering the terminal | P3 | S | A name cannot erase or repaint a `bir` command's output | — |
+Nothing is open. All three items from this audit have shipped and are in
+`CHANGELOG.md`: the unflushed `bir tail`, the secret used as a mapping key, and
+recorded text steering the terminal.
 
-Items 1 and 2 have shipped and are in `CHANGELOG.md` — the unflushed `bir tail`
-and the secret used as a mapping key. Numbering is kept so the one that is left
-stays citable.
+Two things are worth carrying forward rather than losing with the list.
 
-Item 2's cost question resolved the opposite way from the one the item feared:
-asking whether any rule *could* match before running fourteen of them made
-ordinary capture faster than it was, and paid for redacting keys several times
-over. Worth remembering the next time a rule set grows.
+Both cost questions resolved by asking a cheap question first, and both ended up
+cheaper than the code they replaced rather than more expensive. Redaction now
+asks whether any rule *could* match before running fourteen of them, which made
+ordinary capture about a third faster than it had been; rendering asks
+`str.isprintable` before reaching for a pattern, at 4.4x less per cell. When a
+rule set grows, the gate in front of it is worth more than the rules are worth
+optimizing.
 
-## Work item details
-
-### 3. Stop recorded text from steering the terminal
-
-**Why:** Recorded text is printed to the terminal exactly as stored, control
-characters included. A trace recorded under the name
-`\x1b[2K\x1b[31mFAKE ERROR\x1b[0m` comes back out of `bir traces` intact — shown
-here through `cat -v`, which is the only reason the escapes are visible:
-
-```
-  START                             STATUS   DURATION  EVENTS  NAME
-  2026-08-08T03:05:25.719851+00:00  success  0.0ms     1       ok
-  2026-08-08T03:05:25.719254+00:00  success  0.2ms     1       ^[[2K^[[31mFAKE ERROR^[[0m
-```
-
-On a real terminal `\x1b[2K` erases the line the cursor is on, so a row can wipe
-the row above it, and `\x1b[31m` repaints what follows. A name containing a
-newline splits the table row in two on its own.
-
-`_validate_event_name` (`src/bir/_config.py:169`) checks that a name is a
-non-empty string and nothing more, which is the right place to be permissive: a
-name is data, and rejecting an odd one would refuse to record a call over its
-label. The problem is at the other end, where the data is printed.
-
-Names are not always literals. `tool_call(name=…)` in a bridge takes the tool the
-model chose, `trace(name=…)` often takes a route or an operation from a request,
-and `generation(model=…)` takes what the provider returned. Those are outside
-inputs arriving in a field the CLI prints, and `bir traces` and `bir show` are
-read with a terminal attached.
-
-Worth being honest about the ceiling: this is display spoofing and log injection,
-not execution. It earns a P3 rather than a P2 because reading it wrong costs
-trust in the output rather than a credential.
-
-**Scope:**
-
-- Escape or strip control characters when rendering, not when recording. The
-  stored event keeps what the application passed; only the printed form changes.
-- Cover both renderers — the `traces`/`experiments` tables and the `show` event
-  tree — and the fields that carry outside data: names, models, and any captured
-  value that reaches a terminal.
-- Leave `--json` alone. Its consumer is a parser, not a terminal, and escaping
-  there would corrupt the value a pipeline reads.
-
-**Done when:** no recorded value can move the cursor, clear a line, or set a
-colour in the output of a `bir` command, and `--json` still round-trips the value
-as stored.
+A gate in front of a rule set has to be checked against the rules, not against
+itself. The first test written for the redaction gate asked whether redaction
+changed the text, which passes for exactly the rules the gate has stopped
+reaching; it was only caught by deliberately narrowing the gate and watching the
+test stay green. Placing the gate at the shared entry point rather than on the
+one new path is what let the existing suite catch a missing marker immediately.
 
 ## Sequencing
 
-One item is left and it depends on nothing.
+Nothing is queued. The next list has to be re-derived from the code rather than
+continued from this one.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -153,11 +114,12 @@ finished example's result row so an interrupted experiment keeps it, redacting t
 credential rather than the scheme in an `Authorization` header, reporting a failed
 OTLP export instead of counting the spans it built, redacting fine-grained GitHub
 tokens, the password inside a connection URI, and the values in a `Cookie` or
-`Set-Cookie` header, and leaving an unrepresentable derived cost off an event
-rather than raising it at the caller, and flushing each batch `bir tail` prints
-so a redirected follow is not silent, and redacting a secret used as a mapping
-key. Regressions in those areas are bugs; new scope requires a new issue with
-current evidence.
+`Set-Cookie` header, leaving an unrepresentable derived cost off an event rather
+than raising it at the caller, flushing each batch `bir tail` prints so a
+redirected follow is not silent, redacting a secret used as a mapping key, and
+escaping control characters when the CLI renders recorded text for a person.
+Regressions in those areas are bugs; new scope requires a new issue with current
+evidence.
 
 The `bir tail` flush is not a reopening of streaming the CLI read commands: that
 was about how much of the store those commands hold in memory, this was about

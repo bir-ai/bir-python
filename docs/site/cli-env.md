@@ -252,6 +252,19 @@ follow command should:
 bir tail | grep error
 ```
 
+### Recorded text cannot steer your terminal
+
+Names, models, and captured values are data, and a name is often not a literal —
+a framework bridge passes the tool the model chose, and an application passes a
+route from a request. When the CLI prints them for a person, control characters
+are escaped as `\x1b`, `\x0a`, and so on, so a recorded value cannot clear a
+line, move the cursor, or set a colour in the output of the command reading it,
+and a name containing a newline cannot split a table row.
+
+Only the printed form changes. The stored event keeps exactly what the
+application passed, `--json` hands a parser the value as written, and
+`load_events()` / `load_traces()` return it unchanged.
+
 A usage error stays a message on stderr and a non-zero exit code even under
 `--json`, so a script never parses a failure as a successful result:
 

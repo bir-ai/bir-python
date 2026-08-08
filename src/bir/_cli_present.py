@@ -8,10 +8,17 @@ callers supply all data and output streams explicitly.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, TextIO
 
 from ._eval_models import ExperimentExampleResult, ExperimentResult, ExperimentSummary
 from ._storage import LoadedTrace, TraceEvent, _event_sort_key
+
+# C0 controls, DEL, and the C1 block. ESC is the one that matters -- it opens the
+# sequences that move the cursor, clear a line, or set a colour -- but a bare
+# newline or tab breaks a table row just as effectively, and the C1 block is
+# treated as escape introducers by some terminals.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _children_by_parent_id(events: list[TraceEvent]) -> dict[str | None, list[TraceEvent]]:
@@ -94,7 +101,7 @@ def _format_event_line(event: TraceEvent, depth: int) -> str:
         parts.append(f"usage={_format_usage(event.usage)}")
     if event.value is not None:
         parts.append(f"value={event.value}")
-    return "  " * depth + "  ".join(parts)
+    return "  " * depth + _visible("  ".join(parts))
 
 
 def _format_usage(usage: dict[str, int | float]) -> str:
@@ -166,12 +173,13 @@ def _experiment_example_to_dict(result: ExperimentExampleResult) -> dict[str, An
 def _print_experiment_detail(summary: ExperimentSummary, experiment: ExperimentResult, out: TextIO) -> None:
     """Render the experiment header, evaluator aggregates, and per-example results."""
 
-    print(f"{summary.name} ({summary.experiment_id})", file=out)
+    # The header is printed rather than tabled, so it escapes its own fields.
+    print(_visible(f"{summary.name} ({summary.experiment_id})"), file=out)
     print(
-        f"status={summary.status}  examples={summary.example_count}  errors={summary.error_count}",
+        _visible(f"status={summary.status}  examples={summary.example_count}  errors={summary.error_count}"),
         file=out,
     )
-    print(f"start={summary.start_time}  end={summary.end_time}", file=out)
+    print(_visible(f"start={summary.start_time}  end={summary.end_time}"), file=out)
 
     print(file=out)
     if summary.aggregate_scores:
@@ -256,7 +264,7 @@ def _format_tail_line(line: str) -> str | None:
     ]
     if payload.get("type") == "score" and "value" in payload:
         parts.append(f"value={payload['value']}")
-    return "  ".join(part for part in parts if part)
+    return _visible("  ".join(part for part in parts if part))
 
 
 def _trace_to_dict(trace: LoadedTrace) -> dict[str, Any]:
@@ -291,7 +299,37 @@ def _format_scores(scores: dict[str, float]) -> str:
     return " ".join(f"{name}={scores[name]:.2f}" for name in sorted(scores))
 
 
+def _visible(text: str) -> str:
+    """Escape control characters so recorded text cannot steer the terminal.
+
+    Names, models, and captured values are data, and a name is often not a
+    literal: a bridge passes the tool the model chose, and an application passes
+    a route from a request. Printed as stored, a name of ``\\x1b[2K\\x1b[31m…``
+    erases the row above it and repaints what follows, so a record could
+    misrepresent the output of the command reading it.
+
+    Escaping happens here, at the point of printing, and never at the point of
+    recording: the stored event keeps exactly what the application passed, and
+    ``--json`` still hands a parser the value as written. Escaping rather than
+    stripping keeps the fact that something odd was recorded visible, which is
+    what a person reading a trace wants to know.
+
+    Almost every cell rendered is ordinary text, so the scan is skipped for it.
+    ``str.isprintable`` is false for every character the pattern matches and runs
+    in C, which measured 4.4x cheaper per cell than reaching for the pattern each
+    time; a value it rejects for some other reason merely pays the scan it would
+    have paid anyway.
+    """
+
+    if text.isprintable():
+        return text
+    return _CONTROL_CHARACTERS.sub(lambda match: f"\\x{ord(match.group()):02x}", text)
+
+
 def _print_table(headers: tuple[str, ...], rows: list[tuple[str, ...]], out: TextIO) -> None:
+    # Escaped before the widths are measured, so an escaped cell still lines up.
+    headers = tuple(_visible(header) for header in headers)
+    rows = [tuple(_visible(cell) for cell in row) for row in rows]
     columns = list(zip(*([headers, *rows]))) if rows else [(header,) for header in headers]
     widths = [max(len(cell) for cell in column) for column in columns]
 

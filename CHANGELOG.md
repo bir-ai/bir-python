@@ -124,6 +124,42 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- Recorded text can no longer steer the terminal reading it. Control characters
+  were printed exactly as stored, so a trace recorded under the name
+  `\x1b[2K\x1b[31mFAKE ERROR\x1b[0m` came back out of `bir traces` intact — shown
+  here through `cat -v`, which is the only reason the escapes are visible:
+
+  ```
+  START                             STATUS   DURATION  EVENTS  NAME
+  2026-08-08T03:05:25.719851+00:00  success  0.0ms     1       ok
+  2026-08-08T03:05:25.719254+00:00  success  0.2ms     1       ^[[2K^[[31mFAKE ERROR^[[0m
+  ```
+
+  On a real terminal `\x1b[2K` erases the line the cursor is on, so a row could
+  wipe the row above it, and `\x1b[31m` repaints what follows. A name containing
+  a newline split the table row in two on its own.
+
+  Names are not always literals: a framework bridge passes the tool the model
+  chose, an application passes a route from a request, and `generation(model=…)`
+  passes what the provider returned. Those are outside inputs arriving in a field
+  the CLI prints.
+
+  Control characters are now escaped as `\x1b`, `\x0a`, and so on when the CLI
+  renders for a person — the tables, the `show` tree, the `tail` stream, and the
+  `experiment-show` header. Escaping rather than stripping keeps the fact that
+  something odd was recorded visible.
+
+  Nothing about recording changes. The stored event keeps exactly what the
+  application passed, `--json` hands a parser the value as written, and the
+  loaders return it unchanged; escaping there would corrupt what a pipeline
+  reads. This is display spoofing rather than execution, which is why it is a
+  smaller fix than the credential items above.
+
+  Measured at +0.12 µs per rendered cell, about 1.2 ms added to listing 2,000
+  traces. Ordinary text skips the scan entirely: `str.isprintable` is false for
+  every character the pattern matches and runs in C, which measured 4.4x cheaper
+  per cell than reaching for the pattern every time.
+
 - A secret used as a mapping **key** is now redacted. It was the one position a
   secret survived. Sweeping twelve value shapes rather than credential formats,
   eleven were replaced and one was not:

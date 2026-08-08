@@ -29,10 +29,18 @@ from typing import Any
 from unittest.mock import patch
 
 import bir
-from bir import cli
+from bir import cli, configure, load_traces
 from bir._sdk import LoadedTrace, TraceEvent, _reset_config_for_tests
 from bir.cli import _aggregate_stats, _percentile, _TraceSummary, _UsageTotals
-from bir.evals import Dataset, DatasetExample, contains, custom_evaluator, exact_match, run_experiment
+from bir.evals import (
+    Dataset,
+    DatasetExample,
+    contains,
+    custom_evaluator,
+    exact_match,
+    load_experiment,
+    run_experiment,
+)
 
 
 @contextmanager
@@ -2110,6 +2118,112 @@ class TailStreamingTests(unittest.TestCase):
                 return
             time.sleep(0.01)
         self.fail(message)
+
+
+class ControlCharacterRenderingTests(CliBaseTest):
+    """Recorded text must not be able to steer the terminal reading it.
+
+    A name is data, and often not a literal: a bridge passes the tool the model
+    chose and an application passes a route from a request. Printed as stored,
+    ``\\x1b[2K`` erases the row above and ``\\x1b[31m`` repaints what follows, so a
+    record could misrepresent the output of the command showing it. A bare
+    newline splits a table row on its own.
+
+    Escaping belongs to printing, not to recording: the event keeps what the
+    application passed, and ``--json`` hands a parser the value as written.
+    """
+
+    ESCAPES = "\x1b[2K\x1b[31mFAKE ERROR\x1b[0m"
+
+    def _record(self, trace_path: Path, name: str, *, model: str | None = None) -> None:
+        configure(trace_path=trace_path)
+        with bir.trace(name=name):
+            if model is not None:
+                with bir.generation("gen", model=model):
+                    pass
+
+    def test_traces_table_escapes_a_name(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record(trace_path, self.ESCAPES)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("\x1b", out)
+            self.assertIn("\\x1b[2K\\x1b[31mFAKE ERROR\\x1b[0m", out)
+
+    def test_a_newline_in_a_name_does_not_split_the_row(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record(trace_path, "two\nlines")
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            # A header and exactly one data row.
+            self.assertEqual(len(out.splitlines()), 2)
+            self.assertIn("two\\x0alines", out)
+
+    def test_show_escapes_the_name_and_the_model(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record(trace_path, self.ESCAPES, model="m\x1b[31m")
+            trace_id = load_traces(str(trace_path))[0].id
+
+            code, out, _ = run_cli("show", trace_id, "--path", str(trace_path))
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("\x1b", out)
+            self.assertIn("\\x1b[2K", out)
+            self.assertIn("model=m\\x1b[31m", out)
+
+    def test_json_keeps_the_value_as_stored(self) -> None:
+        # The consumer is a parser, not a terminal. Escaping here would hand a
+        # pipeline something other than what was recorded.
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record(trace_path, self.ESCAPES)
+
+            code, out, _ = run_cli("traces", "--path", str(trace_path), "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)[0]["name"], self.ESCAPES)
+
+    def test_recording_is_unchanged(self) -> None:
+        # Only the printed form differs; the store keeps what was passed.
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record(trace_path, self.ESCAPES)
+
+            self.assertEqual(load_traces(str(trace_path))[0].name, self.ESCAPES)
+
+    def test_tail_escapes_a_name(self) -> None:
+        self.assertNotIn(
+            "\x1b",
+            cli._format_tail_line(
+                json.dumps({"type": "trace", "name": self.ESCAPES, "status": "success", "start_time": "T1"})
+            )
+            or "",
+        )
+
+    def test_experiment_show_escapes_its_header_and_rows(self) -> None:
+        with temporary_workdir() as workdir:
+            result_path = workdir / "experiment.jsonl"
+            run_experiment(
+                f"exp{self.ESCAPES}",
+                dataset=Dataset([DatasetExample(id=f"q{self.ESCAPES}", input={"s": "x"})]),
+                task=lambda s: s,
+                evaluators=[contains("x")],
+                path=result_path,
+            )
+            experiment_id = load_experiment(result_path).id
+
+            code, out, _ = run_cli("experiment-show", experiment_id, "--dir", str(workdir))
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("\x1b", out)
+            self.assertIn("\\x1b[2K", out)
 
 
 class TopLevelTests(CliBaseTest):
