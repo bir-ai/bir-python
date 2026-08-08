@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from bir import configure, generation, load_events, observe, prompt, score, trace
-from bir._capture import _redact_private_key_blocks
+from bir._capture import _apply_builtin_secret_rules, _may_contain_secret, _redact_private_key_blocks
 from bir._sdk import (
     _is_secret_key,
     _redact_secret_text,
@@ -282,6 +282,135 @@ class BuiltinCredentialFormatRedactionTests(unittest.TestCase):
         self.assertEqual(_redact_secret_text(self.STRIPE_LIVE), "[redacted]")
         self.assertEqual(_redact_secret_text(self.PEM_BLOCK), "[redacted]")
         self.assertEqual(_redact_secret_text(self.GITHUB_FINE_GRAINED), "[redacted]")
+
+
+class MappingKeyRedactionTests(unittest.TestCase):
+    """A secret is redacted wherever it sits, including as a mapping key.
+
+    Values, sequence items, set members, object reprs, bytes reprs, and exception
+    messages were all covered; a key was the one position a secret survived,
+    because the key was rendered with ``str`` and never passed through the rules.
+    A mapping held *by* credential -- a per-token rate-limit map, a token-to-
+    session cache -- recorded its tokens verbatim.
+    """
+
+    SECRET = "sk-ABCD1234efgh5678"
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_a_secret_key_is_redacted(self) -> None:
+        self.assertEqual(_safe_capture({self.SECRET: "value"}), {"[redacted]": "value"})
+
+    def test_a_secret_key_is_redacted_when_nested(self) -> None:
+        self.assertEqual(
+            _safe_capture({"cache": {self.SECRET: {"hits": 3}}}),
+            {"cache": {"[redacted]": {"hits": 3}}},
+        )
+
+    def test_ordinary_keys_are_untouched(self) -> None:
+        self.assertEqual(_safe_capture({"user_id": 7, "role": "admin"}), {"user_id": 7, "role": "admin"})
+
+    def test_the_original_key_still_decides_the_value(self) -> None:
+        # Detection reads the name the caller used. Against a key already
+        # rewritten to the marker it could not fire, and the value would survive.
+        self.assertEqual(_safe_capture({"api_key": "whatever"}), {"api_key": "[redacted]"})
+
+    def test_keys_that_redact_alike_keep_their_entries(self) -> None:
+        # Every key in a mapping held by credential renders as the same marker.
+        # Overwriting would collapse the mapping to one entry without saying so.
+        captured = _safe_capture({"sk-AAAA1111bbbb2222": 1, "sk-CCCC3333dddd4444": 2})
+        self.assertEqual(captured, {"[redacted]": 1, "[redacted] (2)": 2})
+
+    def test_keys_that_rendered_alike_before_also_keep_their_entries(self) -> None:
+        # Distinct keys could always render to the same text; the second used to
+        # replace the first. Redacting keys made that ordinary, so it is fixed
+        # here rather than left to become common.
+        self.assertEqual(_safe_capture({1: "a", "1": "b"}), {"1": "a", "1 (2)": "b"})
+
+    def test_a_secret_key_is_gone_from_the_trace_file(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            configure(trace_path=trace_path, capture_inputs=True, capture_outputs=True)
+
+            @observe(name="lookup")
+            def lookup(rate_limits: dict[str, Any]) -> dict[str, Any]:
+                return {self.SECRET: "exhausted"}
+
+            lookup({self.SECRET: {"remaining": 3}})
+
+            raw = trace_path.read_text(encoding="utf-8")
+            self.assertNotIn(self.SECRET, raw)
+            event = next(e for e in read_events(trace_path) if e["type"] == "trace")
+            self.assertEqual(event["input"], {"rate_limits": {"[redacted]": {"remaining": 3}}})
+            self.assertEqual(event["output"], {"[redacted]": "exhausted"})
+
+
+class SecretMarkerPrefilterTests(unittest.TestCase):
+    """The cheap gate in front of the rule set has to be a superset of it.
+
+    Redaction now runs over mapping keys too, and a captured mapping is mostly
+    short identifiers the fourteen built-in rules cannot possibly match, so the
+    rules are only consulted when a marker is present. A marker missing from that
+    list is a rule that silently stops working, so this asserts the property
+    directly: anything redaction changes must be something the gate accepts.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_the_gate_accepts_everything_redaction_changes(self) -> None:
+        # The shared fixture is the contract the rules are held to, so every case
+        # in it has to survive the gate as well.
+        fixture = json.loads(
+            (Path(__file__).resolve().parent / "fixtures" / "redaction-cases.json").read_text(encoding="utf-8")
+        )
+        cases = [case["input"] for case in fixture]
+        cases += [
+            "sk-ABCD1234efgh5678",
+            "AKIAIOSFODNN7EXAMPLE",
+            "AIzaSyD-1234567890abcdefghijklmnopqrstu",
+            "xoxb-1234-5678-abcdefg",
+            "ghp_" + "A" * 36,
+            "github_pat_11EXAMPLE0aaaaaaaaaa_" + "b" * 59,
+            "sk" + "_live_EXAMPLEliveKEY1234",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",
+            "a" * 86 + "==",
+            "4111111111111111",
+            "-----BEGIN RSA PRIVATE KEY-----body-----END RSA PRIVATE KEY-----",
+            "Cookie: session=abc123",
+            "postgres://admin:hunter2@db.internal:5432/prod",
+            "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+            "api_key=supersecretvalue",
+        ]
+        for case in cases:
+            if not isinstance(case, str):
+                continue
+            with self.subTest(case=case[:48]):
+                if _apply_builtin_secret_rules(case) != case:
+                    self.assertTrue(
+                        _may_contain_secret(case),
+                        f"redaction changed this text but the gate would have skipped the rules: {case!r}",
+                    )
+
+    def test_short_identifiers_do_not_reach_the_rules(self) -> None:
+        # The point of the gate: an ordinary captured mapping is these.
+        for identifier in ("field_0", "user_id", "messages", "nested", "safe", "role", "content"):
+            with self.subTest(identifier=identifier):
+                self.assertFalse(_may_contain_secret(identifier))
+
+    def test_custom_patterns_run_even_when_the_gate_says_no(self) -> None:
+        # Custom rules are the caller's own and may match text carrying none of
+        # the built-in markers, so the gate must not stand in front of them.
+        configure(additional_redaction_patterns=[r"ZZZZ"])
+        self.assertFalse(_may_contain_secret("ZZZZ"))
+        self.assertEqual(_redact_secret_text("ZZZZ"), "[redacted]")
 
 
 class CookieHeaderRedactionTests(unittest.TestCase):

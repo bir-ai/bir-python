@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,649 lines of runtime source across 19 dependency-free integration modules
+- 17,725 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,671 tests in 47 files at 93.94% branch coverage, with a CI floor, strict
+- 1,681 tests in 47 files at 93.95% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -62,60 +62,18 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 2 | Redact a secret used as a mapping key | P2 | S | The one position redaction does not reach is closed | — |
 | 3 | Stop recorded text from steering the terminal | P3 | S | A name cannot erase or repaint a `bir` command's output | — |
 
-Item 1, the unflushed `bir tail`, has shipped and is in `CHANGELOG.md`. Numbering
-is kept so the remaining items stay citable. Neither depends on the other: item 2
-has a cost question to settle before it lands, and item 3 is a rendering change
-rather than a validation one.
+Items 1 and 2 have shipped and are in `CHANGELOG.md` — the unflushed `bir tail`
+and the secret used as a mapping key. Numbering is kept so the one that is left
+stays citable.
+
+Item 2's cost question resolved the opposite way from the one the item feared:
+asking whether any rule *could* match before running fourteen of them made
+ordinary capture faster than it was, and paid for redacting keys several times
+over. Worth remembering the next time a rule set grows.
 
 ## Work item details
-
-### 2. Redact a secret used as a mapping key
-
-**Why:** A mapping key is the one position a secret survives. Sweeping twelve
-value *shapes* rather than credential formats, eleven were redacted and one was
-not:
-
-```
-  {"sk-ABCD…": "value"}          -> {"sk-ABCD1234efgh5678": "value"}    leaks
-  ("sk-ABCD…", "b")              -> ["[redacted]", "b"]
-  {"sk-ABCD…"}  (a set)          -> ["[redacted]"]
-  Cfg(api_key='sk-ABCD…')        -> "Cfg(api_key=[redacted])"
-  b"sk-ABCD…"                    -> "b'[redacted]'"
-  raise … from ValueError(…)     -> cause message redacted
-  eight levels deep              -> cut at [max_depth] before it appears
-```
-
-It reaches the trace file. A function taking `{"sk-…": {"remaining": 3}}` and
-returning `{"sk-…": "exhausted"}` records the key verbatim in both `input` and
-`output`.
-
-`_safe_key` (`src/bir/_capture.py:320`) is `str(value)` and nothing else. Its
-immediate neighbour `_safe_repr` (`:327`) is the same shape and *does* call
-`_redact_secret_text`. Keys already drive detection — `_is_secret_key` is what
-makes `{"api_key": …}` redact its value — so the key is read, just never
-rewritten.
-
-The shape is narrower than a header: it needs a dict keyed by the credential
-itself, such as a per-token rate-limit map or a token-to-session cache. That is
-why it is a P2 and the header leaks were P1s. Nothing pins it; no test references
-`_safe_key`.
-
-**Scope:**
-
-- Redact the rendered key text the way every other captured string is redacted.
-- Keep `_is_secret_key` detection working on the original key name; it decides
-  whether the *value* is replaced and must not start matching `[redacted]`.
-- Settle the cost first. This adds a redaction pass per mapping entry, where
-  today there is one per value, and the last three redaction items each moved a
-  benchmark. Measure `capture_redaction` and a wide-mapping case before choosing
-  the spelling — redacting only keys that could contain a secret may be the way
-  in, since most keys are short identifiers.
-
-**Done when:** a secret is redacted wherever it appears in a captured value,
-including as a mapping key, and the per-entry cost is measured and stated.
 
 ### 3. Stop recorded text from steering the terminal
 
@@ -165,7 +123,7 @@ as stored.
 
 ## Sequencing
 
-The two that are left are independent and can go in any order.
+One item is left and it depends on nothing.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -197,8 +155,9 @@ OTLP export instead of counting the spans it built, redacting fine-grained GitHu
 tokens, the password inside a connection URI, and the values in a `Cookie` or
 `Set-Cookie` header, and leaving an unrepresentable derived cost off an event
 rather than raising it at the caller, and flushing each batch `bir tail` prints
-so a redirected follow is not silent. Regressions in those areas are bugs; new
-scope requires a new issue with current evidence.
+so a redirected follow is not silent, and redacting a secret used as a mapping
+key. Regressions in those areas are bugs; new scope requires a new issue with
+current evidence.
 
 The `bir tail` flush is not a reopening of streaming the CLI read commands: that
 was about how much of the store those commands hold in memory, this was about

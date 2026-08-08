@@ -27,8 +27,8 @@ for how it relates to sampling.
 Before captured events are written, Bir redacts common secret-like fields such
 as `api_key`, `authorization`, `password`, `secret`, and `token`.
 
-Captured strings, fallback object representations, and captured error messages
-are also scanned for common secret-like text patterns, including:
+Captured strings, fallback object representations, captured error messages, and
+mapping **keys** are also scanned for common secret-like text patterns, including:
 
 - Labeled secrets (`api_key=…`, `password: …`, and the other names above).
 - `Authorization` headers, in either the `Authorization: …` or `authorization=…`
@@ -78,6 +78,18 @@ are also scanned for common secret-like text patterns, including:
     Redaction is best-effort, not a guarantee that every credential or
     sensitive value will be recognized. Keep capture opt-in for sensitive
     payloads and review what your application records.
+
+### Secrets used as mapping keys
+
+A mapping held *by* credential — a per-token rate-limit map, a token-to-session
+cache — has its keys redacted too, so
+`{"sk-live-…": {"remaining": 3}}` records as `{"[redacted]": {"remaining": 3}}`.
+
+The key name is still what decides the value's fate, so `{"api_key": "…"}` keeps
+its readable key and replaces its value as before. When several keys redact to
+the same marker the entries are kept apart with a counted suffix —
+`[redacted]`, `[redacted] (2)` — rather than overwriting one another, so a
+mapping never loses entries without saying so.
 
 ### Adding custom rules
 

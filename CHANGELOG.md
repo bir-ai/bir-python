@@ -124,6 +124,52 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- A secret used as a mapping **key** is now redacted. It was the one position a
+  secret survived. Sweeping twelve value shapes rather than credential formats,
+  eleven were replaced and one was not:
+
+  ```
+  {"sk-ABCD…": "value"}     -> {"sk-ABCD1234efgh5678": "value"}   leaked
+  ("sk-ABCD…", "b")         -> ["[redacted]", "b"]
+  {"sk-ABCD…"}  (a set)     -> ["[redacted]"]
+  Cfg(api_key='sk-ABCD…')   -> "Cfg(api_key=[redacted])"
+  b"sk-ABCD…"               -> "b'[redacted]'"
+  ```
+
+  It reached the trace file: a function taking `{"sk-…": {"remaining": 3}}` and
+  returning `{"sk-…": "exhausted"}` recorded the key verbatim in both `input` and
+  `output`. `_safe_key` rendered a key with `str` and nothing else, while its
+  immediate neighbour `_safe_repr` did pass its text through the rules. Keys
+  already drove detection — reading the key is what makes `{"api_key": …}`
+  replace its value — so the key was read, just never rewritten.
+
+  The original key still decides the value's fate; only the recorded form of the
+  key changes. Keys that redact to the same marker are kept apart with a counted
+  suffix (`[redacted]`, `[redacted] (2)`) instead of overwriting one another: a
+  mapping held by credential would otherwise have collapsed to a single entry.
+  That also fixes a collision that predates this change, where `{1: "a", "1": "b"}`
+  silently kept only the second entry.
+
+  Redaction is now asked for only when it could do something. A captured mapping
+  is mostly short identifiers — `field_0`, `role`, `content` — that none of the
+  fourteen built-in rules can match, so a cheap gate looks for the markers those
+  rules need and skips the rule set when none is present. Custom patterns are
+  unaffected: they are the caller's own, may match text carrying no built-in
+  marker, and always run, which is what keeps them purely additive.
+
+  Measured across three interleaved rounds: `capture_redaction` **33.6 → 23.2
+  µs/unit**, so ordinary capture is about 31% *faster* than before this change,
+  because most text no longer pays for rules that cannot match it. A mapping of
+  200 short keys costs 67.5 → 106.0 µs, roughly 0.2 µs per key, which is what
+  redacting keys costs. `capture_large_value` is unchanged within noise.
+
+  The gate has to stay a superset of the rules or a rule silently stops working.
+  Two things hold it there: it gates the shared redaction entry point rather than
+  only the key path, so every redaction test in the suite runs through it, and a
+  test asserts the property against the rules run *ungated* — the obvious
+  spelling, asking whether redaction changed the text, passes for exactly the
+  rules the gate has stopped reaching.
+
 - `Cookie` and `Set-Cookie` headers no longer pass through untouched. A session
   cookie is a live credential — it is what a request presents *instead* of a
   password — so this was the same class as the `Authorization` header repaired

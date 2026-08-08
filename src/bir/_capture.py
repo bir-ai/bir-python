@@ -50,6 +50,14 @@ _SECRET_KEY_NAMES = {
     "creds",
 }
 
+# The markers :func:`_may_contain_secret` looks for before consulting the rule
+# set. Split by cost: a character class is one cheap scan, the digit run is only
+# needed for a card number written without separators, and the literals are the
+# prefixes that carry neither.
+_SECRET_MARKER_CHARS = re.compile(r"[:=.\s\-]")
+_SECRET_DIGIT_RUN = re.compile(r"\d{13}")
+_SECRET_MARKER_LITERALS = re.compile(r"sk_|rk_|gh[posur]_|github_pat_|AKIA|ASIA|AIza|eyJ|xox")
+
 # The two halves of a PEM private-key block, matched separately so the block can
 # be located without a quantifier that spans them. See
 # :func:`_redact_private_key_blocks`. Neither label class can contain ``-``, so a
@@ -254,10 +262,16 @@ def _capture_mapping(value: Mapping[Any, Any], depth: int, *, config: _Config) -
     which may do I/O or fail outright (a config client, a lazily-loading row
     proxy). A walk that fails keeps the entries it already read and marks the
     rest uncapturable, the same way the entry-count limit marks what it left out.
+
+    A key is redacted for the capture but the original is what decides the
+    value's fate: :func:`_is_secret_key` reads the name the caller used, so
+    ``{"api_key": …}`` still replaces its value, which it could not do against
+    a key already rewritten to the marker.
     """
 
     limit = config.max_collection_items
     captured: dict[str, Any] = {}
+    seen: dict[str, int] = {}
     truncated = False
     uncapturable = False
     try:
@@ -266,7 +280,7 @@ def _capture_mapping(value: Mapping[Any, Any], depth: int, *, config: _Config) -
                 truncated = True
                 break
             item_key_text = _safe_key(item_key)
-            captured[item_key_text] = _safe_capture(
+            captured[_unique_key(_redact_secret_text(item_key_text, config=config), seen)] = _safe_capture(
                 item_value,
                 config=config,
                 key=item_key_text,
@@ -317,6 +331,22 @@ def _is_secret_key(key: str, *, config: _Config) -> bool:
     return any(secret_part in normalized for secret_part in _SECRET_KEY_PARTS)
 
 
+def _unique_key(key_text: str, seen: dict[str, int]) -> str:
+    """Keep two entries whose keys render alike from overwriting each other.
+
+    Distinct keys have always been able to render to the same text -- ``1`` and
+    ``"1"`` both become ``"1"`` -- and the second silently replaced the first.
+    Redacting keys makes that ordinary rather than rare: every key in a mapping
+    held by credential renders as the marker, so a cache keyed by token would
+    have collapsed to a single entry. Dropping data without saying so is the one
+    thing the rest of this module refuses to do, hence the suffix.
+    """
+
+    count = seen.get(key_text, 0) + 1
+    seen[key_text] = count
+    return key_text if count == 1 else f"{key_text} ({count})"
+
+
 def _safe_key(value: Any) -> str:
     try:
         return str(value)
@@ -348,6 +378,24 @@ def _safe_error(exc: BaseException, *, config: _Config) -> str:
 
 
 def _redact_secret_text(value: str, *, config: _Config) -> str:
+    # The gate stands in front of the built-in rules only. Custom patterns are
+    # the caller's own and may match text carrying none of the built-in markers,
+    # so they always run -- which is what keeps them purely additive.
+    redacted = _apply_builtin_secret_rules(value) if _may_contain_secret(value) else value
+    for pattern in config.additional_redaction_patterns:
+        redacted = pattern.sub(_REDACTED, redacted)
+    return redacted
+
+
+def _apply_builtin_secret_rules(value: str) -> str:
+    """Run every built-in rule, without the gate in front of them.
+
+    Kept separate so the gate's contract can be checked against the rules rather
+    than against itself: a test that asked whether :func:`_redact_secret_text`
+    changed the text would be asking the gated path what the gate should have
+    let through, and would pass for a rule the gate had stopped reaching.
+    """
+
     redacted = value
     redacted = _AUTH_HEADER_RULE.sub(_redact_auth_header_match, redacted)
     redacted = _COOKIE_HEADER_RULE.sub(_redact_cookie_header_match, redacted)
@@ -391,10 +439,38 @@ def _redact_secret_text(value: str, *, config: _Config) -> str:
     redacted = re.sub(r"(?<![0-9A-Za-z+/])[0-9A-Za-z+/]{86}==(?![0-9A-Za-z+/=])", _REDACTED, redacted)
     redacted = _redact_private_key_blocks(redacted)
     redacted = re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _redact_pan_match, redacted)
-    # User-supplied patterns run last and only add redaction coverage.
-    for pattern in config.additional_redaction_patterns:
-        redacted = pattern.sub(_REDACTED, redacted)
     return redacted
+
+
+def _may_contain_secret(text: str) -> bool:
+    """Whether any built-in rule could match ``text``, cheaply and conservatively.
+
+    Every built-in rule needs at least one of three markers, and this asks for
+    them in increasing order of cost. It exists because redaction now runs over
+    mapping *keys* as well as values, and a captured mapping is mostly short
+    identifiers -- ``field_0``, ``role``, ``content`` -- for which the full rule
+    set is fourteen regular expressions that cannot possibly match. Measured on
+    200 such keys, asking first costs 0.71us each against 4.05us for asking the
+    rules.
+
+    It must stay a superset: a ``False`` here means no rule is consulted, so a
+    marker missing from this list is a rule that silently stops working. Two
+    things guard that. It gates :func:`_redact_secret_text` itself rather than
+    only the key path, so every redaction test in the suite runs through it, and
+    a test asserts the property directly -- for every case the fixture and the
+    redaction suites carry, text that redaction changes must be text this
+    accepts.
+    """
+
+    # A separator: every labeled, header, URI, bearer, PEM, and ``sk-``-style
+    # rule needs one of these to delimit or introduce its secret.
+    if _SECRET_MARKER_CHARS.search(text):
+        return True
+    # A bare card-length digit run; with separators it is covered above.
+    if _SECRET_DIGIT_RUN.search(text):
+        return True
+    # What is left are prefixes made only of letters and digits.
+    return bool(_SECRET_MARKER_LITERALS.search(text))
 
 
 def _redact_private_key_blocks(text: str) -> str:
