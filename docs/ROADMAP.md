@@ -1,6 +1,6 @@
 # Bir Python SDK — Improvement Roadmap
 
-> Current baseline: **v0.3.0**, audited **2026-08-08**.
+> Current baseline: **v0.3.0**, audited **2026-08-09**.
 >
 > This document contains only work that is still open. Completed work belongs in
 > `CHANGELOG.md`; implementation details and copy-paste task prompts belong in
@@ -28,17 +28,14 @@ At this audit the repository has:
   distributed trace context.
 
 Every item from the previous list shipped and is in `CHANGELOG.md`. This list is
-not a continuation of it. It was re-derived by driving the SDK: a coverage run,
-`scripts/benchmarks.py --repeat 3`, the CLI run under a pipe and under a
-terminal, a second redaction sweep using value *shapes* rather than credential
-formats, and probes written for this audit against `capture_traces`, the
-send/prune/sidecar chain, generator finalization, `eval-gate`, environment
-precedence, and damaged stores. Each item states what was run and what it
-produced.
+not a continuation of it.
 
-The previous list was almost entirely redaction, and its closing note said one
-sweep is one sample. That held: this audit's redaction finding came from sweeping
-a different axis, and the other two came from areas the last audit never drove.
+The last two audits found their work in output: buffering, escaping, and where
+redaction did and did not reach. So this one drove the other direction — what the
+SDK accepts *from* providers and frameworks — along with concurrency, capture
+limits, report rendering, evaluation comparison, sampling, file permissions, and
+deployment-shaped store conditions. The P1 below came from the first of those and
+would not have surfaced from any amount of further output sweeping.
 
 ## Product and engineering guardrails
 
@@ -60,31 +57,110 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Nothing is open. All three items from this audit have shipped and are in
-`CHANGELOG.md`: the unflushed `bir tail`, the secret used as a mapping key, and
-recorded text steering the terminal.
+| # | Improvement | Priority | Size | Primary outcome | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Guard reading a provider's response the way writing is guarded | P1 | S | A response object that raises stops failing the call it belongs to | — |
+| 2 | Decide what the trace store's file permissions should be | P3 | S | A store of captured payloads is not world-readable by default | — |
 
-Two things are worth carrying forward rather than losing with the list.
+Neither depends on the other. Item 1 is the one that matters; item 2 is a default
+worth choosing deliberately rather than inheriting.
 
-Both cost questions resolved by asking a cheap question first, and both ended up
-cheaper than the code they replaced rather than more expensive. Redaction now
-asks whether any rule *could* match before running fourteen of them, which made
-ordinary capture about a third faster than it had been; rendering asks
-`str.isprintable` before reaching for a pattern, at 4.4x less per cell. When a
-rule set grows, the gate in front of it is worth more than the rules are worth
-optimizing.
+## Work item details
 
-A gate in front of a rule set has to be checked against the rules, not against
-itself. The first test written for the redaction gate asked whether redaction
-changed the text, which passes for exactly the rules the gate has stopped
-reaching; it was only caught by deliberately narrowing the gate and watching the
-test stay green. Placing the gate at the shared entry point rather than on the
-one new path is what let the existing suite catch a missing marker immediately.
+### 1. Guard reading a provider's response the way writing is guarded
+
+**Why:** A provider call that *succeeded* is turned into a failure when the
+object it returned raises while Bir reads it for recording. Measured against
+every direct provider bridge, with a response whose `model_dump()` raises:
+
+```
+  model_dump() raises  breaks: anthropic, bedrock, cohere, google, litellm, mistral, openai
+  dict() raises        breaks: anthropic, bedrock, cohere, google, litellm, mistral, openai
+  property raises      breaks: anthropic, litellm, mistral, openai
+```
+
+The asynchronous wrappers behave the same way; `trace_chat_completion_async` and
+`trace_messages_async` both re-raise. The traced function loses the response it
+had already been handed.
+
+`_response_output` (`src/bir/integrations/_common.py:36`) calls `model_dump()`,
+then `dict()`, then `dict(response)` — three pieces of code the provider owns,
+none of them guarded. `_value` reads attributes with `getattr(source, key, None)`,
+which absorbs a missing attribute but not a property that raises.
+
+This is the invariant the SDK has spent three releases establishing, and the
+guard is on the wrong end of it. A store that cannot be written is caught and
+reported; a value whose own `__repr__` raises is caught inside `_safe_capture`.
+Both of those protect the *last* step. Reading the provider's response is the
+*first* step, it runs code Bir does not own, and it is unprotected — so the one
+recording path with a third party's code in it is the one without a guard.
+
+It is reachable without anything exotic: `model_dump()` raises
+`PydanticSerializationError` on a field it cannot serialize, a lazily-loading
+response wrapper raises on attribute access, and a test double raises by
+construction. The cost is the whole point of the SDK — instrumentation is
+supposed to be safe to add to a working call.
+
+Nothing pins it. The shared integration contract has no case for a response whose
+own code raises; the response doubles in it are all well-behaved.
+
+**Scope:**
+
+- Guard the three reads in `_response_output` and the attribute reads around it,
+  recording the output as uncapturable rather than propagating — the marker
+  `_safe_capture` already uses for this.
+- Cover the async and streaming wrappers, which read the same helpers.
+- Add the case to `tests/integration_contract.py` so it holds for every bridge at
+  once and for any bridge added later, rather than testing one provider.
+- Keep a genuinely failing provider call raising. The call failing is the
+  caller's business; only reading its *result* for a record is not.
+
+**Done when:** no provider response can make a traced call raise, for every
+bridge, sync and async, and the conformance contract asserts it.
+
+### 2. Decide what the trace store's file permissions should be
+
+**Why:** Everything the SDK writes is created with the process umask, which on a
+default umask of `022` means world-readable:
+
+```
+  dir  0o755  .bir
+  file 0o644  .bir/traces.jsonl
+  file 0o644  .bir/experiments/e.jsonl
+  file 0o644  .bir/experiments/e.summary.json
+```
+
+Those files hold captured inputs and outputs. Redaction is documented as
+best-effort, and `docs/site/capture-privacy.md` tells users to "keep capture
+opt-in for sensitive payloads and review what your application records" — which
+is an acknowledgement that a store can hold things worth protecting. On a shared
+CI runner, a multi-user host, or a container with a sidecar under a different
+uid, `0644` is readable by anyone on the box.
+
+This is a P3 and deliberately framed as a decision rather than a repair, because
+the trade-off is real in both directions. `0600` is what tools holding
+credentials use, and it is the safer default. It would also break a legitimate
+arrangement — a collector running as another user reading the store — and a user
+who wants it can already set their umask. What should not happen is the current
+state, where the default was inherited rather than chosen and is written down
+nowhere.
+
+**Scope:**
+
+- Choose the default and say why in `docs/site/capture-privacy.md`; the decision
+  is the deliverable, and either answer is defensible if it is recorded.
+- If it tightens, apply it to the trace store, its rotated siblings, the sent
+  sidecar, and experiment result and summary files — a store is only as private
+  as its least private file.
+- Leave the directory alone unless the file mode alone is insufficient, and do
+  not chmod files that already exist: a user who widened them meant it.
+
+**Done when:** the mode the SDK creates its files with is a written-down decision
+rather than whatever the umask gave it, and every file it writes agrees with it.
 
 ## Sequencing
 
-Nothing is queued. The next list has to be re-derived from the code rather than
-continued from this one.
+The two are independent. Item 1 should not wait on item 2.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -121,47 +197,62 @@ escaping control characters when the CLI renders recorded text for a person.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-The `bir tail` flush is not a reopening of streaming the CLI read commands: that
-was about how much of the store those commands hold in memory, this was about
-whether `tail` emits what it has already rendered.
+Item 1 above is adjacent to the shipped "guarding capture against a value whose
+own code raises" and is not a reopening of it. That guard is inside
+`_safe_capture` and protects Bir from a value it has already been given; this is
+about the bridges reading a provider's object to produce that value, before
+anything reaches the guard.
 
-This audit looked at two more things and declined them:
+This audit looked at three more things and declined them:
 
-- A byte-order mark at the head of a store. `load_events` refuses it with
-  `Invalid JSON in trace file … at line 1`, and `--skip-invalid` skips the line.
-  Bir writes the store itself and never emits a BOM, so such a file came from
-  somewhere else; reading it as `utf-8-sig` would be a courtesy rather than a
-  repair, and the error already names the file and the line.
+- The Markdown report passing content through. `render_experiment_report(format="markdown")`
+  escapes the pipe separator and collapses newlines, so recorded text cannot
+  break the table, but `<script>` and Markdown link syntax survive into the
+  document. The HTML renderer escapes every experiment-derived string and was
+  checked interpolation by interpolation; the Markdown one's narrower contract is
+  written into its docstring, and raw HTML passing through Markdown is a property
+  of the format rather than of this renderer. It is a product question about what
+  a `.md` artifact promises, which belongs in an issue.
+- Redaction of non-ASCII spellings. `api_key：value` written with a fullwidth
+  colon is not matched, because the labeled rule asks for an ASCII `:` or `=`.
+  The same sweep showed `SK-` uppercase, a zero-width character inside a token,
+  a base64-wrapped key, and a URL-encoded one all passing through — but none of
+  those is a string that would work as a credential, so the rules being
+  ASCII-literal is a reasonable shape for formats that are themselves
+  ASCII-literal. Widening them is a proposal with a false-positive budget
+  attached.
 - Recording contexts accepting any attribute, and the store-outage wording that
-  rides on it. Both were declined in the previous audit and neither has moved.
-  The wording decline is now firmer, since the derived-cost item closed the two
-  routes to it that did not need the attribute bypass.
+  rides on it. Declined in both previous audits and unmoved.
 
-The four the previous audit declined were re-measured and none of them moved:
-`load_events` still peaks at 22,761 KiB and `load_traces` at 24,162 KiB for 5,000
-events, and the framework bridges are still the weakest modules at `llamaindex`
-82.51%, `langchain` 85.71%, `crewai` 86.79%, and `autogen` 88.41%.
+The previously declined memory profile of the loaders was re-measured and has not
+moved: `load_events` still peaks at 22,761 KiB and `load_traces` at 24,162 KiB
+for 5,000 events, identical to the last three audits. Benchmark timings from this
+run are not comparable to earlier ones — the machine was loaded, and every case
+came in high, including ones this audit did not touch.
 
-Six areas were checked and found sound, so they need no item:
+Seven areas were checked and found sound, so they need no item:
 
-- `capture_traces`. Configuration was restored in full after a clean block and
-  after one whose body raised, including a user-set `trace_path`, the real store
-  was never created, and a nested block redirected to the inner file and restored
-  on the way out.
-- The send, mark-sent, prune, and sidecar chain. A first send accepted 12 events,
-  a second attempted 0, pruning to the last 2 traces compacted the sidecar to 172
-  bytes, and a third send still attempted 0.
-- Generator finalization. Sync and async generators, each fully consumed and each
-  closed early, plus one raising mid-stream: five runs, five events, statuses
-  `success`/`success`/`error` as documented, none lost.
-- `eval-gate`. A 0.90 → 0.50 regression exits 1; no change and an improvement
-  exit 0; a candidate that dropped the evaluator entirely exits 0 under the
-  default policy and 1 under `--missing-score regress`.
-- Environment precedence. `BIR_*` supplies defaults, `configure()` overrides
-  them, and an explicit `configure(capture_inputs=False)` wins over
-  `BIR_CAPTURE_INPUTS=true`.
-- Damaged and foreign stores. A store with CRLF line endings loads normally; a
-  BOM and an embedded NUL each fail with the file and line named, and
-  `--skip-invalid` skips them.
+- Concurrency. Four processes writing 150 traces each produced exactly 1,200
+  events and 600 traces with every worker accounted for, and the same run against
+  an 8 KB rotation limit left four files that all loaded without a torn line.
+- Capture limits. With `max_collection_items=3` and `max_value_length=20`, long
+  strings, long lists, and wide mappings each truncate with their marker, a
+  secret past the item limit is dropped rather than shown, a secret inside a
+  truncated string is redacted before the cut, and one eight levels deep is cut
+  at `[max_depth]` before it appears.
+- The HTML report. Every experiment-derived string reaches `html.escape`, checked
+  interpolation by interpolation; a recorded `<script>` renders as `&lt;script&gt;`.
+- `compare_experiments`. Identical runs report no regression, `0.9 → 0.899999`
+  reports one, the same pair under `tolerance=0.01` does not, and two experiments
+  with no shared example ids produce no per-example deltas rather than a spurious
+  regression.
+- Sampling rules. A per-name rule of `0.0` suppresses that name under a global
+  rate of `1.0`, a rule of `1.0` keeps it under a global rate of `0.0`, and a
+  global `0.0` with no rules records nothing.
+- Deployment-shaped store conditions. A parent path that is a file, a trace path
+  that is a directory, a symlink to `/dev/null`, a read-only parent, and a
+  300-character filename each leave the traced call succeeding.
+- File contents under those conditions. Nothing was written where it could not
+  be, and nothing raised at the caller.
 
 `grep -rn "TODO\|FIXME\|XXX" src/` is still empty; it stays a dead end.
