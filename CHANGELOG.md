@@ -10,6 +10,37 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir tail` now shows events when its output is redirected. It showed nothing at
+  all. Measured by following a store while 400 events were written to it:
+
+  ```
+  bir tail --path traces.jsonl > tail.out
+    t+1s   0 bytes, 0 of 400 events
+    t+2s   0 bytes
+    t+3s   0 bytes
+    after SIGTERM   0 bytes
+
+  PYTHONUNBUFFERED=1, same workload
+    22,690 bytes, 400 of 400 events
+  ```
+
+  Not a partial delay: nothing arrived. Nothing in `cli.py` flushed, so the
+  rendered lines sat in the block buffer Python uses for a stdout that is not a
+  terminal — and that buffer is larger than a following session ever fills, so
+  the only thing that drained it was the process exiting. `tail` is the one
+  command built to run until it is interrupted, and anything automated stops it
+  with `SIGTERM`, which discards the buffer without unwinding. A redirected
+  `bir tail` could therefore produce nothing for its entire life, which broke the
+  ordinary way to use a follow command: `bir tail | grep error`.
+
+  Each batch is flushed before the poll loop sleeps.
+
+  No existing test could see this. `_follow_trace` is exercised with a
+  `StringIO`, which has no buffering to get wrong, so those cases passed either
+  way — the seam that makes the loop testable is what hid the defect. The new
+  case drives the CLI as a subprocess against a real pipe and reads the output
+  while the follow is still running.
+
 - A derived cost can no longer fail the call it was recording. `configure(model_prices=...)`
   validates every rate as finite and non-negative, and `set_usage()` validates
   every token count the same way, but the arithmetic between them was not

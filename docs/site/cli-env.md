@@ -244,6 +244,14 @@ Two commands have no JSON form. `tail` streams events as they arrive rather than
 producing a result, and `experiment-report` renders a document you asked for in
 a named format.
 
+`bir tail` flushes each batch it prints, so its output arrives as the events do
+whether it is attached to a terminal or redirected. Composing it works the way a
+follow command should:
+
+```bash
+bir tail | grep error
+```
+
 A usage error stays a message on stderr and a non-zero exit code even under
 `--json`, so a script never parses a failure as a successful result:
 

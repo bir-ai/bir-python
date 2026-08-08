@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from collections.abc import Iterator
@@ -2049,6 +2050,66 @@ class TailCommandTests(CliBaseTest):
             self.assertEqual(code, 0)
             self.assertIn("Following", err)
             self.assertIn("live", out)
+
+
+class TailStreamingTests(unittest.TestCase):
+    """A redirected follow has to show events while it is still running.
+
+    The cases above drive ``_follow_trace`` with a ``StringIO``, which has no
+    buffering to get wrong, so they pass whether or not anything is flushed. The
+    defect only exists against a real block-buffered stdout: Python held the
+    rendered lines until the process exited, and a follow command is ended by a
+    signal rather than by exiting, so ``bir tail | grep`` produced nothing for the
+    whole run. That needs a subprocess and a pipe to see.
+    """
+
+    EVENT = {"type": "trace", "name": "streamed", "status": "success", "start_time": "T1"}
+
+    def test_a_redirected_follow_shows_an_event_before_it_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            trace_path = workdir / "traces.jsonl"
+            stdout_path = workdir / "tail.out"
+            stderr_path = workdir / "tail.err"
+
+            env = dict(os.environ)
+            src = str(Path(bir.__file__).resolve().parent.parent)
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, [src, env.get("PYTHONPATH", "")]))
+
+            with stdout_path.open("wb") as out_file, stderr_path.open("wb") as err_file:
+                follower = subprocess.Popen(
+                    [sys.executable, "-m", "bir", "tail", "--path", str(trace_path)],
+                    stdout=out_file,
+                    stderr=err_file,
+                    env=env,
+                )
+            try:
+                # The follower records where the file ends when it starts, so the
+                # event has to be written after it is following or it is skipped
+                # as history rather than streamed.
+                self._wait_for(follower, stderr_path, "Following", "the follower never started")
+                with trace_path.open("a", encoding="utf-8") as trace_file:
+                    trace_file.write(json.dumps(self.EVENT) + "\n")
+
+                self._wait_for(follower, stdout_path, "streamed", "the event never reached the redirected stdout")
+                # Still running, so what was read came from a flush rather than
+                # from the buffer being emptied on the way out.
+                self.assertIsNone(follower.poll(), "the follower exited before the output was checked")
+            finally:
+                follower.terminate()
+                follower.wait(timeout=30)
+
+    def _wait_for(self, follower: subprocess.Popen[bytes], path: Path, needle: str, message: str) -> None:
+        """Block until ``needle`` is readable in ``path`` while ``follower`` runs."""
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if follower.poll() is not None:
+                self.fail(f"{message}: the follower exited with {follower.returncode}")
+            if needle in path.read_text(encoding="utf-8", errors="replace"):
+                return
+            time.sleep(0.01)
+        self.fail(message)
 
 
 class TopLevelTests(CliBaseTest):

@@ -909,7 +909,16 @@ def _follow_trace(
 
 
 def _emit_new_events(path: Path, offset: int, out: TextIO) -> int:
-    """Print complete event lines written past ``offset`` and return the new offset."""
+    """Print complete event lines written past ``offset`` and return the new offset.
+
+    The batch is flushed before returning. Python block-buffers a stdout that is
+    not a terminal, and the buffer is larger than a following session ever fills,
+    so without this the only thing that drained it was the process exiting --
+    which a command built to run until it is interrupted does not reach when a
+    signal stops it. A redirected ``bir tail`` printed nothing at all, for its
+    whole life, which is the ordinary way to use a follow command:
+    ``bir tail | grep error``.
+    """
 
     try:
         size = path.stat().st_size
@@ -938,6 +947,7 @@ def _emit_new_events(path: Path, offset: int, out: TextIO) -> int:
         rendered = _format_tail_line(stripped)
         if rendered is not None:
             print(rendered, file=out)
+    out.flush()
     return offset + len(complete)
 
 

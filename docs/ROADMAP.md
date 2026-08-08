@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,639 lines of runtime source across 19 dependency-free integration modules
+- 17,649 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,670 tests in 47 files at 93.94% branch coverage, with a CI floor, strict
+- 1,671 tests in 47 files at 93.94% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -62,66 +62,15 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Flush `bir tail` so a redirected follow shows anything | P1 | XS | `bir tail \| grep` stops being silent | — |
 | 2 | Redact a secret used as a mapping key | P2 | S | The one position redaction does not reach is closed | — |
 | 3 | Stop recorded text from steering the terminal | P3 | S | A name cannot erase or repaint a `bir` command's output | — |
 
-Nothing here depends on anything else. Item 1 is a one-line fix with a test that
-has to work around its own seam; item 2 has a cost question to settle before it
-lands; item 3 is a rendering change, not a validation one.
+Item 1, the unflushed `bir tail`, has shipped and is in `CHANGELOG.md`. Numbering
+is kept so the remaining items stay citable. Neither depends on the other: item 2
+has a cost question to settle before it lands, and item 3 is a rendering change
+rather than a validation one.
 
 ## Work item details
-
-### 1. Flush `bir tail` so a redirected follow shows anything
-
-**Why:** `bir tail` writes nothing at all when its output is not a terminal.
-Measured by following a store while 400 events were written to it:
-
-```
-  bir tail --path t8/traces.jsonl > t8.out
-    t+1s   0 bytes, 0 of 400 events visible
-    t+2s   0 bytes
-    t+3s   0 bytes
-    after SIGTERM   0 bytes
-
-  PYTHONUNBUFFERED=1, same workload
-    22,690 bytes, 400 of 400 events (~56 bytes per line)
-```
-
-Not a partial delay: nothing arrives. `grep -n flush src/bir/cli.py` returns
-nothing, so the `print(rendered, file=out)` at `src/bir/cli.py:940` lands in
-Python's block buffer for a redirected stdout and stays there. A plain Python
-script writing the same 22,445 bytes to a redirected stdout behaves identically —
-0 bytes while running, everything at exit — so the buffer is larger than a
-realistic tail session ever fills.
-
-That leaves exit as the only thing that drains it, and `tail` is the one command
-built to run until it is interrupted. Anything automated stops it with `SIGTERM`,
-which discards the buffer without unwinding, so a piped `bir tail` can produce
-nothing at all for its whole life. The ordinary way to use a follow command —
-`bir tail | grep error`, or redirecting it to a file — is the way that does not
-work.
-
-No test can see this. `_follow_trace` is exercised with `out=io.StringIO()`
-(`tests/test_cli.py:2022`), which has no buffering to get wrong; the seam that
-makes the loop testable is exactly what hides the defect.
-
-This is the same defect as the shipped experiment-row flush, on the other side of
-the store: there a writer held finished rows behind a buffer that only drained on
-a clean close, here a reader does.
-
-**Scope:**
-
-- Flush after each batch of emitted lines, so an event is visible as soon as it
-  is read.
-- Keep the injected-`out` seam intact — the tests pass a `StringIO`, which has a
-  `flush`, so the existing cases keep working unchanged.
-- A test that reads the output while the follow is still running rather than
-  after it ends. A `StringIO` cannot show the difference, so this one needs a
-  real pipe.
-
-**Done when:** a redirected `bir tail` shows each event as it is written, and a
-run ended by `SIGTERM` has already delivered everything it printed.
 
 ### 2. Redact a secret used as a mapping key
 
@@ -216,9 +165,7 @@ as stored.
 
 ## Sequencing
 
-The three are independent and can go in any order. Item 1 is the smallest and
-the most disproportionate — one flush against a command that currently produces
-nothing when piped.
+The two that are left are independent and can go in any order.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -249,12 +196,13 @@ credential rather than the scheme in an `Authorization` header, reporting a fail
 OTLP export instead of counting the spans it built, redacting fine-grained GitHub
 tokens, the password inside a connection URI, and the values in a `Cookie` or
 `Set-Cookie` header, and leaving an unrepresentable derived cost off an event
-rather than raising it at the caller. Regressions in those areas are bugs; new
+rather than raising it at the caller, and flushing each batch `bir tail` prints
+so a redirected follow is not silent. Regressions in those areas are bugs; new
 scope requires a new issue with current evidence.
 
-Item 1 above is not a reopening of streaming the CLI read commands: that was
-about how much of the store those commands hold in memory, this is about whether
-`tail` emits what it has already rendered.
+The `bir tail` flush is not a reopening of streaming the CLI read commands: that
+was about how much of the store those commands hold in memory, this was about
+whether `tail` emits what it has already rendered.
 
 This audit looked at two more things and declined them:
 
