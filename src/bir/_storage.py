@@ -22,7 +22,12 @@ from types import TracebackType
 from typing import IO, Any
 from uuid import uuid4
 
-from ._config import _validate_non_negative_number, _validate_number, _validate_positive_int
+from ._config import (
+    _private_opener,
+    _validate_non_negative_number,
+    _validate_number,
+    _validate_positive_int,
+)
 
 if os.name == "nt":
     import msvcrt
@@ -669,7 +674,7 @@ def _append_event(
                 max_bytes=max_bytes,
                 backup_count=backup_count,
             )
-            with trace_path.open("a", encoding="utf-8") as trace_file:
+            with open(trace_path, "a", encoding="utf-8", opener=_private_opener) as trace_file:
                 trace_file.write(payload)
 
 
@@ -1048,7 +1053,9 @@ def _stage_filtered_trace_file(
             removed_events, kept_bytes = _stream_filtered_trace_file(file_path, is_removed, None)
         else:
             temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            with temp_path.open("xb") as staged_file:
+            # Replaces the trace file, so it is created with the store's mode
+            # rather than handing prune's output a wider one.
+            with open(temp_path, "xb", opener=_private_opener) as staged_file:
                 removed_events, kept_bytes = _stream_filtered_trace_file(
                     file_path,
                     is_removed,
@@ -1190,7 +1197,10 @@ def _write_sent_ids(sent_ids_path: Path, event_ids: set[str]) -> None:
     payload = json.dumps({"event_ids": sorted(event_ids)}, separators=(",", ":")) + "\n"
     temp_path = sent_ids_path.with_name(f".{sent_ids_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     try:
-        temp_path.write_text(payload, encoding="utf-8")
+        # Staged through a temp file that is replaced onto the sidecar, so the
+        # mode has to be set here: the rename carries it to the destination.
+        with open(temp_path, "w", encoding="utf-8", opener=_private_opener) as staged_file:
+            staged_file.write(payload)
         temp_path.replace(sent_ids_path)
     finally:
         temp_path.unlink(missing_ok=True)

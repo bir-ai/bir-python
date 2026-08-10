@@ -15,6 +15,7 @@ the previous one readable rather than destroying it in place.
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import os
@@ -23,6 +24,7 @@ import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import bir
@@ -247,20 +249,46 @@ class SummaryWriteTests(unittest.TestCase):
     def setUp(self) -> None:
         _reset_config_for_tests()
 
+    # The summary is staged through a handle rather than ``Path.write_text`` so
+    # its mode can be set as it is created; these fail the staged write itself,
+    # which is the same interruption from the same place.
+    @staticmethod
+    @contextmanager
+    def failing_write(*, after_half: bool) -> Iterator[None]:
+        real_open = builtins.open
+
+        class FailingHandle:
+            """A real handle whose ``write`` fails, wrapped because
+            ``io.TextIOWrapper`` cannot be patched."""
+
+            def __init__(self, handle: Any) -> None:
+                self._handle = handle
+
+            def __enter__(self) -> FailingHandle:
+                return self
+
+            def __exit__(self, *exc_info: object) -> bool:
+                self._handle.close()
+                return False
+
+            def write(self, data: str) -> int:
+                if after_half:
+                    self._handle.write(data[: len(data) // 2])
+                raise OSError("disk full")
+
+        def failing_open(*args: Any, **kwargs: Any) -> Any:
+            return FailingHandle(real_open(*args, **kwargs))
+
+        with patch.object(builtins, "open", failing_open):
+            yield
+
     def test_a_write_that_fails_part_way_leaves_the_previous_summary(self) -> None:
         with temporary_workdir() as workdir:
             target = workdir / "x.summary.json"
             _write_experiment_summary(target, summary_fixture())
             before = target.read_bytes()
 
-            real_open = Path.open
-
-            def write_half_then_fail(self: Path, data: str, encoding: str | None = None, **kwargs: object) -> int:
-                with real_open(self, "w", encoding=encoding) as handle:
-                    handle.write(data[: len(data) // 2])
-                raise OSError("disk full")
-
-            with patch.object(Path, "write_text", write_half_then_fail):
+            with self.failing_write(after_half=True):
                 with self.assertRaises(OSError):
                     _write_experiment_summary(target, summary_fixture())
 
@@ -273,10 +301,7 @@ class SummaryWriteTests(unittest.TestCase):
         with temporary_workdir() as workdir:
             target = workdir / "x.summary.json"
 
-            def always_fail(self: Path, data: str, encoding: str | None = None, **kwargs: object) -> int:
-                raise OSError("disk full")
-
-            with patch.object(Path, "write_text", always_fail):
+            with self.failing_write(after_half=False):
                 with self.assertRaises(OSError):
                     _write_experiment_summary(target, summary_fixture())
 

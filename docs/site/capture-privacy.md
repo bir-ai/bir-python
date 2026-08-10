@@ -79,6 +79,29 @@ mapping **keys** are also scanned for common secret-like text patterns, includin
     sensitive value will be recognized. Keep capture opt-in for sensitive
     payloads and review what your application records.
 
+### File permissions
+
+Bir creates the files it writes for itself readable only by the user who ran the
+process (`0600`): the trace store and its size-rotated siblings, the `.sent`
+upload sidecar, and experiment result and summary files. They hold captured
+inputs and outputs, and redaction is best-effort, so on a shared CI runner or a
+multi-user host the umask default of world-readable was the wrong one.
+
+Three deliberate limits on that:
+
+- **The `.bir` directory keeps the umask's mode.** A sibling process can still
+  list the store; it just cannot read the files.
+- **Existing files are never changed.** The mode is applied as a file is
+  created, so a file whose permissions you widened stays as you left it.
+- **What you ask Bir to export is yours.** `dataset.to_jsonl(...)` and
+  `bir experiment-report --output ...` write to a path you named and keep the
+  umask's mode, because those are deliberate handoffs rather than Bir's own
+  store.
+
+A umask can narrow this further and can never widen it. If you need the store
+readable by another user — a collector running under a different uid — widen the
+file once after it is created, or relax the umask of the process that creates it.
+
 ### Secrets used as mapping keys
 
 A mapping held *by* credential — a per-token rate-limit map, a token-to-session

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
+from ._config import _private_opener
 from ._eval_models import (
     _EXPERIMENT_SCHEMA_VERSION,
     EvalResult,
@@ -243,7 +244,7 @@ class _ExperimentResultWriter:
         self._stop_after_error = stop_after_error
         self._stopped = False
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = output_path.open("w", encoding="utf-8")
+        self._file = open(output_path, "w", encoding="utf-8", opener=_private_opener)
 
     def __enter__(self) -> _ExperimentResultWriter:
         return self
@@ -341,7 +342,9 @@ def _write_experiment_summary(path: Path, summary: ExperimentSummary) -> None:
     payload = json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     try:
-        temp_path.write_text(payload, encoding="utf-8")
+        # The rename carries this file's mode to the summary, so it is set here.
+        with open(temp_path, "w", encoding="utf-8", opener=_private_opener) as staged_file:
+            staged_file.write(payload)
         temp_path.replace(path)
     finally:
         temp_path.unlink(missing_ok=True)

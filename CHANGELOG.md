@@ -168,6 +168,43 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Security
 
+- The files Bir writes for itself are now created readable only by the user who
+  ran the process. They inherited the umask, which on the common default meant
+  world-readable:
+
+  ```
+  dir  0o755  .bir
+  file 0o644  .bir/traces.jsonl
+  file 0o644  .bir/experiments/e.jsonl
+  file 0o644  .bir/experiments/e.summary.json
+  ```
+
+  Those files hold captured inputs and outputs, and redaction is documented as
+  best-effort, so on a shared CI runner or a multi-user host that was the wrong
+  default — and it was inherited rather than chosen, and written down nowhere.
+
+  The trace store, its size-rotated siblings, the `.sent` upload sidecar, and
+  experiment result and summary files are created `0600`. The mode is passed to
+  `os.open` rather than applied with `chmod` afterwards, so there is no moment
+  when the file exists and anyone can read it.
+
+  Three limits on that, each deliberate. The `.bir` directory keeps the umask's
+  mode, so a sibling process can still list the store and simply cannot read it.
+  Existing files are never changed, because the mode is applied only as a file is
+  created and a user who widened one meant to. And what the user asks Bir to
+  export — `dataset.to_jsonl(...)`, `bir experiment-report --output ...` — keeps
+  the umask's mode, because those are deliberate handoffs to a path the caller
+  named rather than Bir's own store.
+
+  A umask can narrow this further and can never widen it. A deployment that needs
+  the store readable by another uid can widen the file once after it is created
+  or relax the umask of the process creating it; `docs/site/capture-privacy.md`
+  now says so, which is the part that was missing.
+
+  Two tests that simulated a failed summary write by patching `Path.write_text`
+  now fail the staged write itself, since the summary is written through a handle
+  so its mode can be set as it is created. What they assert is unchanged.
+
 - Recorded text can no longer steer the terminal reading it. Control characters
   were printed exactly as stored, so a trace recorded under the name
   `\x1b[2K\x1b[31mFAKE ERROR\x1b[0m` came back out of `bir traces` intact — shown

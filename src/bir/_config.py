@@ -188,6 +188,31 @@ def _validate_number(value: Any, field: str) -> int | float:
     return value
 
 
+# The files the SDK creates for itself hold captured inputs and outputs, and
+# redaction is documented as best-effort, so they are created readable only by
+# the user who ran the process rather than by whatever the umask happened to
+# allow. On a shared CI runner or a multi-user host the inherited default was
+# world-readable.
+#
+# It is passed to ``os.open`` rather than applied with ``chmod`` afterwards, so
+# there is no moment when the file exists and is readable by everyone. It also
+# applies only at creation: a file that already exists keeps the mode it has,
+# because a user who widened one meant to. A umask can narrow this further; it
+# can never widen it.
+#
+# Deliberately not applied to the directory, which stays at the umask so a
+# sibling process can still list the store, nor to what a user asks the SDK to
+# export to a path they named -- ``dataset.to_jsonl()`` and
+# ``bir experiment-report`` are deliberate handoffs, not the SDK's own store.
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _private_opener(path: str, flags: int) -> int:
+    """``open(..., opener=…)`` hook creating a file only its owner can read."""
+
+    return os.open(path, flags, _PRIVATE_FILE_MODE)
+
+
 def _is_finite_number(value: int | float) -> bool:
     """Whether :func:`_validate_number` would accept ``value`` as finite.
 

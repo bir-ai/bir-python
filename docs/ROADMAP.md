@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,813 lines of runtime source across 19 dependency-free integration modules
+- 17,851 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,714 tests in 47 files at 93.98% branch coverage, with a CI floor, strict
+- 1,720 tests in 48 files at 93.99% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -34,8 +34,8 @@ The last two audits found their work in output: buffering, escaping, and where
 redaction did and did not reach. So this one drove the other direction — what the
 SDK accepts *from* providers and frameworks — along with concurrency, capture
 limits, report rendering, evaluation comparison, sampling, file permissions, and
-deployment-shaped store conditions. The P1 below came from the first of those and
-would not have surfaced from any amount of further output sweeping.
+deployment-shaped store conditions. The P1 came from the first of those and would
+not have surfaced from any amount of further output sweeping.
 
 ## Product and engineering guardrails
 
@@ -57,63 +57,26 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| 2 | Decide what the trace store's file permissions should be | P3 | S | A store of captured payloads is not world-readable by default | — |
+Nothing is open. Both items from this audit have shipped and are in
+`CHANGELOG.md`: the unguarded read of a provider's response, and the file mode
+the store is created with.
 
-Item 1, the unguarded read of a provider's response, has shipped and is in
-`CHANGELOG.md`. Numbering is kept so the one that is left stays citable.
+Two things are worth carrying into the next audit.
 
-Its lesson generalizes past the bridges: the SDK had guarded this invariant
-twice, and both guards sat on the last step of recording. Asking where a
-recording path runs code the SDK did not write is a better way to find the next
-one than asking where it writes.
+The P1's lesson generalizes past the bridges. The SDK had guarded the
+"recording never fails the call" invariant twice, and both guards sat on the last
+step of recording. Asking where a recording path runs code the SDK did not write
+is a better way to find the next one than asking where it writes.
 
-## Work item details
-
-### 2. Decide what the trace store's file permissions should be
-
-**Why:** Everything the SDK writes is created with the process umask, which on a
-default umask of `022` means world-readable:
-
-```
-  dir  0o755  .bir
-  file 0o644  .bir/traces.jsonl
-  file 0o644  .bir/experiments/e.jsonl
-  file 0o644  .bir/experiments/e.summary.json
-```
-
-Those files hold captured inputs and outputs. Redaction is documented as
-best-effort, and `docs/site/capture-privacy.md` tells users to "keep capture
-opt-in for sensitive payloads and review what your application records" — which
-is an acknowledgement that a store can hold things worth protecting. On a shared
-CI runner, a multi-user host, or a container with a sidecar under a different
-uid, `0644` is readable by anyone on the box.
-
-This is a P3 and deliberately framed as a decision rather than a repair, because
-the trade-off is real in both directions. `0600` is what tools holding
-credentials use, and it is the safer default. It would also break a legitimate
-arrangement — a collector running as another user reading the store — and a user
-who wants it can already set their umask. What should not happen is the current
-state, where the default was inherited rather than chosen and is written down
-nowhere.
-
-**Scope:**
-
-- Choose the default and say why in `docs/site/capture-privacy.md`; the decision
-  is the deliverable, and either answer is defensible if it is recorded.
-- If it tightens, apply it to the trace store, its rotated siblings, the sent
-  sidecar, and experiment result and summary files — a store is only as private
-  as its least private file.
-- Leave the directory alone unless the file mode alone is insufficient, and do
-  not chmod files that already exist: a user who widened them meant it.
-
-**Done when:** the mode the SDK creates its files with is a written-down decision
-rather than whatever the umask gave it, and every file it writes agrees with it.
+The P3 was not a bug at all — the behaviour was defensible, it had simply never
+been decided. An audit that only looks for things that are wrong will not find
+that kind, and a default nobody chose is worth a line in the docs even when it
+turns out to be the right one.
 
 ## Sequencing
 
-One item is left and it depends on nothing.
+Nothing is queued. The next list has to be re-derived from the code rather than
+continued from this one.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -146,9 +109,10 @@ tokens, the password inside a connection URI, and the values in a `Cookie` or
 `Set-Cookie` header, leaving an unrepresentable derived cost off an event rather
 than raising it at the caller, flushing each batch `bir tail` prints so a
 redirected follow is not silent, redacting a secret used as a mapping key, and
-escaping control characters when the CLI renders recorded text for a person, and
-guarding the bridges' reads of a provider's response. Regressions in those areas
-are bugs; new scope requires a new issue with current evidence.
+escaping control characters when the CLI renders recorded text for a person,
+guarding the bridges' reads of a provider's response, and creating the store's
+own files readable only by their owner. Regressions in those areas are bugs; new
+scope requires a new issue with current evidence.
 
 The guarded response read is adjacent to the earlier "guarding capture against a
 value whose own code raises" and neither reopens the other. That guard is inside
