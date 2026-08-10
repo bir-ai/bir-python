@@ -10,6 +10,50 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A provider response that raises while Bir reads it no longer fails the call
+  that returned it. The call had already succeeded; reading its result to build a
+  record turned it into an exception at the caller. Measured against every direct
+  provider bridge:
+
+  ```
+  model_dump() raises  broke: anthropic, bedrock, cohere, google, litellm, mistral, openai
+  dict() raises        broke: anthropic, bedrock, cohere, google, litellm, mistral, openai
+  property raises      broke: anthropic, litellm, mistral, openai
+  ```
+
+  The asynchronous wrappers behaved the same way.
+
+  `_response_output` called `model_dump()`, then `dict()`, then `dict(response)`
+  — three pieces of code the provider owns, none of them guarded — and `_value`
+  read attributes with `getattr(source, key, None)`, which absorbs a missing
+  attribute but not a property that raises.
+
+  This is the invariant the SDK had already established twice, with the guard on
+  the wrong end of it. A store that cannot be written is caught and reported; a
+  value whose own `__repr__` raises is caught inside capture. Both protect the
+  last step. Reading the provider's response is the first step, it is the one
+  recording path that runs a third party's code, and it was the one without a
+  guard.
+
+  Every read that can execute somebody else's code is now guarded and falls back
+  to what is still known. When a conversion raises, the response object itself is
+  recorded rather than a marker, so capture takes its `repr` under its own guard
+  and a response that cannot serialize still records what it can. The two bridges
+  that read responses outside the shared helpers — LangChain's own copy of the
+  conversion and LlamaIndex's `get_content`/`get_text` accessors — go through the
+  same guards.
+
+  A genuinely failing provider call still raises, unchanged. The call failing is
+  the provider's answer; only reading its result for a record is bookkeeping.
+
+  The case is asserted in `tests/integration_contract.py` rather than against one
+  provider, so it holds for every wrapper family at once and for any added later:
+  without the guards it fails 70 contract cases across every family.
+
+  Measured at +0.14 µs per response read (0.512 → 0.655 µs for one output
+  conversion and two attribute reads), which is not distinguishable at the level
+  of a traced provider call.
+
 - `bir tail` now shows events when its output is redirected. It showed nothing at
   all. Measured by following a store while 400 events were written to it:
 

@@ -24,6 +24,12 @@ learn from one applies to the rest:
   provider, so a missing trace never sends a request.
 - A provider error is recorded as a failed generation with a redacted message
   and then re-raised unchanged.
+- A response the wrapper cannot read never fails the call that returned it.
+  Reading a response runs the provider's own code — a property that computes, a
+  `model_dump()` that serializes — and by then the call has already succeeded.
+  If any of that raises, the wrapper records what it could and returns the
+  provider's object to you untouched. A call that genuinely failed still raises,
+  because that is the provider's answer rather than Bir's bookkeeping.
 - Streaming wrappers are lazy: the provider is not called until you start
   iterating. The accumulated output and final usage are recorded when the
   stream is exhausted, closed (`close()`/`aclose()`), cancelled, or raises — a

@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from bir import generation, retrieval
 from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
-from bir.integrations._common import _response_output, _usage_tokens
+from bir.integrations._common import _response_output, _usage_tokens, _value
 from bir.integrations._lifecycle import (
     _ActiveRun,
     _enter_framework_root,
@@ -275,12 +275,18 @@ def _response_text(response: Any) -> Any:
     if message is not None and message is not response:
         return _response_text(message)
     for method_name in ("get_content", "get_text"):
-        method = getattr(response, method_name, None)
+        method = _value(response, method_name)
         if callable(method):
             try:
                 return method()
             except TypeError:
                 continue
+            except Exception:
+                # The accessor is the framework's own code. A ``TypeError`` means
+                # this is not the accessor being looked for and the next one is
+                # worth trying; anything else means this one failed, and reading
+                # a response for a record must not fail the call it belongs to.
+                return None
     return None
 
 

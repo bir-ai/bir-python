@@ -14,6 +14,7 @@ from typing import Any
 from bir import generation, retrieval, tool_call
 from bir._sdk import _set_event_parent, _trace_context
 
+from ._common import _response_output
 from ._lifecycle import (
     _ActiveRun,
     _enter_framework_root,
@@ -329,18 +330,20 @@ def _serialized_kwargs(serialized: Any) -> Mapping[str, Any] | None:
 
 
 def _response_payload(response: Any) -> Any:
+    """Render a LangChain response, preferring a mapping as this bridge always has.
+
+    The conversions below that are the provider's own code are guarded by
+    :func:`_response_output`; only the mapping-first ordering is local, because a
+    LangChain result that is already a mapping should be recorded as one rather
+    than through a ``model_dump`` it may also expose.
+    """
+
     if isinstance(response, Mapping):
-        return dict(response)
-
-    model_dump = getattr(response, "model_dump", None)
-    if callable(model_dump):
-        return model_dump()
-
-    as_dict = getattr(response, "dict", None)
-    if callable(as_dict):
-        return as_dict()
-
-    return response
+        try:
+            return dict(response)
+        except Exception:
+            return response
+    return _response_output(response)
 
 
 def _set_generation_usage(context: Any, response: Any) -> None:

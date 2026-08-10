@@ -15,9 +15,9 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 At this audit the repository has:
 
-- 17,763 lines of runtime source across 19 dependency-free integration modules
+- 17,813 lines of runtime source across 19 dependency-free integration modules
   plus the core, evaluation, storage, transport, and CLI modules;
-- 1,688 tests in 47 files at 93.96% branch coverage, with a CI floor, strict
+- 1,714 tests in 47 files at 93.98% branch coverage, with a CI floor, strict
   resource-warning handling, Ruff lint/format, Pyright, strict MkDocs, example
   smoke tests, and hermetic wheel/sdist release verification;
 - CI across Linux, Windows, and macOS on Python 3.10–3.14, a free-threaded 3.14
@@ -59,64 +59,17 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Guard reading a provider's response the way writing is guarded | P1 | S | A response object that raises stops failing the call it belongs to | — |
 | 2 | Decide what the trace store's file permissions should be | P3 | S | A store of captured payloads is not world-readable by default | — |
 
-Neither depends on the other. Item 1 is the one that matters; item 2 is a default
-worth choosing deliberately rather than inheriting.
+Item 1, the unguarded read of a provider's response, has shipped and is in
+`CHANGELOG.md`. Numbering is kept so the one that is left stays citable.
+
+Its lesson generalizes past the bridges: the SDK had guarded this invariant
+twice, and both guards sat on the last step of recording. Asking where a
+recording path runs code the SDK did not write is a better way to find the next
+one than asking where it writes.
 
 ## Work item details
-
-### 1. Guard reading a provider's response the way writing is guarded
-
-**Why:** A provider call that *succeeded* is turned into a failure when the
-object it returned raises while Bir reads it for recording. Measured against
-every direct provider bridge, with a response whose `model_dump()` raises:
-
-```
-  model_dump() raises  breaks: anthropic, bedrock, cohere, google, litellm, mistral, openai
-  dict() raises        breaks: anthropic, bedrock, cohere, google, litellm, mistral, openai
-  property raises      breaks: anthropic, litellm, mistral, openai
-```
-
-The asynchronous wrappers behave the same way; `trace_chat_completion_async` and
-`trace_messages_async` both re-raise. The traced function loses the response it
-had already been handed.
-
-`_response_output` (`src/bir/integrations/_common.py:36`) calls `model_dump()`,
-then `dict()`, then `dict(response)` — three pieces of code the provider owns,
-none of them guarded. `_value` reads attributes with `getattr(source, key, None)`,
-which absorbs a missing attribute but not a property that raises.
-
-This is the invariant the SDK has spent three releases establishing, and the
-guard is on the wrong end of it. A store that cannot be written is caught and
-reported; a value whose own `__repr__` raises is caught inside `_safe_capture`.
-Both of those protect the *last* step. Reading the provider's response is the
-*first* step, it runs code Bir does not own, and it is unprotected — so the one
-recording path with a third party's code in it is the one without a guard.
-
-It is reachable without anything exotic: `model_dump()` raises
-`PydanticSerializationError` on a field it cannot serialize, a lazily-loading
-response wrapper raises on attribute access, and a test double raises by
-construction. The cost is the whole point of the SDK — instrumentation is
-supposed to be safe to add to a working call.
-
-Nothing pins it. The shared integration contract has no case for a response whose
-own code raises; the response doubles in it are all well-behaved.
-
-**Scope:**
-
-- Guard the three reads in `_response_output` and the attribute reads around it,
-  recording the output as uncapturable rather than propagating — the marker
-  `_safe_capture` already uses for this.
-- Cover the async and streaming wrappers, which read the same helpers.
-- Add the case to `tests/integration_contract.py` so it holds for every bridge at
-  once and for any bridge added later, rather than testing one provider.
-- Keep a genuinely failing provider call raising. The call failing is the
-  caller's business; only reading its *result* for a record is not.
-
-**Done when:** no provider response can make a traced call raise, for every
-bridge, sync and async, and the conformance contract asserts it.
 
 ### 2. Decide what the trace store's file permissions should be
 
@@ -160,7 +113,7 @@ rather than whatever the umask gave it, and every file it writes agrees with it.
 
 ## Sequencing
 
-The two are independent. Item 1 should not wait on item 2.
+One item is left and it depends on nothing.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -193,14 +146,14 @@ tokens, the password inside a connection URI, and the values in a `Cookie` or
 `Set-Cookie` header, leaving an unrepresentable derived cost off an event rather
 than raising it at the caller, flushing each batch `bir tail` prints so a
 redirected follow is not silent, redacting a secret used as a mapping key, and
-escaping control characters when the CLI renders recorded text for a person.
-Regressions in those areas are bugs; new scope requires a new issue with current
-evidence.
+escaping control characters when the CLI renders recorded text for a person, and
+guarding the bridges' reads of a provider's response. Regressions in those areas
+are bugs; new scope requires a new issue with current evidence.
 
-Item 1 above is adjacent to the shipped "guarding capture against a value whose
-own code raises" and is not a reopening of it. That guard is inside
-`_safe_capture` and protects Bir from a value it has already been given; this is
-about the bridges reading a provider's object to produce that value, before
+The guarded response read is adjacent to the earlier "guarding capture against a
+value whose own code raises" and neither reopens the other. That guard is inside
+`_safe_capture` and protects Bir from a value it has already been given; this one
+covers the bridges reading a provider's object to produce that value, before
 anything reaches the guard.
 
 This audit looked at three more things and declined them:

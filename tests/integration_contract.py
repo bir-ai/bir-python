@@ -294,6 +294,50 @@ class SignatureContractTests(ContractTestCase):
                     self.assertIsNone(keyword_only[name].default)
 
 
+def _hostile_responses() -> list[tuple[str, Any]]:
+    """Response objects that raise from the places a wrapper reads them.
+
+    Each is a shape a real provider produces on a bad day: ``model_dump`` raising
+    ``PydanticSerializationError`` on a field it cannot serialize, an object that
+    loads lazily and fails on attribute access, an older client exposing
+    ``dict()``, and something whose iteration fails when a wrapper is deciding
+    whether it is a stream.
+    """
+
+    class DumpRaises:
+        model = "contract-model"
+        usage = None
+
+        def model_dump(self) -> Any:
+            raise RuntimeError("model_dump exploded")
+
+    class PropertyRaises:
+        @property
+        def model(self) -> Any:
+            raise RuntimeError("model property exploded")
+
+    class DictRaises:
+        model = "contract-model"
+        usage = None
+
+        def dict(self) -> Any:
+            raise RuntimeError("dict() exploded")
+
+    class IterationRaises:
+        model = "contract-model"
+        usage = None
+
+        def __iter__(self) -> Any:
+            raise RuntimeError("iteration exploded")
+
+    return [
+        ("model_dump raises", DumpRaises()),
+        ("property raises", PropertyRaises()),
+        ("dict raises", DictRaises()),
+        ("iteration raises", IterationRaises()),
+    ]
+
+
 class UnaryContractTests(ContractTestCase):
     """The single-response path: forwarding, recording, errors, and capture."""
 
@@ -438,6 +482,42 @@ class UnaryContractTests(ContractTestCase):
                 self.call_async(provider)
 
             self.assert_error_redacted(self.generation_event())
+
+    def test_sync_call_survives_a_response_whose_own_code_raises(self) -> None:
+        """A response Bir cannot read must not fail the call that returned it.
+
+        Reading a provider's object runs the provider's code -- a property that
+        computes, a ``model_dump`` that serializes -- and the call has already
+        succeeded by then. Every other recording failure is caught: a store that
+        cannot be written is reported, and a value whose ``__repr__`` raises is
+        caught inside capture. This is the same rule at the point a third
+        party's object is first touched.
+        """
+
+        for label, response in _hostile_responses():
+            with self.subTest(response=label), temporary_workdir():
+                configure(capture_inputs=True, capture_outputs=True)
+
+                def provider(*args: Any, **kwargs: Any) -> Any:
+                    return response
+
+                with trace("contract"):
+                    self.assertIs(self.call_sync(provider), response)
+
+                # The event is still written; only what could be read of the
+                # response is missing from it.
+                self.assertEqual(self.generation_event().status, "success")
+
+    def test_async_call_survives_a_response_whose_own_code_raises(self) -> None:
+        for label, response in _hostile_responses():
+            with self.subTest(response=label), temporary_workdir():
+                configure(capture_inputs=True, capture_outputs=True)
+
+                async def provider(*args: Any, **kwargs: Any) -> Any:
+                    return response
+
+                self.assertIs(self.call_async(provider), response)
+                self.assertEqual(self.generation_event().status, "success")
 
     def test_sync_call_requires_an_active_trace_and_leaves_the_provider_uncalled(self) -> None:
         with temporary_workdir():
