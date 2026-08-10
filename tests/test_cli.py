@@ -2475,6 +2475,109 @@ class ControlCharacterRenderingTests(CliBaseTest):
             self.assertIn("\\x1b[2K", out)
 
 
+class ErrorChannelRenderingTests(CliBaseTest):
+    """A diagnostic must not be able to steer the terminal reading it either.
+
+    The cases above cover the rendering path, for strings read out of the local
+    store. This is the error channel, and the string that reaches it can come
+    from a remote host: a ``bir send`` message embeds the server's own response
+    body. That body is chosen by whatever is listening on ``--server``, which on
+    a mistyped URL is not a Bir server at all.
+    """
+
+    # Erases its own line, moves the cursor up, erases again, and prints a line
+    # that reads like the one a successful send prints.
+    REPAINT = "\x1b[2K\x1b[A\x1b[2Kaccepted=1 attempted=1 skipped=0\x1b[0m"
+
+    def _record_one(self, trace_path: Path) -> None:
+        configure(trace_path=trace_path)
+        with bir.trace(name="answer"):
+            pass
+
+    def _send_against(self, body: str, *, status: int = 400) -> tuple[int, str, str]:
+        """Run ``bir send`` against a server that answers with ``body``."""
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record_one(trace_path)
+
+            def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
+                if status < 400:
+                    return FakeHttpResponse(body.encode("utf-8"))
+                raise urllib.error.HTTPError(
+                    url="http://server.test/v1/events/batch",
+                    code=status,
+                    msg="error",
+                    hdrs=None,  # type: ignore[arg-type]
+                    fp=io.BytesIO(body.encode("utf-8")),
+                )
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                return run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
+
+    def test_a_rejected_send_cannot_repaint_the_terminal(self) -> None:
+        code, _, err = self._send_against(self.REPAINT)
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("\x1b", err)
+        self.assertIn("\\x1b[2K\\x1b[A\\x1b[2K", err)
+        # One line, so the body cannot append a second that looks like a report.
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_an_accepted_but_unreadable_response_cannot_repaint_the_terminal(self) -> None:
+        # The other half: a 2xx whose body is not a batch response at all still
+        # reaches the same channel, by a different message.
+        code, _, err = self._send_against(self.REPAINT, status=200)
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("\x1b", err)
+        self.assertIn("invalid batch response", err)
+        self.assertIn("\\x1b[2K", err)
+
+    def test_a_huge_response_body_is_bounded_before_it_is_printed(self) -> None:
+        code, _, err = self._send_against("x" * 2_000_000)
+
+        self.assertEqual(code, 1)
+        self.assertLess(len(err), 1_000)
+        self.assertIn("…[truncated]", err)
+
+    def test_the_otel_install_hint_stays_one_line(self) -> None:
+        # The channel escapes a newline like any other control character, so the
+        # SDK's own messages do not embed one; this pins that the hint stayed
+        # readable rather than acquiring a literal \x0a in the middle. The extra
+        # is blocked at the import hook rather than through ``sys.modules`` so
+        # the case does not depend on what another test imported first.
+        real_import = builtins.__import__
+
+        def blocked_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "opentelemetry" or name.startswith("opentelemetry."):
+                raise ImportError(f"No module named {name!r}")
+            return real_import(name, *args, **kwargs)
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._record_one(trace_path)
+            with patch.object(builtins, "__import__", side_effect=blocked_import):
+                code, _, err = run_cli(
+                    "export-otel", "--path", str(trace_path), "--endpoint", "http://otlp.test/v1/traces"
+                )
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("\\x0a", err)
+        self.assertEqual(len(err.splitlines()), 1)
+        self.assertIn("pip install", err)
+
+    def test_a_diagnostic_is_escaped_whatever_built_it(self) -> None:
+        # The escaping is at the print site, so it covers every message on this
+        # channel rather than the interpolations someone remembered to guard.
+        out = io.StringIO()
+
+        cli._report(f"trace {self.REPAINT} not found", out=out)
+
+        self.assertNotIn("\x1b", out.getvalue())
+        self.assertTrue(out.getvalue().startswith("bir: trace \\x1b[2K"))
+
+
 class TopLevelTests(CliBaseTest):
     def test_help_exits_zero(self) -> None:
         with self.assertRaises(SystemExit) as raised:

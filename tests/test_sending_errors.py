@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import patch
 
 import bir
+from bir import _sending
 from bir._sdk import _reset_config_for_tests
 
 SERVER = "http://server.test"
@@ -328,6 +329,85 @@ class EndpointTests(unittest.TestCase):
                         with self.assertRaises(ValueError) as raised:
                             bir.send_events(server_url)
                         self.assertIn("must not be empty", str(raised.exception))
+
+
+class ResponseBodyBoundTests(unittest.TestCase):
+    """A server's response body is carried only as far as a message needs it.
+
+    The body exists to say why the server refused, and a ``--server`` URL
+    pointing at something that is not a Bir server can answer with a document.
+    Bounding it keeps that document out of the exception, out of whatever logs
+    the exception, and off the terminal.
+    """
+
+    def test_a_body_within_the_bound_is_carried_whole(self) -> None:
+        body = "x" * _sending._MAX_REPORTED_BODY_CHARS
+
+        self.assertEqual(_sending._reported_body(body), body)
+
+    def test_a_longer_body_is_cut_and_says_so(self) -> None:
+        reported = _sending._reported_body("x" * (_sending._MAX_REPORTED_BODY_CHARS + 1))
+
+        self.assertTrue(reported.startswith("x" * _sending._MAX_REPORTED_BODY_CHARS))
+        self.assertTrue(reported.endswith("…[truncated]"))
+
+    def test_an_error_body_is_not_read_past_the_bound(self) -> None:
+        # Bounding the message alone would still pull the whole document into
+        # memory, so the read itself stops. The response counts what was taken
+        # from it, because the SDK closes it and a closed one cannot be asked.
+        class CountingBody(io.BytesIO):
+            def __init__(self, data: bytes) -> None:
+                super().__init__(data)
+                self.bytes_read = 0
+
+            def read(self, size: int | None = -1) -> bytes:
+                chunk = super().read(size)
+                self.bytes_read += len(chunk)
+                return chunk
+
+        fp = CountingBody(b"x" * 100_000)
+        exc = urllib.error.HTTPError(
+            url=BATCH_ENDPOINT,
+            code=400,
+            msg="error",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=fp,
+        )
+
+        body = _sending._read_http_error_body(exc)
+
+        self.assertEqual(len(body), _sending._MAX_REPORTED_BODY_CHARS + 1)
+        self.assertEqual(fp.bytes_read, _sending._MAX_REPORTED_BODY_CHARS + 1)
+
+    def test_a_rejected_send_reports_a_bounded_message(self) -> None:
+        with temporary_workdir():
+            record_one_trace()
+            server = _Server(lambda: http_error(400, "x" * 100_000))
+
+            with serving(server), self.assertRaises(RuntimeError) as raised:
+                bir.send_events(SERVER)
+
+            message = str(raised.exception)
+            self.assertIn("HTTP 400", message)
+            self.assertIn("…[truncated]", message)
+            self.assertLess(len(message), 1_000)
+
+    def test_a_large_accepted_response_is_still_parsed_whole(self) -> None:
+        # The bound is on what a message shows, not on what is parsed: a batch's
+        # accepted ids are legitimately longer than any message would carry, and
+        # cutting the body before json.loads would refuse a good response.
+        with temporary_workdir():
+            record_one_trace()
+            event_ids = [f"{index:032x}" for index in range(1_000)]
+            body = json.dumps({"accepted": len(event_ids), "event_ids": event_ids})
+            self.assertGreater(len(body), _sending._MAX_REPORTED_BODY_CHARS)
+            server = _Server(lambda: FakeResponse(body))
+
+            with serving(server):
+                result = bir.send_events(SERVER)
+
+            self.assertEqual(result.accepted, 1_000)
+            self.assertEqual(len(result.event_ids), 1_000)
 
 
 if __name__ == "__main__":

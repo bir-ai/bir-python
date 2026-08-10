@@ -292,6 +292,31 @@ Only the printed form changes. The stored event keeps exactly what the
 application passed, `--json` hands a parser the value as written, and
 `load_events()` / `load_traces()` return it unchanged.
 
+The same holds for the error channel, where the untrusted string can come from
+further away. A `bir: …` diagnostic is built from Bir's own words plus whatever
+it is reporting on — a path, a trace or experiment id, a store's field names,
+and for `bir send` the response body of whatever is listening on `--server`,
+which on a mistyped URL is not a Bir server at all. Every diagnostic is escaped
+the same way and is one line, so a response body cannot clear the line above it
+and print something that reads like a successful send:
+
+```bash
+$ bir send --server http://localhost:9999   # answers 400 with an ANSI sequence
+bir: bir server rejected event batch with HTTP 400: \x1b[2K\x1b[A\x1b[2Kaccepted=1 …
+```
+
+A response body is also bounded before it reaches a message, so a `--server`
+pointed at something that answers with a large document reports the first 500
+characters and `…[truncated]` rather than putting the document on your terminal.
+The bound applies to what the message shows and to what is read from an error
+response; a successful response is still parsed whole, so a large batch's
+accepted ids are unaffected.
+
+Escaping stops at the CLI. `send_events()` raises a `RuntimeError` carrying what
+the server actually said, so a program catching it logs or matches the bytes
+rather than a rendering of them — the same split the SDK draws for recorded
+values, which are stored as written and escaped when printed.
+
 A usage error stays a message on stderr and a non-zero exit code even under
 `--json`, so a script never parses a failure as a successful result:
 

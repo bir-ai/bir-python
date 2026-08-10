@@ -78,11 +78,38 @@ def _is_retryable_status(status: int) -> bool:
     return 500 <= status < 600
 
 
+# A response body reaches a person only inside an error message, and enough of it
+# to show why the server refused is enough. Bounding it keeps a ``--server`` URL
+# pointed at the wrong host from putting that host's whole document on the
+# terminal, and keeps the exception a program catches to a size worth logging.
+_MAX_REPORTED_BODY_CHARS = 500
+
+# Spelled like the capture truncation marker in ``_capture.py`` so a value the
+# SDK cut short reads the same wherever it appears. Not imported from there:
+# this module is the transport bottom and depends on the standard library only.
+_TRUNCATED = "…[truncated]"
+
+
+def _reported_body(body: str) -> str:
+    """Return as much of ``body`` as an error message carries, marking what it cut."""
+
+    if len(body) <= _MAX_REPORTED_BODY_CHARS:
+        return body
+    return body[:_MAX_REPORTED_BODY_CHARS] + _TRUNCATED
+
+
 def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
-    """Read and close an HTTP error response without leaking its file object."""
+    """Read as much of an HTTP error response as a message carries, and close it.
+
+    An error body is never parsed -- it exists only to say why the server
+    refused -- so reading past what the message will show buys nothing, and a
+    misdirected ``--server`` answering with a large document would otherwise be
+    pulled into memory whole. One character past the limit is read so
+    :func:`_reported_body` can tell a body that just fits from one that was cut.
+    """
 
     try:
-        return exc.read().decode("utf-8", errors="replace")
+        return exc.read(_MAX_REPORTED_BODY_CHARS + 1).decode("utf-8", errors="replace")
     finally:
         exc.close()
 
@@ -111,7 +138,7 @@ def _post_event_batch(
             exc.close()
             return None
         body = _read_http_error_body(exc)
-        message = f"bir server rejected event batch with HTTP {exc.code}: {body}"
+        message = f"bir server rejected event batch with HTTP {exc.code}: {_reported_body(body)}"
         if _is_retryable_status(exc.code):
             raise _TransientSendError(message, cause=exc) from exc
         raise RuntimeError(message) from exc
@@ -122,23 +149,27 @@ def _post_event_batch(
         raise _TransientSendError(f"bir could not send events to {endpoint}: {exc}", cause=exc) from exc
 
     if status < 200 or status >= 300:
-        raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {body}")
+        raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {_reported_body(body)}")
     return _batch_result_from_response(body, attempted=len(events))
 
 
 def _batch_result_from_response(body: str, *, attempted: int) -> SendEventsResult:
+    # A success body is read whole because it has to be parsed -- a large batch's
+    # accepted ids are legitimately long -- so the bound is applied to what the
+    # message shows rather than to what was read.
+    refused = f"bir server returned an invalid batch response: {_reported_body(body)}"
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}") from exc
+        raise RuntimeError(refused) from exc
     if not isinstance(payload, Mapping):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+        raise RuntimeError(refused)
     accepted = payload.get("accepted")
     event_ids = payload.get("event_ids")
     if isinstance(accepted, bool) or not isinstance(accepted, int):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+        raise RuntimeError(refused)
     if not isinstance(event_ids, list) or not all(isinstance(event_id, str) for event_id in event_ids):
-        raise RuntimeError(f"bir server returned an invalid batch response: {body}")
+        raise RuntimeError(refused)
     return SendEventsResult(accepted=accepted, event_ids=list(event_ids), attempted=attempted)
 
 
@@ -156,7 +187,7 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = _read_http_error_body(exc)
-        message = f"bir server rejected event with HTTP {exc.code}: {body}"
+        message = f"bir server rejected event with HTTP {exc.code}: {_reported_body(body)}"
         if _is_retryable_status(exc.code):
             raise _TransientSendError(message, cause=exc) from exc
         raise RuntimeError(message) from exc
@@ -167,7 +198,7 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
         raise _TransientSendError(f"bir could not send event to {endpoint}: {exc}", cause=exc) from exc
 
     if status < 200 or status >= 300:
-        raise RuntimeError(f"bir server rejected event with HTTP {status}: {body}")
+        raise RuntimeError(f"bir server rejected event with HTTP {status}: {_reported_body(body)}")
     return _accepted_count_from_response(body)
 
 

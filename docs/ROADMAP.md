@@ -41,7 +41,7 @@ rendering path, how `bir tail` and file rotation compose, what the OTLP attribut
 names mean against the OpenTelemetry release the extra actually installs, and
 which fields redaction is scanning at all rather than which patterns it
 recognizes. The P1 came from re-asking the first question, and each of those axes
-produced one item. Two have since shipped; the three below are what remain.
+produced one item. Three have since shipped; the two below are what remain.
 
 ## Product and engineering guardrails
 
@@ -63,88 +63,17 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Two items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
-event bridges' unguarded reads of a framework object, and the follow that did not
-survive a rotation. The three items below are what is left.
+Three items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
+event bridges' unguarded reads of a framework object; the follow that did not
+survive a rotation; and the error channel that printed a remote host's response
+body raw. The two items below are what is left.
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Escape and bound what the CLI prints on its error channel | P2 | S | A server's response cannot repaint the terminal running `bir send` | — |
-| 2 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
-| 3 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
+| 1 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
+| 2 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
 
-### 1. Escape and bound what the CLI prints on its error channel
-
-**Why.** The previous release established that recorded text must not be able to
-steer the terminal reading it, and `_visible` (`bir/_cli_present.py:302-326`)
-escapes every table cell and header. The CLI's error channel does not go through
-it: `main` prints the exception message raw (`bir/cli.py:92-94`), and one of the
-strings that reaches it is a remote server's response body, embedded verbatim at
-`bir/_sending.py:114`, `:125`, `:133`, `:135`, `:139`, `:141`, `:159`, and `:170`.
-Those eight are the only raised messages in the SDK that interpolate a remote
-host's string, and the only ones that interpolate anything untrusted without
-`!r` — `repr` escapes control characters, which is why the store loader's
-messages, built from a file's own field names, are already safe.
-
-Driving `bir send` against a local HTTP server that answers with a chosen body:
-
-```
-400 whose body is an ANSI repaint sequence
-  exit                : 1
-  stderr bytes        : 105
-  ESC bytes on stderr : 4
-  stderr (one line, wrapped here):
-    'bir: bir server rejected event batch with HTTP 400: '
-    '\x1b[2K\x1b[A\x1b[2Kbir: accepted=1 attempted=1 skipped=0\x1b[0m\n'
-
-200 whose body is an ANSI repaint sequence (invalid batch response)
-  ESC bytes on stderr : 4
-
-400 whose body is 2 MB
-  stderr bytes        : 2000053
-```
-
-The first body erases its own line, moves the cursor up, erases again, and prints
-`bir: accepted=1 attempted=1 skipped=0` — which is character-for-character the
-line `_cmd_send` prints on success (`cli.py:688`). A failed send can be made to
-look like a successful one on the operator's screen. The third shows the other
-half: `_read_http_error_body` (`_sending.py:81-87`) and the success-path
-`response.read()` are unbounded, so a misdirected `--server` URL pointing at
-something that returns a large body puts all of it on stderr inside one exception
-message.
-
-This is adjacent to the shipped "escaping control characters when the CLI renders
-recorded text" but is not the same work. That fix covers the *rendering* path —
-`_print_table` and the experiment header — for strings read out of the local
-store. This is the *error* path, for a string a remote host chose, and it reaches
-`sys.stderr` without passing through `_visible` at all.
-
-**No test pins the current behaviour.** `ControlCharacterRenderingTests`
-(`tests/test_cli.py:2123-2226`) covers `traces`, `show`, `tail`, and
-`experiment-show` on stdout, plus the `--json` exemption. Nothing covers `bir: …`
-on stderr, and nothing drives `bir send` against a hostile body.
-
-**Scope.**
-
-- Escape control characters in what `main` prints for an exception, keeping the
-  same `\xNN` spelling `_visible` already uses so the two channels read alike.
-- Bound how much of a server response is read into an error message, and say that
-  it was truncated.
-- Decide whether the escaping belongs at the print site in `cli.py` or at the
-  message-building sites in `_sending.py`. The print site covers every future
-  message for free; the build site keeps the library's own exception readable to
-  a caller who is not a terminal. Say which and why — a library exception a
-  program catches is not the same audience as a line on a screen.
-- Sweep the other strings that reach `bir: {exc}` from outside the process for
-  the same treatment; `Dataset.__post_init__` (`bir/_eval_models.py:158-159`)
-  interpolates example ids from a file without `repr`, though no CLI command
-  loads a dataset today.
-
-**Done when** a server response body containing control characters reaches the
-terminal escaped and length-bounded, asserted by a test driving `bir send`
-against a server that returns one.
-
-### 2. Refresh the OTLP attribute spellings
+### 1. Refresh the OTLP attribute spellings
 
 **Why.** `bir/integrations/otel.py:14-20` and `README.md:478-481` claim the
 exported attributes "follow the GenAI semantic conventions where they exist". Two
@@ -195,7 +124,7 @@ when the exporter was written, and the conventions moved underneath them.
 agree with a named OpenTelemetry semantic-conventions release, with the pinning
 tests updated to match.
 
-### 3. Record where the redaction boundary stops
+### 2. Record where the redaction boundary stops
 
 **Why.** `docs/site/capture-privacy.md:25-80` enumerates what redaction catches
 in exhaustive detail and warns that recognition is best-effort. It never says
@@ -279,9 +208,9 @@ does not, and a test asserts that boundary.
 
 ## Sequencing
 
-Item 1 is small and in the CLI. Items 2 and 3 are documentation-and-decision work
-whose main cost is agreeing on the answer; neither blocks anything. Nothing here
-blocks anything else.
+Both remaining items are documentation-and-decision work whose main cost is
+agreeing on the answer; neither blocks anything. Nothing here blocks anything
+else.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -317,9 +246,9 @@ redirected follow is not silent, redacting a secret used as a mapping key, and
 escaping control characters when the CLI renders recorded text for a person,
 guarding the bridges' reads of a provider's response, creating the store's own
 files readable only by their owner, guarding the event bridges' reads of a
-framework object, and following the store across a rotation in `bir tail`.
-Regressions in those areas are bugs; new scope requires a new issue with current
-evidence.
+framework object, following the store across a rotation in `bir tail`, and
+escaping and bounding what the CLI prints on its error channel. Regressions in
+those areas are bugs; new scope requires a new issue with current evidence.
 
 The guarded event-bridge reads that shipped from this audit are adjacent to the
 earlier "guarding the bridges' reads of a provider's response" and neither
@@ -335,10 +264,11 @@ went after they were rendered. This was which events were rendered at all: the
 flush was working, and 400 of 400 lines arrived whenever the store did not
 rotate.
 
-Item 1 above sits beside "escaping control characters when the CLI renders
-recorded text for a person" and does not reopen it. That covers the rendering
-path and strings from the local store. This is the error path and a string a
-remote host chose; the two share no code.
+The escaped error channel that shipped from this audit sits beside "escaping
+control characters when the CLI renders recorded text for a person" and does not
+reopen it. That covered the rendering path and strings from the local store.
+This was the error path and a string a remote host chose; the two shared no
+code.
 
 ## Declined
 
@@ -470,7 +400,7 @@ so they survive the block, removes its temporary file, and left the real store
 empty throughout.
 
 **The redaction rules on the value axis.** Every metadata, output, document, and
-error surface in the sweep under item 3 — ten of them — redacted the credential,
+error surface in the sweep under item 2 — ten of them — redacted the credential,
 including a secret used as a mapping key and one inside a framework bridge's
 `tags` and `serialized_id`.
 

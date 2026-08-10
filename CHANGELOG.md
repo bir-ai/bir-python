@@ -10,6 +10,59 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A server's response body can no longer repaint the terminal running `bir send`.
+  The previous release established that recorded text must not be able to steer
+  the terminal reading it and escaped every table cell and header. The CLI's
+  error channel did not go through that: `main` printed an exception message
+  raw, and one of the strings that reaches it is a remote host's response body,
+  embedded verbatim. Driving `bir send` against a server that chooses its own
+  body:
+
+  ```
+                                          before                after
+  400 whose body is an ANSI repaint       105 bytes, 4 ESC      117 bytes, 0 ESC
+  200 whose body is an ANSI repaint       105 bytes, 4 ESC      117 bytes, 0 ESC
+  400 whose body is 2 MB                  2,000,053 bytes       567 bytes
+  ```
+
+  The repaint body erases its own line, moves the cursor up, erases again, and
+  prints `accepted=1 attempted=1 skipped=0` — what a successful send prints. A
+  failed send could be made to look like a successful one on the operator's
+  screen.
+
+  Escaping is applied where the diagnostic is printed rather than where the
+  message is built. A message mixes Bir's own words with parts it does not
+  control — a path, a trace or experiment id, a store's field names, a server's
+  body — and the print site is the one place that covers all of them, including
+  messages nobody has written yet; the sweep found `Dataset.__post_init__`
+  interpolating example ids from a file without `repr`, and it is covered by
+  this without being touched. Every `bir: …` line now goes through one helper
+  and is a single line whatever it contains, so a body cannot forge a second
+  one. The OTLP install hint, the only message that had embedded a newline
+  itself, is now one line rather than an exception to the rule.
+
+  Escaping stops at the CLI and does not move into the exceptions. A
+  `RuntimeError` a program catches carries what the server actually said, so a
+  caller logging or matching it sees the bytes rather than a rendering of them —
+  the same split already drawn for recorded values, which are stored as written
+  and escaped when printed.
+
+  A response body is separately bounded, which belongs where the string is read
+  rather than where it is shown: `_read_http_error_body` now stops one character
+  past the limit instead of reading whatever arrives, and every message carries
+  at most 500 characters plus `…[truncated]`. The bound is on what a message
+  shows, not on what is parsed — a successful batch response is still read
+  whole, since a large batch's accepted ids are legitimately longer than any
+  message would carry, and cutting it before `json.loads` would refuse a good
+  response.
+
+  No test pinned the old behaviour. The existing control-character cases cover
+  `traces`, `show`, `tail`, and `experiment-show` on stdout; nothing covered
+  `bir: …` on stderr and nothing drove `bir send` against a hostile body. The
+  new cases drive both repaint bodies and the oversized one through the CLI,
+  pin the bound and the untouched read at the transport, and assert that a
+  legitimately large accepted response still parses.
+
 - `bir tail` follows the store across a rotation. It is documented as printing
   new events "as they are written", and with `configure(max_bytes=...)` set it
   did not: rotation renames the active file away and starts a new one, and the

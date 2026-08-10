@@ -45,9 +45,12 @@ from bir._sdk import _count_events_per_trace, _iter_trace_events, _iter_traces_f
 # else (the trace root, structural spans, scores) is an ``INTERNAL`` span.
 _CLIENT_SPAN_TYPES = frozenset({"generation", "tool_call", "retrieval"})
 
-_INSTALL_HINT = (
-    "OpenTelemetry export requires the optional 'otel' extra. Install it with:\n    pip install 'bir-sdk[otel]'"
-)
+# One line, no embedded newline. The CLI prints this on the channel where a
+# message is one line whatever it contains, because a message there may carry a
+# remote host's text and a newline is what lets that text forge a second line.
+# The hint is no less actionable run together, and the rule holds without an
+# exception carved out for the SDK's own strings.
+_INSTALL_HINT = "OpenTelemetry export requires the optional 'otel' extra. Install it with: pip install 'bir-sdk[otel]'"
 
 
 def export_traces_to_otlp(

@@ -35,6 +35,7 @@ from ._cli_present import (
     _print_experiment_detail,
     _print_table,
     _stats_rows,
+    _visible,
     _walk_event_tree,
 )
 from ._sdk import (
@@ -78,6 +79,36 @@ _BIR_ENV_VARS = (
 )
 
 
+def _report(message: str, *, out: TextIO | None = None) -> None:
+    """Write one ``bir:`` diagnostic, escaped so it cannot steer the terminal.
+
+    Every diagnostic goes through here rather than each site escaping its own
+    interpolations, because a message is built from trusted literals and
+    untrusted parts together and the print site is the one place that covers all
+    of them -- including the ones nobody has written yet. What reaches this
+    channel from outside the process is a remote server's response body, a
+    store's field names, a path, an experiment id, and a trace id; the untrusted
+    half is the majority, and a message that is one line here is one line on the
+    screen whatever it contains.
+
+    Escaping stops here and does not move into the exceptions themselves. A
+    ``RuntimeError`` a program catches carries what the server actually said, so
+    a caller logging it to a file or matching on it sees the bytes rather than a
+    rendering of them; how they reach a terminal is that program's decision, and
+    for Bir's own CLI this is where it is made. It is the same split the SDK
+    already draws for recorded values, which are stored as written and escaped
+    when printed.
+
+    ``out`` exists so a follow can report on the stream it was handed; it
+    defaults to ``sys.stderr``, which keeps diagnostics off a ``--json`` run's
+    stdout.
+    """
+
+    stream = sys.stderr if out is None else out
+    print(f"bir: {_visible(message)}", file=stream)
+    stream.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the ``bir`` command-line interface and return a process exit code."""
 
@@ -92,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except (ValueError, RuntimeError, OSError) as exc:
-        print(f"bir: {exc}", file=sys.stderr)
+        _report(str(exc))
         return 1
 
 
@@ -144,7 +175,7 @@ class _SkippedLines:
         noun = "line" if count == 1 else "lines"
         first = next(iter(self._messages))
         # stderr, so a --json run still writes only JSON to stdout.
-        print(f"bir: skipped {count} unreadable {noun}; first: {first}", file=sys.stderr)
+        _report(f"skipped {count} unreadable {noun}; first: {first}")
 
 
 class _SkippedSummaries:
@@ -171,7 +202,7 @@ class _SkippedSummaries:
         noun = "summary" if count == 1 else "summaries"
         first = next(iter(self._messages))
         # stderr, so a --json run still writes only JSON to stdout.
-        print(f"bir: skipped {count} unreadable experiment {noun}; first: {first}", file=sys.stderr)
+        _report(f"skipped {count} unreadable experiment {noun}; first: {first}")
 
 
 @dataclass(frozen=True)
@@ -282,10 +313,9 @@ def _report_rootless_events(counts: dict[str, int], roots: dict[str, Any]) -> No
     verb, listed = ("has", "is") if events == 1 else ("have", "are")
     trace_noun = "trace" if len(rootless) == 1 else "traces"
     # stderr, so a --json run still writes only JSON to stdout.
-    print(
-        f"bir: {subject} across {len(rootless)} {trace_noun} {verb} no trace root and {listed} not listed; "
-        f"first trace id: {rootless[0]}",
-        file=sys.stderr,
+    _report(
+        f"{subject} across {len(rootless)} {trace_noun} {verb} no trace root and {listed} not listed; "
+        f"first trace id: {rootless[0]}"
     )
 
 
@@ -439,16 +469,12 @@ def _cmd_show(args: argparse.Namespace) -> int:
             # trace. Saying "not found" would send someone looking for the wrong
             # thing, so name what was found and what it is missing.
             noun = "event" if len(wanted) == 1 else "events"
-            print(
-                f"bir: trace {args.trace_id!r} has {len(wanted)} recorded {noun} but no trace root, "
-                "so it cannot be shown as a tree",
-                file=sys.stderr,
+            _report(
+                f"trace {args.trace_id!r} has {len(wanted)} recorded {noun} but no trace root, "
+                "so it cannot be shown as a tree"
             )
             return 1
-        print(
-            f"bir: trace {args.trace_id!r} not found in {_resolved_trace_path(args.path)}",
-            file=sys.stderr,
-        )
+        _report(f"trace {args.trace_id!r} not found in {_resolved_trace_path(args.path)}")
         return 1
 
     children = _children_by_parent_id(trace.events)
@@ -605,10 +631,7 @@ def _cmd_experiment_show(args: argparse.Namespace) -> int:
         None,
     )
     if summary is None:
-        print(
-            f"bir: experiment {args.experiment_id!r} not found in {directory}",
-            file=sys.stderr,
-        )
+        _report(f"experiment {args.experiment_id!r} not found in {directory}")
         return 1
 
     experiment = load_experiment(_resolve_experiment_result_path(summary, directory))
@@ -628,10 +651,7 @@ def _cmd_experiment_report(args: argparse.Namespace) -> int:
         None,
     )
     if summary is None:
-        print(
-            f"bir: experiment {args.experiment_id!r} not found in {directory}",
-            file=sys.stderr,
-        )
+        _report(f"experiment {args.experiment_id!r} not found in {directory}")
         return 1
 
     experiment = load_experiment(_resolve_experiment_result_path(summary, directory))
@@ -725,7 +745,7 @@ def _cmd_export_otel(args: argparse.Namespace) -> int:
             on_invalid=skipped,
         )
     except ImportError as exc:
-        print(f"bir: {exc}", file=sys.stderr)
+        _report(str(exc))
         return 1
     finally:
         # Also reported when the export failed part-way through, because damaged
@@ -749,10 +769,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     # nothing is written unless ``--yes`` is given (``--dry-run`` always wins,
     # forcing a preview), so a confirmation-free run only reports what it would do.
     if args.before is None and args.keep_last is None and args.status is None:
-        print(
-            "bir: prune requires at least one selection filter (--before, --keep-last, or --status)",
-            file=sys.stderr,
-        )
+        _report("prune requires at least one selection filter (--before, --keep-last, or --status)")
         return 1
 
     before = _as_aware_utc(args.before) if args.before is not None else None
@@ -879,7 +896,9 @@ def _collect_score_tolerances(
 
 def _cmd_tail(args: argparse.Namespace) -> int:
     path = _resolved_trace_path(args.path)
-    print(f"Following {path} (press Ctrl-C to stop)", file=sys.stderr)
+    # Escaped like every other line on this channel: the path is an argument or a
+    # configured value, not something the CLI wrote.
+    print(f"Following {_visible(str(path))} (press Ctrl-C to stop)", file=sys.stderr)
     try:
         _follow_trace(path, out=sys.stdout, poll_interval=_TAIL_POLL_INTERVAL, should_stop=lambda: False)
     except KeyboardInterrupt:
@@ -1046,8 +1065,7 @@ def _drain_rotated_files(path: Path, tracked: _FileIdentity, position: int, out:
                 offset = 0
             return
 
-    print(f"bir: {path} was replaced; the events it still held were not shown", file=err)
-    err.flush()
+    _report(f"{path} was replaced; the events it still held were not shown", out=err)
 
 
 def _emit_file_events(path: Path, offset: int, out: TextIO) -> int:
