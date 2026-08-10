@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -887,27 +888,74 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 
 @dataclass(frozen=True)
+class _FileIdentity:
+    """What makes the file a follow is reading that file and not another one.
+
+    ``(device, inode)`` is not enough on its own. Rotation deletes the file that
+    falls past ``backup_count`` and creates a new active file in the same
+    directory, and a filesystem is free to hand the new one the inode number it
+    just freed. Linux does, readily: the same rotation loop that produces
+    strictly increasing inodes on APFS and NTFS produces a new file wearing the
+    old one's number on ext4, so a follow comparing only those two numbers is
+    told nothing happened and reads on at an offset that now points into a
+    different file's middle.
+
+    ``head`` is the file's first line, which separates them: every line is an
+    event carrying its own id. It is stable under the only thing the store ever
+    does to a file -- append a whole line -- so it does not drift as the file
+    grows, and a rename changes none of the three, which is what still lets a
+    rotated file be recognized under its new name. An empty file has no first
+    line to compare and identifies nothing by it, so writing the first event
+    into one is not read as a replacement.
+    """
+
+    device: int
+    inode: int
+    head: bytes
+
+    def matches(self, other: _FileIdentity) -> bool:
+        """Return True when ``other`` is the same file, seen earlier or later."""
+
+        if (self.device, self.inode) != (other.device, other.inode):
+            return False
+        return not self.head or not other.head or self.head == other.head
+
+
+# Enough of a line to carry the event id that makes it unlike any other, with
+# room to spare; a first line longer than this is fingerprinted by its prefix,
+# which an append-only file also never changes.
+_IDENTITY_HEAD_BYTES = 512
+
+
+def _file_identity(path: Path) -> _FileIdentity | None:
+    """Return what identifies the file at ``path``, or None if it is not there."""
+
+    try:
+        with path.open("rb") as trace_file:
+            status = os.fstat(trace_file.fileno())
+            head = trace_file.read(_IDENTITY_HEAD_BYTES)
+    except OSError:
+        return None
+    newline = head.find(b"\n")
+    return _FileIdentity(
+        device=status.st_dev,
+        inode=status.st_ino,
+        head=head if newline == -1 else head[:newline],
+    )
+
+
+@dataclass(frozen=True)
 class _TailPosition:
     """How far a follow has read, and which file it read that far into.
 
     Rotation replaces the active path with a different file rather than
     truncating it, so a byte offset only means something together with the
-    identity of the file it was measured against. ``identity`` is that file's
-    ``(device, inode)`` pair, or ``None`` while the path does not exist.
+    identity of the file it was measured against. ``identity`` is ``None`` while
+    the path does not exist.
     """
 
-    identity: tuple[int, int] | None
+    identity: _FileIdentity | None
     offset: int
-
-
-def _file_identity(path: Path) -> tuple[int, int] | None:
-    """Return the ``(device, inode)`` pair naming ``path``, or None if it is gone."""
-
-    try:
-        status = path.stat()
-    except OSError:
-        return None
-    return (status.st_dev, status.st_ino)
 
 
 def _follow_trace(
@@ -924,16 +972,16 @@ def _follow_trace(
     are shown, then polls for appended complete lines. ``should_stop`` is checked
     after each poll so callers (and tests) can end the loop deterministically; the
     ``tail`` command passes a predicate that never stops and relies on Ctrl-C.
-    ``err`` receives the notice that a rotation outran the follow and defaults to
-    ``sys.stderr``, which keeps it off the event stream on stdout.
+    ``err`` receives the notice that a replaced file outran the follow and
+    defaults to ``sys.stderr``, which keeps it off the event stream on stdout.
     """
 
+    identity = _file_identity(path)
     try:
-        status = path.stat()
+        size = path.stat().st_size
     except OSError:
-        position = _TailPosition(identity=None, offset=0)
-    else:
-        position = _TailPosition(identity=(status.st_dev, status.st_ino), offset=status.st_size)
+        size = 0
+    position = _TailPosition(identity=identity, offset=size)
     errors = sys.stderr if err is None else err
     while True:
         position = _emit_new_events(path, position, out, err=errors)
@@ -948,23 +996,27 @@ def _emit_new_events(path: Path, position: _TailPosition, out: TextIO, *, err: T
     A store configured with ``max_bytes`` does not grow the active file forever:
     it renames the file away and starts a new one at zero. An offset carried
     across that rename means nothing, so the file the offset belongs to is
-    identified by device and inode and re-checked every poll. Comparing sizes is
-    not enough -- the replacement is usually already longer than the old offset
-    by the time the next poll runs, in which case a size check sees ordinary
-    growth and seeks past the beginning of a file it has never read.
+    identified in full and re-checked every poll. Comparing sizes is not enough
+    -- the replacement is usually already longer than the old offset by the time
+    the next poll runs, in which case a size check sees ordinary growth and seeks
+    past the beginning of a file it has never read.
     """
 
     identity = _file_identity(path)
     if identity is None:
         return position
-    if position.identity is not None and identity != position.identity:
-        _drain_rotated_files(path, position, out, err=err)
+    if position.identity is not None and not identity.matches(position.identity):
+        _drain_rotated_files(path, position.identity, position.offset, out, err=err)
         position = _TailPosition(identity=identity, offset=0)
     return _TailPosition(identity=identity, offset=_emit_file_events(path, position.offset, out))
 
 
-def _drain_rotated_files(path: Path, position: _TailPosition, out: TextIO, *, err: TextIO) -> None:
+def _drain_rotated_files(path: Path, tracked: _FileIdentity, position: int, out: TextIO, *, err: TextIO) -> None:
     """Print what the files rotated away since the last poll still owe the follow.
+
+    ``tracked`` identifies the file the follow was reading and ``position`` is
+    how far into it the follow had read; it is only called once the path has
+    stopped being that file.
 
     Everything appended between the last poll and the rename is in a sibling by
     the time the rotation is noticed, and several rotations can land inside one
@@ -973,28 +1025,29 @@ def _drain_rotated_files(path: Path, position: _TailPosition, out: TextIO, *, er
     write order. Only files newer than that one are read: the older siblings hold
     events that predate the follow, which it is not for.
 
-    When that file is not among them it has been deleted, taking its unread tail
-    with it -- usually because the store rotated more times than ``backup_count``
-    keeps, and otherwise because ``bir prune`` rewrote the active file. Nothing
-    can print what is no longer on disk, and nothing can say how much it was, so
-    the gap is reported rather than passed over in silence and following resumes
-    at the start of the new active file. The notice names both causes because
-    which one it was is not knowable from here: both leave the same absence.
+    When that file is not among them its content is gone, taking whatever was
+    unread with it -- usually because the store rotated more times than
+    ``backup_count`` keeps, and otherwise because ``bir prune`` or something
+    outside the SDK rewrote the active file. Nothing can print what is no longer
+    on disk, and nothing can say how much it was, so the gap is reported rather
+    than passed over in silence and following resumes at the start of the new
+    active file. The notice says the file was replaced rather than naming a
+    cause, because which one it was is not knowable from here: they leave the
+    same absence.
     """
 
     siblings = _trace_files_oldest_first(path)[:-1]
-    identities = [_file_identity(sibling) for sibling in siblings]
-    try:
-        rotated_away = identities.index(position.identity)
-    except ValueError:
-        print(f"bir: {path} was rotated or pruned away; the events it still held were not shown", file=err)
-        err.flush()
-        return
+    for index, sibling in enumerate(siblings):
+        identity = _file_identity(sibling)
+        if identity is not None and identity.matches(tracked):
+            offset = position
+            for rotated in siblings[index:]:
+                _emit_file_events(rotated, offset, out)
+                offset = 0
+            return
 
-    offset = position.offset
-    for sibling in siblings[rotated_away:]:
-        _emit_file_events(sibling, offset, out)
-        offset = 0
+    print(f"bir: {path} was replaced; the events it still held were not shown", file=err)
+    err.flush()
 
 
 def _emit_file_events(path: Path, offset: int, out: TextIO) -> int:

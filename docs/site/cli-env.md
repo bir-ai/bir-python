@@ -255,27 +255,29 @@ bir tail | grep error
 It also follows the store across a rotation. `configure(max_bytes=...)` renames
 the active file away and starts a new one, so a follow that tracked only a byte
 offset skipped both the tail of the file that was renamed and the beginning of
-its replacement. `bir tail` identifies the file it is reading by device and
-inode instead, drains what the renamed file still owed, and reads any files that
-rotated in between, in write order, before continuing with the new active file.
-No flag is involved: unlike the read commands, a follow shows what is being
-written now, and where the store put it is not something you should have to
-know.
+its replacement. `bir tail` identifies the file it is reading — by device and
+inode, and by its recorded first line, since a filesystem may hand a new file
+the inode number a rotation just freed — drains what the renamed file still
+owed, and reads any files that rotated in between, in write order, before
+continuing with the new active file. No flag is involved: unlike the read
+commands, a follow shows what is being written now, and where the store put it
+is not something you should have to know.
 
 One gap it cannot close. Rotating more times than `backup_count` keeps deletes
 the file the follow was reading before it is read, and nothing can print what is
 no longer on disk. That is reported on stderr rather than passed over:
 
 ```
-bir: .bir/traces.jsonl was rotated or pruned away; the events it still held were not shown
+bir: .bir/traces.jsonl was replaced; the events it still held were not shown
 ```
 
 It goes to stderr so it stays out of the event stream on stdout, and the follow
-resumes at the start of the new active file. Seeing it usually means the store
-is deleting rotated files faster than the half-second poll can read them; a
-larger `max_bytes` or `backup_count` is the fix. A `bir prune` run against the
-store being followed replaces the active file too and reports the same way,
-because from inside a follow the two leave the same absence.
+resumes at the start of whatever is at the path now. Seeing it usually means the
+store is deleting rotated files faster than the half-second poll can read them;
+a larger `max_bytes` or `backup_count` is the fix. The same line appears when a
+`bir prune` run rewrites the store being followed, or when anything else
+replaces the active file, because from inside a follow all of them leave the
+same absence.
 
 ### Recorded text cannot steer your terminal
 

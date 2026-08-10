@@ -32,33 +32,47 @@ Before publishing, verify the release with the SDK release checklist in
   rotation check there was — `if size < offset` — read it as ordinary growth and
   seeked past the beginning of a file it had never read.
 
-  The follow now identifies the file its offset belongs to by device and inode
-  and re-checks that every poll, so a replaced file is recognized however large
-  it has grown. On a rotation it locates that file among the siblings, drains
-  what it still owed, and reads any files that rotated in between, in write
-  order, before continuing with the new active file — several rotations can land
-  inside one poll interval. Only files newer than the one it was reading are
-  touched, so a follow still never prints events that predate it.
+  The follow now identifies the file its offset belongs to and re-checks that
+  every poll, so a replaced file is recognized however large it has grown. On a
+  rotation it locates that file among the siblings, drains what it still owed,
+  and reads any files that rotated in between, in write order, before continuing
+  with the new active file — several rotations can land inside one poll
+  interval. Only files newer than the one it was reading are touched, so a
+  follow still never prints events that predate it.
+
+  Device and inode do not identify a file well enough to do this on Linux.
+  Rotation frees an inode every time it drops a file past `backup_count`, and
+  ext4 hands that number to the new active file created a moment later, so the
+  replacement can arrive wearing the number of the file the follow was reading
+  and be waved through. APFS and NTFS allocate strictly increasing ids and never
+  reproduce it, which is why it showed up only on some of CI. The identity is
+  therefore device, inode, and the file's recorded first line — an event
+  carrying its own id, which no other file has. A rename changes none of the
+  three, which is what still lets a rotated file be recognized under its new
+  name, and an empty file has no first line to compare, so a store's first event
+  is not mistaken for a replacement.
 
   One gap cannot be closed and is now reported instead of silent. Rotating more
   times than `backup_count` keeps deletes the file the follow was reading before
   it can be read, and nothing can print what is no longer on disk. The same
   workload at a 2 KB limit rotates roughly twenty times per poll interval and
   the store itself ends up holding 15 of the 200 traces; that run now prints
-  `bir: … was rotated or pruned away; the events it still held were not shown`
-  on stderr — off the event stream on stdout — where before it printed nothing
-  and said nothing. `bir prune` against a followed store replaces the active
-  file the same way, which is why the notice names both causes: from inside a
-  follow they leave the same absence.
+  `bir: … was replaced; the events it still held were not shown` on stderr — off
+  the event stream on stdout — where before it printed nothing and said nothing.
+  A `bir prune` that rewrites a followed store, and any other replacement of the
+  active file, report the same way: from inside a follow they leave the same
+  absence, and the notice says what was observed rather than guessing a cause.
 
   No test pinned the old behaviour. The existing cases drive `_follow_trace`
   against a single appended file and the `tail` command against an un-rotated
   one, so nothing rotated the store while a follow was running. The new cases
   rotate through the real writer rather than renaming by hand, and cover a
   rotation per poll, a file drained after being rotated away mid-interval, two
-  whole files rotating inside one interval, and the reported gap. Truncation in
-  place and a store that does not exist yet are pinned alongside them: both
-  behaved correctly before and still do.
+  whole files rotating inside one interval, the reported gap, and a rewrite in
+  place. The inode-reuse case is pinned by forcing every file to report the same
+  device and inode, so it reproduces on a filesystem that would never produce it
+  naturally rather than only on the CI legs that do. A store that does not exist
+  yet and one whose first event fills an empty file are pinned alongside them.
 
 - A framework object that raises while Bir reads it no longer fails the call it
   was recording. The previous release established that rule for the seven direct

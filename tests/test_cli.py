@@ -2208,11 +2208,51 @@ class TailRotationTests(CliBaseTest):
 
             cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
 
-            self.assertEqual(err.getvalue().count("rotated or pruned away"), 1)
+            self.assertEqual(err.getvalue().count("was replaced"), 1)
             self.assertIn(str(trace_path), err.getvalue())
             self.assertIn("resumed", out.getvalue())
 
-    def test_follow_still_restarts_when_the_file_is_truncated_in_place(self) -> None:
+    def test_follow_survives_a_filesystem_that_reuses_the_inode(self) -> None:
+        """A new file wearing the deleted one's inode number is still a new file.
+
+        Rotation frees an inode every time it drops a file past
+        ``backup_count``, and ext4 hands that number straight to the new active
+        file it creates a moment later; APFS and NTFS never do, so no machine
+        sees both behaviours and only some of CI sees this one. Forcing every
+        file to report the same device and inode is what makes the case
+        reproducible anywhere: what has to carry the distinction then is the
+        recorded first line, which no two event files share.
+        """
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._write_trace(trace_path, "before", max_bytes=None)
+            names = [f"live{index:02d}" for index in range(4)]
+
+            class SameFileEverywhere:
+                st_dev = 1
+                st_ino = 1
+
+            with patch("bir.cli.os.fstat", return_value=SameFileEverywhere()):
+                rendered, errors = self._follow_writing(trace_path, names, max_bytes=200)
+
+            self.assertEqual(errors, "")
+            self.assertNotIn("before", rendered)
+            printed = [line for line in rendered.splitlines() if "live" in line]
+            self.assertEqual(len(printed), len(names))
+            for name, line in zip(names, printed):
+                self.assertIn(name, line)
+
+    def test_follow_restarts_and_reports_when_the_file_is_rewritten_in_place(self) -> None:
+        """A rewrite keeps the inode, so only the content says the file changed.
+
+        Nothing in the SDK truncates the active file, but ``bir prune`` replaces
+        it and a person can overwrite it, and both cost the follow whatever it
+        had not read yet. It resumes from the start of what is there now and
+        says the file was replaced, the same as for a rotation it could not
+        follow, because the two leave the same absence.
+        """
+
         with temporary_workdir() as workdir:
             trace_path = workdir / "traces.jsonl"
             old = json.dumps({"type": "trace", "name": "old", "status": "success", "start_time": "T0"}) + "\n"
@@ -2224,7 +2264,7 @@ class TailRotationTests(CliBaseTest):
                 polls["n"] += 1
                 if polls["n"] > 1:
                     return True
-                # Truncated and rewritten in place: same inode, shorter file.
+                # Truncated and rewritten in place: same inode, different content.
                 with trace_path.open("w", encoding="utf-8") as trace_file:
                     trace_file.write(
                         json.dumps({"type": "trace", "name": "fresh", "status": "success", "start_time": "T1"}) + "\n"
@@ -2233,8 +2273,22 @@ class TailRotationTests(CliBaseTest):
 
             cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
 
-            self.assertEqual(err.getvalue(), "")
             self.assertIn("fresh", out.getvalue())
+            self.assertNotIn("old", out.getvalue())
+            self.assertEqual(err.getvalue().count("was replaced"), 1)
+
+    def test_follow_does_not_report_the_first_event_in_an_empty_store(self) -> None:
+        """An empty file identifies nothing, so filling it is not a replacement."""
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            trace_path.write_text("", encoding="utf-8")
+
+            rendered, errors = self._follow_writing(trace_path, ["first", "second"], max_bytes=None)
+
+            self.assertEqual(errors, "")
+            self.assertIn("first", rendered)
+            self.assertIn("second", rendered)
 
     def test_follow_waits_for_a_store_that_does_not_exist_yet(self) -> None:
         with temporary_workdir() as workdir:
