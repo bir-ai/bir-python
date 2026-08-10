@@ -8,6 +8,51 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Changed
+
+- The OTLP exporter emits the current spelling of two attribute names alongside
+  the ones it already wrote. `otel.py` and `README.md` claimed the exported
+  attributes "follow the GenAI semantic conventions where they exist", and two
+  of them had been renamed underneath that claim. Measured against
+  `opentelemetry-semantic-conventions` 0.65b0, the release installed alongside
+  `opentelemetry-sdk` 1.44.0:
+
+  ```
+  superseded                  current                         where
+  deployment.environment  ->  deployment.environment.name     Resource
+  gen_ai.system           ->  gen_ai.provider.name            generation spans
+  ```
+
+  The consequence was quiet: a backend keying its environment facet on
+  `deployment.environment.name` or its provider facet on `gen_ai.provider.name`
+  saw no value, and the traces looked like they lacked the metadata rather than
+  like they spelled it differently.
+
+  Both spellings are now written with the same value, rather than one replacing
+  the other. The `otel` extra accepts `opentelemetry-sdk>=1.20`, and a backend
+  anywhere in that range may key on either name; emitting only the current
+  spelling would leave the facet empty for anyone who had not migrated, which is
+  the same silence pointing the other way. The cost is two attributes — one on
+  the `Resource`, one on a generation span — and dual emission is what the
+  conventions prescribe for a rename in progress. The superseded names go when
+  the extra's floor rises past the release that carries only the replacements.
+
+  `gen_ai.request.model`, `gen_ai.usage.input_tokens`, and
+  `gen_ai.usage.output_tokens` were re-checked against the same release and are
+  unchanged. Every GenAI constant in 0.65b0 carries a deprecation note, but for
+  those three it records the move to the GenAI conventions repository rather
+  than a new spelling — which is why the presence of a deprecation note is not
+  what this was measured on.
+
+  The version is now named wherever the claim is made — the module docstring,
+  `README.md`, and a new "Which semantic conventions" section in
+  `docs/site/cli-env.md` with the table above — so the next audit can re-check
+  it against a release rather than against "current". New tests read the
+  constants out of the installed conventions package and compare them to what
+  the exporter writes, so a future rename fails rather than passing quietly; the
+  case pinning the superseded spellings says in its assertion message that the
+  transition can end once those constants are gone.
+
 ### Fixed
 
 - A server's response body can no longer repaint the terminal running `bir send`.

@@ -41,7 +41,7 @@ rendering path, how `bir tail` and file rotation compose, what the OTLP attribut
 names mean against the OpenTelemetry release the extra actually installs, and
 which fields redaction is scanning at all rather than which patterns it
 recognizes. The P1 came from re-asking the first question, and each of those axes
-produced one item. Three have since shipped; the two below are what remain.
+produced one item. Four have since shipped; the one below is what remains.
 
 ## Product and engineering guardrails
 
@@ -63,68 +63,17 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Three items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
+Four items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
 event bridges' unguarded reads of a framework object; the follow that did not
-survive a rotation; and the error channel that printed a remote host's response
-body raw. The two items below are what is left.
+survive a rotation; the error channel that printed a remote host's response body
+raw; and the two superseded OTLP attribute spellings. The one item below is what
+is left.
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
-| 2 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
+| 1 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
 
-### 1. Refresh the OTLP attribute spellings
-
-**Why.** `bir/integrations/otel.py:14-20` and `README.md:478-481` claim the
-exported attributes "follow the GenAI semantic conventions where they exist". Two
-of the names the exporter writes are superseded spellings in the OpenTelemetry
-release the `otel` extra installs (`opentelemetry-sdk` 1.44.0 with
-`opentelemetry-semantic-conventions` 0.65b0):
-
-```
-GEN_AI_SYSTEM        -> gen_ai.system
-    Deprecated: Replaced by `gen_ai.provider.name`
-DEPLOYMENT_ENVIRONMENT -> deployment.environment
-    Deprecated: Replaced by `deployment.environment.name`
-```
-
-`deployment.environment.name` is now a *stable* constant
-(`opentelemetry.semconv.attributes.deployment_attributes.DEPLOYMENT_ENVIRONMENT_NAME`),
-not an incubating one. The exporter writes `deployment.environment` at
-`otel.py:180` and `gen_ai.system` at `otel.py:440`. The other three GenAI names
-it uses — `gen_ai.request.model`, `gen_ai.usage.input_tokens`,
-`gen_ai.usage.output_tokens` — are unchanged in spelling; the same package marks
-them only as having moved to the GenAI conventions repository.
-
-The consequence is quiet: a backend that keys its environment facet on
-`deployment.environment.name` or its provider facet on `gen_ai.provider.name`
-sees no value, and the traces look like they lack the metadata rather than like
-they spell it differently.
-
-**Tests pin the current spellings**, so this reverses a decision rather than
-filling a hole: `tests/test_otel_integration.py:245`, `:263`, `:586`, `:600`, and
-`:627`. That is the right shape for it — the spellings were chosen deliberately
-when the exporter was written, and the conventions moved underneath them.
-
-**Scope.**
-
-- Decide the policy first and write it down: track the current conventions,
-  emit both spellings through a transition, or pin the older ones and say why.
-  A one-line note in `docs/site/cli-env.md` beside the attribute list is the
-  deliverable either way, because "which conventions version" is the question a
-  reader wiring up a backend actually has.
-- Whatever is decided, make the claim in `otel.py`'s module docstring and
-  `README.md:478-481` say which conventions release it is measured against, so the
-  next audit can re-check it against a version rather than against "current".
-- Update the pinning tests to the decision.
-- Re-check the remaining names against the same release while touching this; the
-  three checked here were sound.
-
-**Done when** the exported attribute names and the documented conventions claim
-agree with a named OpenTelemetry semantic-conventions release, with the pinning
-tests updated to match.
-
-### 2. Record where the redaction boundary stops
+### 1. Record where the redaction boundary stops
 
 **Why.** `docs/site/capture-privacy.md:25-80` enumerates what redaction catches
 in exhaustive detail and warns that recognition is best-effort. It never says
@@ -208,9 +157,8 @@ does not, and a test asserts that boundary.
 
 ## Sequencing
 
-Both remaining items are documentation-and-decision work whose main cost is
-agreeing on the answer; neither blocks anything. Nothing here blocks anything
-else.
+The remaining item is documentation-and-decision work whose main cost is agreeing
+on the answer. Nothing here blocks anything else.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -246,9 +194,10 @@ redirected follow is not silent, redacting a secret used as a mapping key, and
 escaping control characters when the CLI renders recorded text for a person,
 guarding the bridges' reads of a provider's response, creating the store's own
 files readable only by their owner, guarding the event bridges' reads of a
-framework object, following the store across a rotation in `bir tail`, and
-escaping and bounding what the CLI prints on its error channel. Regressions in
-those areas are bugs; new scope requires a new issue with current evidence.
+framework object, following the store across a rotation in `bir tail`, escaping
+and bounding what the CLI prints on its error channel, and refreshing the OTLP
+attribute spellings. Regressions in those areas are bugs; new scope requires a
+new issue with current evidence.
 
 The guarded event-bridge reads that shipped from this audit are adjacent to the
 earlier "guarding the bridges' reads of a provider's response" and neither
@@ -269,6 +218,14 @@ control characters when the CLI renders recorded text for a person" and does not
 reopen it. That covered the rendering path and strings from the local store.
 This was the error path and a string a remote host chose; the two shared no
 code.
+
+The refreshed attribute spellings sit beside "richer OTLP attributes" and do not
+reopen it either. That added attributes the exporter was not writing. This
+changed how two it was already writing are spelled, after the conventions
+renamed them; no attribute was added or removed, and both spellings of each
+carry the same value. The end of that transition is a real follow-up, but it is
+triggered by the extra's floor rising rather than by an audit, and the test
+pinning the superseded spellings says so where someone will see it.
 
 ## Declined
 
@@ -400,7 +357,7 @@ so they survive the block, removes its temporary file, and left the real store
 empty throughout.
 
 **The redaction rules on the value axis.** Every metadata, output, document, and
-error surface in the sweep under item 2 — ten of them — redacted the credential,
+error surface in the sweep under item 1 — ten of them — redacted the credential,
 including a secret used as a mapping key and one inside a framework bridge's
 `tags` and `serialized_id`.
 

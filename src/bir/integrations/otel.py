@@ -16,14 +16,48 @@ span and every other ``TraceEvent`` maps to a child span linked by ``parent_id``
 Span start/end come from the event's ISO timestamps, span status from
 ``success``/``error``, and attributes follow the GenAI semantic conventions where
 they exist (``gen_ai.request.model``, ``gen_ai.usage.input_tokens`` /
-``gen_ai.usage.output_tokens``, and ``gen_ai.system`` when the provider was
-recorded) with ``bir.*`` attributes for everything else.
+``gen_ai.usage.output_tokens``, and the provider name when it was recorded) with
+``bir.*`` attributes for everything else.
 
 The OpenTelemetry ``Resource`` carries ``service.name`` and, when the traces
-recorded them, the deployment environment (``deployment.environment``, from
-``configure(environment=...)``) and the trace source (``bir.source``, from
-``configure(source=...)``). See :func:`export_traces_to_otlp` for how those are
-resolved when one export spans more than one environment or source.
+recorded them, the deployment environment (from ``configure(environment=...)``)
+and the trace source (``bir.source``, from ``configure(source=...)``). See
+:func:`export_traces_to_otlp` for how those are resolved when one export spans
+more than one environment or source.
+
+Which conventions
+-----------------
+
+The names here are measured against **opentelemetry-semantic-conventions
+0.65b0**, the release installed alongside ``opentelemetry-sdk`` 1.44.0. Stating
+a version rather than "current" is the point: conventions move underneath an
+exporter, and a claim to follow them can only be checked against something.
+
+Two names were renamed after this exporter was written, and both spellings are
+emitted:
+
+===============================  ================================
+superseded                       current
+===============================  ================================
+``deployment.environment``       ``deployment.environment.name``
+``gen_ai.system``                ``gen_ai.provider.name``
+===============================  ================================
+
+Both are written with the same value rather than one replacing the other,
+because the ``otel`` extra accepts ``opentelemetry-sdk>=1.20`` and a backend
+anywhere in that range may key its facet on either name. Emitting only the
+current spelling would move the silent loss to the other side rather than fix
+it: the facet would simply come up empty for anyone who had not migrated. Two
+attributes is the whole cost -- one on the ``Resource``, one on a generation
+span -- and dual emission is what the conventions themselves prescribe for a
+rename in progress.
+
+This is a transition, not a permanent arrangement. The superseded spellings go
+when the extra's floor is raised past the release that carries only the
+replacements. ``gen_ai.request.model`` and the two ``gen_ai.usage.*`` names were
+re-checked against the same release and are unchanged; every GenAI constant in
+0.65b0 carries a deprecation note, but for those three it records the move to
+the GenAI conventions repository rather than a new spelling.
 
 The exporter only reads traces; it never writes to or mutates the local JSONL.
 """
@@ -180,7 +214,11 @@ def _export_traces(
 
     resource_attributes: dict[str, Any] = {api.SERVICE_NAME: service_name}
     if context.environment is not None:
+        # Both spellings, same value: `deployment.environment` was renamed to
+        # `deployment.environment.name`, and the extra spans releases on either
+        # side of that. See "Which conventions" in the module docstring.
         resource_attributes["deployment.environment"] = context.environment
+        resource_attributes["deployment.environment.name"] = context.environment
     if context.source is not None:
         resource_attributes["bir.source"] = context.source
     resource = api.Resource.create(resource_attributes)
@@ -415,12 +453,12 @@ def _event_attributes(
     """Map a Bir event to OpenTelemetry span attributes.
 
     GenAI semantic conventions are used where they exist (``gen_ai.request.model``,
-    ``gen_ai.usage.input_tokens`` / ``gen_ai.usage.output_tokens``, and
-    ``gen_ai.system`` for a generation whose provider was recorded); the remaining
-    Bir-specific fields use ``bir.*`` keys that mirror the JSONL field names so a
-    span can be correlated back to its local event. Only scalar values are emitted,
-    so every value is a valid OpenTelemetry attribute; ``input`` and ``output``
-    payloads are intentionally not forwarded.
+    ``gen_ai.usage.input_tokens`` / ``gen_ai.usage.output_tokens``, and both
+    spellings of the provider name for a generation that recorded one); the
+    remaining Bir-specific fields use ``bir.*`` keys that mirror the JSONL field
+    names so a span can be correlated back to its local event. Only scalar values
+    are emitted, so every value is a valid OpenTelemetry attribute; ``input`` and
+    ``output`` payloads are intentionally not forwarded.
 
     ``environment`` and ``source`` are the per-span fallbacks (``bir.environment`` /
     ``bir.source``) added only when a mixed export could not place them on the
@@ -440,7 +478,11 @@ def _event_attributes(
     if event.type == "generation":
         system = _gen_ai_system(event)
         if system is not None:
+            # Both spellings, same value: `gen_ai.system` was renamed to
+            # `gen_ai.provider.name`. See "Which conventions" in the module
+            # docstring.
             attributes["gen_ai.system"] = system
+            attributes["gen_ai.provider.name"] = system
     if event.usage:
         input_tokens = event.usage.get("input_tokens")
         output_tokens = event.usage.get("output_tokens")

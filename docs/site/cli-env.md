@@ -125,15 +125,38 @@ as `bir traces` (with `--path` and `--include-rotated`). `--endpoint` is require
 `--header KEY=VALUE` is repeatable for backend auth (only the first `=` splits the
 key from the value), and `--service-name`, `--environment`, and `--timeout` are
 forwarded to the exporter. The exported OpenTelemetry `Resource` records
-`service.name` plus, when the traces recorded them, `deployment.environment` (from
+`service.name` plus, when the traces recorded them, the deployment environment (from
 `configure(environment=...)`) and `bir.source` (from `configure(source=...)`), and
-generation spans gain `gen_ai.system` when an integration recorded the provider.
-`--environment` sets `deployment.environment` explicitly and overrides whatever the
+generation spans gain the provider name when an integration recorded it.
+`--environment` sets the deployment environment explicitly and overrides whatever the
 traces recorded; without it, the value is derived from the traces and, when one run
 mixes environments or sources, the conflicting attribute moves from the `Resource`
 onto each span (`bir.environment` / `bir.source`) instead of being dropped. It
 exits non-zero with an install hint when the extra is missing. The export only
 reads the local JSONL; it never writes to or alters it.
+
+#### Which semantic conventions
+
+The exported attribute names are measured against
+**opentelemetry-semantic-conventions 0.65b0**, the release installed alongside
+`opentelemetry-sdk` 1.44.0. Two of them were renamed after this exporter was
+written, and both spellings are emitted with the same value:
+
+| superseded | current | where |
+| --- | --- | --- |
+| `deployment.environment` | `deployment.environment.name` | `Resource` |
+| `gen_ai.system` | `gen_ai.provider.name` | generation spans |
+
+Point your backend's facet at whichever name it knows. Both are written because
+the `otel` extra accepts `opentelemetry-sdk>=1.20` and a backend anywhere in
+that range may key on either; emitting only the current spelling would leave the
+facet empty for anyone who has not migrated, which is the same silence in the
+other direction. The superseded names go when the extra's floor rises past the
+release that carries only the replacements.
+
+`gen_ai.request.model`, `gen_ai.usage.input_tokens`, and
+`gen_ai.usage.output_tokens` are unchanged in that release. Everything else Bir
+exports uses a `bir.*` name and is not a convention.
 
 On success it prints how many traces and spans arrived, and the span count is what
 the endpoint accepted rather than what was built. If the endpoint refused or never

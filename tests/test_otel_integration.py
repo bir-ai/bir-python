@@ -243,6 +243,7 @@ class PureMappingTests(unittest.TestCase):
         attributes = _event_attributes(event)
 
         self.assertEqual(attributes["gen_ai.system"], "openai")
+        self.assertEqual(attributes["gen_ai.provider.name"], "openai")
 
     def test_generation_event_prefers_gen_ai_system_metadata_over_provider(self) -> None:
         # Pydantic AI records the OTel-native ``gen_ai_system``; when both are
@@ -261,6 +262,7 @@ class PureMappingTests(unittest.TestCase):
         attributes = _event_attributes(event)
 
         self.assertEqual(attributes["gen_ai.system"], "anthropic")
+        self.assertEqual(attributes["gen_ai.provider.name"], "anthropic")
 
     def test_generation_event_omits_gen_ai_system_when_provider_absent(self) -> None:
         event = _event(
@@ -277,6 +279,7 @@ class PureMappingTests(unittest.TestCase):
 
         # The provider is never guessed from the model string; omit when unknown.
         self.assertNotIn("gen_ai.system", attributes)
+        self.assertNotIn("gen_ai.provider.name", attributes)
 
     def test_non_generation_event_omits_gen_ai_system(self) -> None:
         # ``gen_ai.system`` is a generation-only attribute; a non-generation event
@@ -294,6 +297,7 @@ class PureMappingTests(unittest.TestCase):
         attributes = _event_attributes(event)
 
         self.assertNotIn("gen_ai.system", attributes)
+        self.assertNotIn("gen_ai.provider.name", attributes)
 
     def test_per_span_environment_and_source_added_only_when_passed(self) -> None:
         event = _event(
@@ -584,6 +588,7 @@ class ResourceAttributeTests(unittest.TestCase):
         spans = exporter.get_finished_spans()
         resource = spans[0].resource.attributes
         self.assertEqual(resource["deployment.environment"], "prod")
+        self.assertEqual(resource["deployment.environment.name"], "prod")
         self.assertEqual(resource["bir.source"], "checkout")
         # A single value lives on the Resource and is not duplicated onto each span.
         for span in spans:
@@ -598,6 +603,7 @@ class ResourceAttributeTests(unittest.TestCase):
 
         resource = exporter.get_finished_spans()[0].resource.attributes
         self.assertEqual(resource["deployment.environment"], "canary")
+        self.assertEqual(resource["deployment.environment.name"], "canary")
         # An explicit environment does not disturb the derived source.
         self.assertEqual(resource["bir.source"], "checkout")
 
@@ -611,6 +617,7 @@ class ResourceAttributeTests(unittest.TestCase):
         spans = {span.name: span for span in exporter.get_finished_spans()}
         # The two traces disagree, so the Resource attribute is omitted...
         self.assertNotIn("deployment.environment", spans["root-a"].resource.attributes)
+        self.assertNotIn("deployment.environment.name", spans["root-a"].resource.attributes)
         # ...and the per-trace value is recorded on every span of each trace instead.
         self.assertEqual(spans["root-a"].attributes["bir.environment"], "prod")
         self.assertEqual(spans["llm-a"].attributes["bir.environment"], "prod")
@@ -625,6 +632,7 @@ class ResourceAttributeTests(unittest.TestCase):
 
         spans = {span.name: span for span in exporter.get_finished_spans()}
         self.assertEqual(spans["llm-t"].attributes["gen_ai.system"], "openai")
+        self.assertEqual(spans["llm-t"].attributes["gen_ai.provider.name"], "openai")
 
     def test_no_environment_source_or_provider_leaves_export_unchanged(self) -> None:
         exporter = _in_memory_exporter()
@@ -636,11 +644,13 @@ class ResourceAttributeTests(unittest.TestCase):
         resource = spans[0].resource.attributes
         self.assertEqual(resource["service.name"], "svc")
         self.assertNotIn("deployment.environment", resource)
+        self.assertNotIn("deployment.environment.name", resource)
         self.assertNotIn("bir.source", resource)
         for span in spans:
             self.assertNotIn("bir.environment", span.attributes)
             self.assertNotIn("bir.source", span.attributes)
             self.assertNotIn("gen_ai.system", span.attributes)
+            self.assertNotIn("gen_ai.provider.name", span.attributes)
 
 
 @unittest.skipUnless(_OTLP_HTTP_AVAILABLE, "opentelemetry OTLP/HTTP exporter is not installed")
@@ -988,3 +998,65 @@ class StreamingExportEquivalenceTests(unittest.TestCase):
                 {dict(span.attributes or {}).get("bir.environment") for span in spans},
                 {"staging", "prod"},
             )
+
+
+_SEMCONV_AVAILABLE = _module_available("opentelemetry.semconv._incubating.attributes.gen_ai_attributes")
+
+
+@unittest.skipUnless(_SEMCONV_AVAILABLE, "opentelemetry semantic conventions are not installed")
+class SemanticConventionSpellingTests(unittest.TestCase):
+    """The exported names are checked against the conventions, not against a memory.
+
+    The exporter writes attribute names as literals, deliberately: the ``otel``
+    extra is optional and the constants that define these names live in an
+    ``_incubating`` package. That leaves nothing connecting the literals to the
+    conventions they claim to follow, which is how two of them came to be
+    superseded spellings without anything failing. These cases make the claim
+    checkable: they read the constants out of the installed
+    ``opentelemetry-semantic-conventions`` and compare.
+
+    Measured against 0.65b0, installed with ``opentelemetry-sdk`` 1.44.0.
+    """
+
+    def test_the_current_spellings_are_what_the_conventions_call_them(self) -> None:
+        from opentelemetry.semconv._incubating.attributes import (  # type: ignore[import-not-found]
+            gen_ai_attributes,
+        )
+        from opentelemetry.semconv.attributes import (  # type: ignore[import-not-found]
+            deployment_attributes,
+        )
+
+        self.assertEqual(deployment_attributes.DEPLOYMENT_ENVIRONMENT_NAME, "deployment.environment.name")
+        self.assertEqual(gen_ai_attributes.GEN_AI_PROVIDER_NAME, "gen_ai.provider.name")
+
+    def test_the_unrenamed_genai_spellings_still_match(self) -> None:
+        # These three were re-checked at the same time as the two renames. Their
+        # deprecation notes record a move to the GenAI conventions repository
+        # rather than a new spelling, so the names Bir writes are still current.
+        from opentelemetry.semconv._incubating.attributes import (  # type: ignore[import-not-found]
+            gen_ai_attributes,
+        )
+
+        self.assertEqual(gen_ai_attributes.GEN_AI_REQUEST_MODEL, "gen_ai.request.model")
+        self.assertEqual(gen_ai_attributes.GEN_AI_USAGE_INPUT_TOKENS, "gen_ai.usage.input_tokens")
+        self.assertEqual(gen_ai_attributes.GEN_AI_USAGE_OUTPUT_TOKENS, "gen_ai.usage.output_tokens")
+
+    def test_the_superseded_spellings_are_still_the_ones_being_carried(self) -> None:
+        # The transition ends when these constants go: at that point nothing in
+        # the supported range reads the old names, and the second half of each
+        # pair can be deleted from the exporter along with this case.
+        from opentelemetry.semconv._incubating.attributes import (  # type: ignore[import-not-found]
+            deployment_attributes,
+            gen_ai_attributes,
+        )
+
+        self.assertEqual(
+            getattr(deployment_attributes, "DEPLOYMENT_ENVIRONMENT", None),
+            "deployment.environment",
+            "the superseded deployment spelling is gone from the conventions; the transition can end",
+        )
+        self.assertEqual(
+            getattr(gen_ai_attributes, "GEN_AI_SYSTEM", None),
+            "gen_ai.system",
+            "the superseded provider spelling is gone from the conventions; the transition can end",
+        )
