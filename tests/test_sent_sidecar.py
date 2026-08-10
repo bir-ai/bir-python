@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
+from itertools import count
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,7 +91,18 @@ class PruneCompactsTheSidecarTests(unittest.TestCase):
 
     def test_ids_for_kept_traces_survive(self) -> None:
         with temporary_workdir():
-            record_traces(4)
+            # Older Python releases on Windows can return the same wall-clock
+            # timestamp for every trace recorded by this tight loop. Equal-time
+            # traces deliberately use first-seen order as their prune tie-break,
+            # so give this test distinct times before asserting that the last
+            # two recorded traces are the two ``keep_last`` retains.
+            ticks = count()
+
+            def increasing_timestamp() -> str:
+                return f"2026-08-10T12:00:00.{next(ticks):06d}+00:00"
+
+            with patch("bir._sdk._now", side_effect=increasing_timestamp):
+                record_traces(4)
             kept = {event.id for event in load_events(str(TRACE_PATH))[-4:]}
             mark_everything_sent()
 
