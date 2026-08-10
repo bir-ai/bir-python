@@ -40,6 +40,21 @@ def _string_or_none(value: Any) -> str | None:
     return None
 
 
+def _text(value: Any) -> str | None:
+    """Return ``str(value)``, or ``None`` when the value's own ``__str__`` fails.
+
+    Rendering a provider's enum member or a framework's event key runs code Bir
+    did not write, exactly as reading an attribute does, so it gets the same
+    treatment: something that cannot say what it is contributes nothing rather
+    than failing the call being recorded.
+    """
+
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
 def _usage_tokens(usage: Any, *keys: str) -> int | float | None:
     for key in keys:
         value = _value(usage, key)

@@ -20,7 +20,11 @@ The drivers build the framework's own objects from plain mappings, which the
 handlers read through the same accessors they use for real provider objects.
 :class:`RunDriver` hides where a failure is reported: LangChain and LlamaIndex
 have error callbacks, while the span processors report a failure on the span
-handed to the ordinary end callback.
+handed to the ordinary end callback. Each contract also declares where its
+framework hands an object over, as ``hostile_generation``, so
+:data:`HOSTILE_FRAMEWORK_OBJECTS` can be put there and every handler is held to
+the same rule: reading a framework's object for a record may not fail the call
+being recorded.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from __future__ import annotations
 import contextvars
 import inspect
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -44,6 +48,68 @@ HANDLER_CAPTURE_OPTIONS = ("capture_inputs", "capture_outputs")
 
 ROOT_KEY = "run-root"
 CHILD_KEY = "run-child"
+
+
+class HostileObject:
+    """A framework object whose every read runs code that fails.
+
+    Attribute access raises, and so does each accessor a framework exposes for
+    the same value — LlamaIndex's ``get_text()`` raises outright for a node that
+    is not a ``TextNode``, and a pydantic ``model_dump`` raises on a field it
+    cannot serialize. Dunder lookups raise ``AttributeError`` instead, so the
+    object still behaves like an object to the interpreter and only the reads a
+    handler makes for a record are hostile.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        raise RuntimeError(f"framework read of {name!r} failed")
+
+    def get_content(self) -> str:
+        raise ValueError("Node must be a TextNode to get text.")
+
+    def get_text(self) -> str:
+        raise ValueError("Node must be a TextNode to get text.")
+
+    def model_dump(self) -> Any:
+        raise RuntimeError("model_dump failed")
+
+    def __str__(self) -> str:
+        raise RuntimeError("__str__ failed")
+
+
+class HostileMapping(Mapping):
+    """A framework mapping whose lookup and iteration run code that fails.
+
+    Several frameworks hand over a mapping rather than an object — LangChain's
+    ``serialized`` and ``LLMResult``, LlamaIndex's event payload — and a handler
+    reads those with ``get`` and ``items`` instead of ``getattr``. Both are the
+    framework's code, so both belong in the sweep.
+    """
+
+    def __getitem__(self, key: Any) -> Any:
+        raise RuntimeError(f"framework lookup of {key!r} failed")
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        raise RuntimeError(f"framework lookup of {key!r} failed")
+
+    def items(self) -> Any:
+        raise RuntimeError("framework mapping cannot be walked")
+
+    def __iter__(self) -> Iterator[Any]:
+        raise RuntimeError("framework mapping cannot be walked")
+
+    def __len__(self) -> int:
+        return 1
+
+
+#: The framework objects every bridge is driven with. Each declaration says
+#: where its framework hands one over; the shared case puts these there.
+HOSTILE_FRAMEWORK_OBJECTS: tuple[tuple[str, Any], ...] = (
+    ("object whose reads raise", HostileObject()),
+    ("mapping whose reads raise", HostileMapping()),
+)
 
 
 @dataclass(frozen=True)
@@ -105,6 +171,15 @@ class BridgeContract:
     are what Bir must record for those runs, including ``implicit_root_name``
     for the root the handler opens when a nested run arrives with no trace at
     all.
+
+    ``hostile_generation`` drives the same generation run with the framework
+    objects the handler reads for a record replaced by one that raises. Only the
+    declaration knows where its framework hands an object over — ``serialized``
+    and an ``LLMResult`` for LangChain, an event payload for LlamaIndex, a span's
+    attributes for the processors — so it places the object and the case that
+    drives it is shared. What identifies and classifies the run stays readable,
+    because a framework object that cannot say which kind of run it is has not
+    been misread; it has said nothing.
     """
 
     id: str
@@ -117,6 +192,7 @@ class BridgeContract:
     generation: RunDriver | PointDriver
     generation_name: str
     implicit_root_name: str
+    hostile_generation: Callable[[Any, str, Any], None]
     model: str | None = None
     usage: dict[str, int | float] | None = None
     # Whether the framework names each run's parent, and correlates a run's end
@@ -318,6 +394,42 @@ class BridgeContractTestCase(unittest.TestCase):
             event = self.single("generation")
             self.assertEqual(event.trace_id, root.trace_id)
             self.assertEqual(event.parent_id, root.id)
+
+    def test_run_survives_a_framework_object_whose_own_code_raises(self) -> None:
+        """Reading the framework's object may not fail the call being recorded.
+
+        A handler reads a framework's object to build a record: a document's
+        ``page_content``, a node's ``get_text()``, a span's attributes, a
+        response's ``model_dump``. All of that is somebody else's code, and it
+        runs after the work it describes has already finished, so a failure in it
+        is a bookkeeping problem rather than the call's answer.
+
+        The recovery is what is asserted, not merely the absence of an exception:
+        the run is finalized and its event written with whatever was readable, so
+        the store holds one complete trace instead of events stranded under a
+        root that was never written.
+        """
+
+        for label, hostile in HOSTILE_FRAMEWORK_OBJECTS:
+            with self.subTest(framework_object=label), temporary_workdir():
+                handler = self.build_handler(capture_inputs=True, capture_outputs=True)
+
+                self.contract.hostile_generation(handler, CHILD_KEY, hostile)
+
+                # The handler opened the root this run needed, exactly as it does
+                # for a readable one (see the implicit-root case above), and the
+                # run hangs from it.
+                root = self.single("trace")
+                event = self.single("generation")
+                self.assertEqual(event.status, "success")
+                self.assertEqual(event.trace_id, root.trace_id)
+                self.assertEqual(event.parent_id, root.id)
+                # One whole trace, and nothing left pointing at a root that is
+                # not in it.
+                events = load_events()
+                self.assertEqual(len(load_traces()), 1)
+                written = {found.id for found in events}
+                self.assertTrue(all(found.trace_id in written for found in events))
 
     def test_one_handler_keeps_sequential_runs_apart(self) -> None:
         with temporary_workdir():

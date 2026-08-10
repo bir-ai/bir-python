@@ -10,6 +10,84 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A framework object that raises while Bir reads it no longer fails the call it
+  was recording. The previous release established that rule for the seven direct
+  provider wrappers and guarded every read in `_common.py`. The framework event
+  bridges were left out, and they read framework objects through their own
+  private copies of the same helper — with the `try`/`except` missing. Measured
+  by driving every event-bridge callback with an object whose reads raise:
+
+  ```
+  -- langchain
+     on_llm_end(Hostile)                               RAISED RuntimeError: llm_output exploded
+     on_retriever_end([Hostile])                       RAISED RuntimeError: page_content exploded
+  -- llamaindex
+     on_event_end('llm', response=Hostile)             RAISED RuntimeError: text exploded
+     on_event_end('retrieve', nodes=[Hostile])         RAISED RuntimeError: node exploded
+     on_event_end('retrieve', nodes=[HostileMethods])  RAISED ValueError: Node must be a TextNode to get text.
+  -- pydantic_ai
+     on_start/on_end(Hostile)                          RAISED RuntimeError: get_span_context exploded
+
+  6 of 36 callback sequences raised
+  ```
+
+  CrewAI, AG2, Haystack, and the OpenAI Agents processor were clean across the
+  same sweep; they read through the guarded `_value` throughout.
+
+  The raising accessor is not a synthetic shape. It raises exactly what
+  LlamaIndex's own `NodeWithScore.get_text()` raises for a node that is not a
+  `TextNode`, which is the ordinary case for a multi-modal retriever. And
+  LlamaIndex does not absorb it: `CallbackManager.on_event_end` calls each
+  handler with no `try`/`except`, so the exception lands in the application's own
+  `query()`. LangChain does absorb it — its callback manager logs and re-raises
+  only when `handler.raise_error` is true, and this handler declares `False` — so
+  there the cost was silence rather than a failure.
+
+  Both costs were real. Measured on the store, with an ordinary `@observe()`
+  function running afterwards in the same context:
+
+  ```
+  llamaindex: retrieve event, node text accessor raises
+                        before                            after
+    events written      1  ['span/application_work']      3  [retrieval, root, application_work]
+    traces loadable     0                                 2
+    events with no root 1  ['application_work']           0
+  ```
+
+  The LlamaIndex case lost the retrieval event *and* the trace root, and left the
+  context entered so the application's own next event joined a trace that would
+  never exist — the exact state `_lifecycle.py` was written to prevent, reached
+  from a direction that module cannot see. The LangChain case kept its roots and
+  dropped the retrieval event silently, leaking its registry entry until the
+  1,024-run bound evicted it.
+
+  The previous fix went in one function short of the problem: it patched
+  `_response_text` and left `_node_text`, the identical accessor loop four
+  functions below it, untouched. Every framework-object read in both bridges now
+  goes through the shared guarded `_value`, both accessor loops go through one
+  `_accessor_text`, and the two shadow copies of `_common`'s helpers that had
+  drifted out of `langchain.py` are deleted rather than fixed. Reading a
+  framework's `__str__` is guarded the same way, by a shared `_text`.
+
+  The case lives in the shared bridge conformance contract rather than against
+  one framework, so it holds for every handler and any added later: without the
+  guards it fails 13 of its 14 cases across all seven bridges. The retrieval
+  paths, which the shared generation run does not reach, are pinned in the
+  per-framework modules beside the payload parsing they belong to.
+
+  A document or node that cannot be read now contributes what is still known
+  rather than nothing: a LangChain document keeps its rank, and a LlamaIndex node
+  keeps its id and score, while the readable ones beside them record in full.
+
+  Measured cost, interleaved against the previous code and compared best-of:
+  reading five retrieved nodes went from 34.7 µs to 28.9 µs and reading a
+  response's text from 0.82 µs to 0.71 µs, because recognizing a plain string
+  payload key no longer walks the attribute reads an enum member needs; token
+  usage is not distinguishable; and reading five LangChain documents went from
+  2.67 µs to 4.96 µs, which is 0.46 µs per document on a callback that follows a
+  vector search. Over a whole bridge run the difference is not measurable at all
+  — the store write dominates it.
+
 - A provider response that raises while Bir reads it no longer fails the call
   that returned it. The call had already succeeded; reading its result to build a
   record turned it into an exception at the caller. Measured against every direct

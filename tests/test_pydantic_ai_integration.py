@@ -83,6 +83,24 @@ class FakeSpan:
         self.events = events if events is not None else []
 
 
+class SpanWithoutContext:
+    """A span whose ``context`` is absent and whose accessor lookup fails.
+
+    An OpenTelemetry span implementation may expose the older
+    ``get_span_context()`` instead of a ``context`` attribute, and reaching for
+    it is as much the framework's code as calling it would be.
+    """
+
+    name = "chat gpt-4o-mini"
+    parent = None
+    status = None
+    events: list[Any] = []
+    attributes: dict[str, Any] = {"gen_ai.operation.name": "chat"}
+
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(f"framework read of {name!r} failed")
+
+
 class PydanticAIIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()
@@ -450,6 +468,21 @@ class PydanticAIIntegrationTests(unittest.TestCase):
         self.assertIsNone(handler.shutdown())
         self.assertTrue(handler.force_flush())
         self.assertNotIn("pydantic_ai", sys.modules)
+
+    def test_span_whose_context_lookup_fails_still_records_the_run(self) -> None:
+        with temporary_workdir():
+            handler = BirPydanticAIHandler()
+            span = SpanWithoutContext()
+
+            handler.on_start(span)
+            handler.on_end(span)
+
+            # The span could not say which id it has, so the handler pairs it
+            # under the one key it can build and still finalizes the run.
+            traces = load_traces()
+            self.assertEqual(len(traces), 1)
+            generation_event = next(event for event in load_events() if event.type == "generation")
+            self.assertEqual(generation_event.status, "success")
 
 
 if __name__ == "__main__":

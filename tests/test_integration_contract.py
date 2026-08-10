@@ -534,6 +534,13 @@ def langchain_serialized(name: str | None = None) -> dict[str, Any]:
     return {"name": name} if name is not None else {}
 
 
+def langchain_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one LLM run whose ``serialized`` and result cannot be read."""
+
+    handler.on_llm_start(hostile, ["hello"], run_id=key, parent_run_id=None, invocation_params=hostile)
+    handler.on_llm_end(hostile, run_id=key)
+
+
 LANGCHAIN = BridgeContract(
     id="langchain.callbacks",
     module="langchain",
@@ -570,9 +577,18 @@ LANGCHAIN = BridgeContract(
     generation_name="langchain.llm",
     # LangChain's implicit root borrows the name of the event that needed it.
     implicit_root_name="langchain.llm",
+    hostile_generation=langchain_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
 )
+
+
+def llamaindex_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one LLM event whose payload values cannot be read."""
+
+    handler.on_event_start("llm", {"messages": hostile, "model": hostile}, event_id=key, parent_id="")
+    handler.on_event_end("llm", {"response": hostile}, event_id=key)
+
 
 LLAMAINDEX_RESPONSE = {
     "response": {
@@ -607,6 +623,7 @@ LLAMAINDEX = BridgeContract(
     ),
     generation_name="llamaindex.llm",
     implicit_root_name="llamaindex.llm",
+    hostile_generation=llamaindex_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
 )
@@ -640,6 +657,22 @@ def agents_span(key: str, parent: str | None = None, *, error: BaseException | N
     }
 
 
+def agents_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one generation span whose span data cannot be read."""
+
+    span = {
+        "span_id": key,
+        "parent_id": None,
+        "trace_id": ROOT_KEY,
+        # The span type is what says this is a generation at all; everything the
+        # processor reads to fill the record in is the framework's.
+        "span_data": {"type": "generation", "model": hostile, "input": hostile, "output": hostile, "usage": hostile},
+        "error": None,
+    }
+    handler.on_span_start(span)
+    handler.on_span_end(span)
+
+
 OPENAI_AGENTS = BridgeContract(
     id="openai_agents.processor",
     module="openai_agents",
@@ -660,6 +693,7 @@ OPENAI_AGENTS = BridgeContract(
     ),
     generation_name="openai_agents.generation",
     implicit_root_name="openai_agents.trace",
+    hostile_generation=agents_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
 )
@@ -700,6 +734,19 @@ def pydantic_ai_chat_span(
     return span
 
 
+def pydantic_ai_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one chat span whose attributes cannot be read."""
+
+    span = {
+        "name": "chat gpt-4o-mini",
+        "context": {"span_id": key, "trace_id": "otel-trace"},
+        "parent": None,
+        "attributes": hostile,
+    }
+    handler.on_start(span)
+    handler.on_end(span)
+
+
 PYDANTIC_AI = BridgeContract(
     id="pydantic_ai.processor",
     module="pydantic_ai",
@@ -720,6 +767,7 @@ PYDANTIC_AI = BridgeContract(
     ),
     generation_name="chat gpt-4o-mini",
     implicit_root_name="pydantic_ai.agent_run",
+    hostile_generation=pydantic_ai_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
 )
@@ -735,6 +783,14 @@ def crewai_event(event_type: str, **fields: Any) -> dict[str, Any]:
     """Build one typed CrewAI bus event."""
 
     return {"type": event_type, **fields}
+
+
+def crewai_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one LLM call whose request and response cannot be read."""
+
+    del key  # CrewAI correlates its LLM-call events by arrival order alone.
+    handler.on_event(None, crewai_event("llm_call_started", model=hostile, messages=hostile))
+    handler.on_event(None, crewai_event("llm_call_completed", response=hostile))
 
 
 CREWAI = BridgeContract(
@@ -788,6 +844,7 @@ CREWAI = BridgeContract(
     ),
     generation_name="crewai.llm_call",
     implicit_root_name="crewai.crew",
+    hostile_generation=crewai_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
     # CrewAI's bus events carry no parent reference and its LLM-call and
@@ -848,6 +905,17 @@ def haystack_fail(handler: Any, key: str, error: BaseException) -> None:
     manager.__exit__(type(error), error, None)
 
 
+def haystack_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Drive one component run whose input and output tags cannot be read."""
+
+    haystack_start(handler, key, HAYSTACK_COMPONENT_RUN, HAYSTACK_COMPONENT_TAGS)
+    haystack_end(
+        handler,
+        key,
+        {"haystack.component.input": hostile, "haystack.component.output": hostile},
+    )
+
+
 HAYSTACK = BridgeContract(
     id="haystack.tracer",
     module="haystack",
@@ -875,6 +943,7 @@ HAYSTACK = BridgeContract(
     # The component's own name titles its event.
     generation_name="llm",
     implicit_root_name=HAYSTACK_PIPELINE_RUN,
+    hostile_generation=haystack_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
     # Haystack passes a ``parent_span`` the tracer deliberately ignores, deriving
@@ -901,6 +970,13 @@ def autogen_response(error: BaseException | None = None) -> dict[str, Any]:
         "choices": [{"message": {"content": "hi"}}],
         "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
     }
+
+
+def autogen_hostile_run(handler: Any, key: str, hostile: Any) -> None:
+    """Log one finished chat completion whose request and response cannot be read."""
+
+    del key  # AG2's logger protocol carries no correlation id.
+    handler.log_chat_completion(source=AUTOGEN_AGENT, request=hostile, response=hostile)
 
 
 AUTOGEN = BridgeContract(
@@ -931,6 +1007,7 @@ AUTOGEN = BridgeContract(
     ),
     generation_name="autogen.chat_completion",
     implicit_root_name="autogen.run",
+    hostile_generation=autogen_hostile_run,
     model="gpt-4o-mini",
     usage=RECORDED_USAGE,
     reports_parents=False,

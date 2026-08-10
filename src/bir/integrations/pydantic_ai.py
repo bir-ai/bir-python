@@ -246,7 +246,9 @@ def _span_id(span: Any) -> str | None:
     context = _value(span, "context")
     span_id = _value(context, "span_id") if context is not None else None
     if span_id is None:
-        getter = getattr(span, "get_span_context", None)
+        # Finding the accessor is as much the framework's code as calling it, so
+        # the guard has to start one line earlier than it did.
+        getter = _value(span, "get_span_context")
         if callable(getter):
             try:
                 fetched = getter()
@@ -406,7 +408,7 @@ def _span_error(span: Any) -> BaseException | None:
 def _is_error_status(code: Any) -> bool:
     if code is None or isinstance(code, bool):
         return False
-    name = getattr(code, "name", None)
+    name = _value(code, "name")
     if isinstance(name, str):
         return name.upper() == "ERROR"
     if isinstance(code, int):

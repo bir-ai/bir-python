@@ -46,7 +46,7 @@ from uuid import uuid4
 
 from bir import generation, tool_call
 from bir._sdk import _current_trace_id, _trace_context
-from bir.integrations._common import _response_output, _string_or_none, _usage_tokens, _value
+from bir.integrations._common import _response_output, _string_or_none, _text, _usage_tokens, _value
 
 # ``log_event`` names that mark an agent-turn boundary rather than a recorded event.
 _TURN_EVENTS = frozenset({"received_message"})
@@ -390,21 +390,21 @@ def _response_error(response: Any) -> BaseException | None:
     if isinstance(response, BaseException):
         return response
     if isinstance(response, Mapping):
-        error = response.get("error")
+        error = _value(response, "error")
         if error is not None:
-            text = _string_or_none(error) or _string_or_none(str(error))
+            text = _string_or_none(error) or _string_or_none(_text(error))
             return RuntimeError(text or "autogen chat_completion error")
     return None
 
 
 def _function_name(function: Any) -> str:
-    name = _string_or_none(getattr(function, "__name__", None))
+    name = _string_or_none(_value(function, "__name__"))
     if name is not None:
         return name
     name = _string_or_none(_value(function, "name"))
     if name is not None:
         return name
-    text = _string_or_none(function) or (_string_or_none(str(function)) if function is not None else None)
+    text = _string_or_none(function) or (_string_or_none(_text(function)) if function is not None else None)
     return text or "autogen.tool"
 
 
@@ -420,13 +420,13 @@ def _returns_error(returns: Any) -> BaseException | None:
         return returns
     if isinstance(returns, Mapping):
         for key in ("error", "exception"):
-            value = returns.get(key)
+            value = _value(returns, key)
             if value is not None:
-                text = _string_or_none(value) or _string_or_none(str(value))
+                text = _string_or_none(value) or _string_or_none(_text(value))
                 return RuntimeError(text or "autogen function error")
-        if returns.get("is_error"):
-            content = returns.get("content")
-            text = _string_or_none(content) or _string_or_none(str(content))
+        if _value(returns, "is_error"):
+            content = _value(returns, "content")
+            text = _string_or_none(content) or _string_or_none(_text(content))
             return RuntimeError(text or "autogen function error")
     return None
 
@@ -438,7 +438,7 @@ def _event_error(name: str | None, kwargs: Mapping[str, Any]) -> BaseException |
         if isinstance(value, BaseException):
             return value
         if value is not None:
-            text = _string_or_none(value) or _string_or_none(str(value))
+            text = _string_or_none(value) or _string_or_none(_text(value))
             return RuntimeError(text or f"autogen {name or 'event'}")
     if "exception" in lowered or "error" in lowered:
         message = _string_or_none(kwargs.get("message"))

@@ -31,6 +31,18 @@ class FakeDocument:
         self.id = id
 
 
+class UnreadableDocument:
+    """A document whose text is loaded on access, from a store that is gone."""
+
+    @property
+    def page_content(self) -> str:
+        raise RuntimeError("backing store unavailable")
+
+    @property
+    def metadata(self) -> dict[str, object]:
+        raise RuntimeError("backing store unavailable")
+
+
 class FakeMessage:
     def __init__(
         self,
@@ -206,6 +218,28 @@ class LangChainIntegrationTests(unittest.TestCase):
 
             generation_event = next(event for event in load_events() if event.type == "generation")
             self.assertEqual(generation_event.usage, {"input_tokens": 11, "output_tokens": 5, "total_tokens": 16})
+
+    def test_retrieved_documents_that_cannot_be_read_still_finish_the_retrieval(self) -> None:
+        # A Document subclass that loads its text from a backing store is
+        # LangChain's code, and it runs after the retrieval it describes has
+        # already returned. The shared bridge contract holds this for the
+        # generation path; the retrieval path is LangChain's own shape.
+        with temporary_workdir():
+            handler = BirCallbackHandler(capture_outputs=True)
+
+            handler.on_retriever_start({"name": "vector_search"}, "What is Bir?", run_id="r1", parent_run_id=None)
+            handler.on_retriever_end([UnreadableDocument(), FakeDocument("readable", id="doc-2")], run_id="r1")
+
+            events = load_events()
+            retrieval_event = next(event for event in events if event.type == "tool_call")
+            self.assertEqual(retrieval_event.status, "success")
+            documents = retrieval_event.output["documents"]
+            # The document that could not be read keeps its rank and contributes
+            # nothing else; the one beside it is recorded in full.
+            self.assertEqual(documents[0], {"rank": 1})
+            self.assertEqual(documents[1]["text"], "readable")
+            self.assertEqual(documents[1]["id"], "doc-2")
+            self.assertEqual(len(load_traces()), 1)
 
 
 if __name__ == "__main__":

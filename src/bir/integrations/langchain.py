@@ -14,7 +14,7 @@ from typing import Any
 from bir import generation, retrieval, tool_call
 from bir._sdk import _set_event_parent, _trace_context
 
-from ._common import _response_output
+from ._common import _response_output, _usage_tokens, _value
 from ._lifecycle import (
     _ActiveRun,
     _enter_framework_root,
@@ -264,11 +264,11 @@ def _callback_name(serialized: Any, kwargs: Mapping[str, Any], *, default: str) 
         return name
 
     if isinstance(serialized, Mapping):
-        serialized_name = serialized.get("name")
+        serialized_name = _value(serialized, "name")
         if isinstance(serialized_name, str) and serialized_name:
             return serialized_name
 
-        identifier = serialized.get("id")
+        identifier = _value(serialized, "id")
         if isinstance(identifier, str) and identifier:
             return identifier
         if isinstance(identifier, list) and identifier:
@@ -285,7 +285,7 @@ def _model_name(serialized: Any, kwargs: Mapping[str, Any]) -> str | None:
         if not isinstance(source, Mapping):
             continue
         for key in ("model", "model_name", "model_id"):
-            value = source.get(key)
+            value = _value(source, key)
             if isinstance(value, str) and value:
                 return value
     return None
@@ -314,7 +314,7 @@ def _metadata(
             payload[key] = value
 
     if isinstance(serialized, Mapping):
-        identifier = serialized.get("id")
+        identifier = _value(serialized, "id")
         if identifier is not None:
             payload["serialized_id"] = identifier
     return payload
@@ -323,7 +323,7 @@ def _metadata(
 def _serialized_kwargs(serialized: Any) -> Mapping[str, Any] | None:
     if not isinstance(serialized, Mapping):
         return None
-    kwargs = serialized.get("kwargs")
+    kwargs = _value(serialized, "kwargs")
     if isinstance(kwargs, Mapping):
         return kwargs
     return None
@@ -351,9 +351,9 @@ def _set_generation_usage(context: Any, response: Any) -> None:
     if token_usage is None:
         return
 
-    input_tokens = _numeric_token(token_usage, "input_tokens", "prompt_tokens")
-    output_tokens = _numeric_token(token_usage, "output_tokens", "completion_tokens")
-    total_tokens = _numeric_token(token_usage, "total_tokens")
+    input_tokens = _usage_tokens(token_usage, "input_tokens", "prompt_tokens")
+    output_tokens = _usage_tokens(token_usage, "output_tokens", "completion_tokens")
+    total_tokens = _usage_tokens(token_usage, "total_tokens")
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return
     context.set_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
@@ -369,17 +369,17 @@ def _token_usage(response: Any) -> Mapping[str, Any] | None:
 
 def _token_usage_sources(response: Any) -> list[Any]:
     sources = [response]
-    llm_output = _mapping_value(response, "llm_output")
+    llm_output = _value(response, "llm_output")
     if llm_output is not None:
         sources.append(llm_output)
 
-    generations = _mapping_value(response, "generations")
+    generations = _value(response, "generations")
     if isinstance(generations, list):
         for generation_group in generations:
             group_items = generation_group if isinstance(generation_group, list) else [generation_group]
             for generation_item in group_items:
                 sources.append(generation_item)
-                message = _mapping_value(generation_item, "message")
+                message = _value(generation_item, "message")
                 if message is not None:
                     sources.append(message)
     return sources
@@ -387,17 +387,17 @@ def _token_usage_sources(response: Any) -> list[Any]:
 
 def _token_usage_from_source(source: Any) -> Mapping[str, Any] | None:
     for key in ("token_usage", "usage", "usage_metadata"):
-        value = _mapping_value(source, key)
+        value = _value(source, key)
         if isinstance(value, Mapping):
             return value
 
-    response_metadata = _mapping_value(source, "response_metadata")
+    response_metadata = _value(source, "response_metadata")
     if isinstance(response_metadata, Mapping):
         for key in ("token_usage", "usage", "usage_metadata"):
-            value = response_metadata.get(key)
+            value = _value(response_metadata, key)
             if isinstance(value, Mapping):
                 return value
-        if any(_numeric_token(response_metadata, key) is not None for key in _TOKEN_USAGE_KEYS):
+        if any(_usage_tokens(response_metadata, key) is not None for key in _TOKEN_USAGE_KEYS):
             return response_metadata
     return None
 
@@ -411,39 +411,38 @@ _TOKEN_USAGE_KEYS = (
 )
 
 
-def _mapping_value(source: Any, key: str) -> Any:
-    if isinstance(source, Mapping):
-        return source.get(key)
-    return getattr(source, key, None)
-
-
-def _numeric_token(usage: Mapping[str, Any], *keys: str) -> int | float | None:
-    for key in keys:
-        value = usage.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return value
-    return None
-
-
 def _documents_payload(documents: Any) -> list[dict[str, Any]]:
+    """Normalize the documents a retriever returned into recordable mappings.
+
+    Every read here is LangChain's code — a ``Document`` subclass may compute
+    ``page_content`` from a backing store, and a mapping may materialize lazily —
+    so each one goes through :func:`_value` or its own guard. A document that
+    cannot be read contributes its rank and nothing else rather than failing the
+    retrieval it belongs to.
+    """
+
     if not isinstance(documents, list):
         return []
 
     payload: list[dict[str, Any]] = []
     for index, document in enumerate(documents, start=1):
+        normalized: dict[str, Any] = {}
         if isinstance(document, Mapping):
-            normalized = dict(document)
+            try:
+                normalized = dict(document)
+            except Exception:
+                normalized = {}
         else:
-            normalized = {}
-            page_content = getattr(document, "page_content", None)
+            page_content = _value(document, "page_content")
             if isinstance(page_content, str):
                 normalized["text"] = page_content
-            metadata = getattr(document, "metadata", None)
+            metadata = _value(document, "metadata")
             if isinstance(metadata, Mapping):
-                normalized["metadata"] = dict(metadata)
-            document_id = getattr(document, "id", None)
+                try:
+                    normalized["metadata"] = dict(metadata)
+                except Exception:
+                    pass
+            document_id = _value(document, "id")
             if isinstance(document_id, str):
                 normalized["id"] = document_id
         normalized.setdefault("rank", index)

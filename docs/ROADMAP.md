@@ -40,8 +40,8 @@ used: what reaches the terminal on the CLI's error channel rather than its
 rendering path, how `bir tail` and file rotation compose, what the OTLP attribute
 names mean against the OpenTelemetry release the extra actually installs, and
 which fields redaction is scanning at all rather than which patterns it
-recognizes. Item 1 came from re-asking the first question; the other four came
-one from each of those axes.
+recognizes. The P1 came from re-asking the first question; the four items that
+remain came one from each of those axes.
 
 ## Product and engineering guardrails
 
@@ -63,130 +63,17 @@ breaking release says otherwise:
 
 ## Prioritized work
 
+The P1 from this audit has shipped and is in `CHANGELOG.md`: the event bridges'
+unguarded reads of a framework object. The four items below are what is left.
+
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Guard the event bridges' reads of a framework object | P1 | M | A framework callback never fails the call it is recording | — |
-| 2 | Follow the store across a rotation in `bir tail` | P2 | S | `bir tail` shows every event written while it runs | — |
-| 3 | Escape and bound what the CLI prints on its error channel | P2 | S | A server's response cannot repaint the terminal running `bir send` | — |
-| 4 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
-| 5 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
+| 1 | Follow the store across a rotation in `bir tail` | P2 | S | `bir tail` shows every event written while it runs | — |
+| 2 | Escape and bound what the CLI prints on its error channel | P2 | S | A server's response cannot repaint the terminal running `bir send` | — |
+| 3 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
+| 4 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
 
-### 1. Guard the event bridges' reads of a framework object
-
-**Why.** The previous release established that reading a provider's response for
-a record must never fail the call that produced it, and guarded every read in
-`_common.py` for the seven direct provider wrappers. The framework event bridges
-were left out, and they read framework objects through their own private copies
-of the same helper — with the `try`/`except` missing.
-
-`bir/integrations/_common.py:26-34` is the guarded reader:
-
-```python
-def _value(source: Any, key: str) -> Any:
-    try:
-        if isinstance(source, Mapping):
-            return source.get(key)
-        return getattr(source, key, None)
-    except Exception:
-        return None
-```
-
-`bir/integrations/langchain.py:414-417` and `bir/integrations/llamaindex.py:378-382`
-are the same function without the guard, and each bridge has further raw reads:
-`langchain.py:440`, `:443`, `:446` (a document's `page_content`, `metadata`, and
-`id`), `llamaindex.py:358` and `:390`. `pydantic_ai.py:249` guards the *call* to
-`get_span_context()` on the next line but not the `getattr` that finds it.
-
-Driving every event-bridge callback with a framework object whose reads raise:
-
-```
--- langchain
-   on_llm_end(Hostile)                               RAISED RuntimeError: llm_output exploded
-   on_retriever_end([Hostile])                       RAISED RuntimeError: page_content exploded
--- llamaindex
-   on_event_end('llm', response=Hostile)             RAISED RuntimeError: text exploded
-   on_event_end('retrieve', nodes=[Hostile])         RAISED RuntimeError: node exploded
-   on_event_end('retrieve', nodes=[HostileMethods])  RAISED ValueError: Node must be a TextNode to get text.
--- pydantic_ai
-   on_start/on_end(Hostile)                          RAISED RuntimeError: get_span_context exploded
-
-6 of 36 callback sequences raised
-```
-
-crewai, autogen, haystack, and openai_agents were clean across the same sweep;
-they read through `_value` throughout.
-
-`HostileMethods` is not a synthetic shape. Its accessor raises exactly what
-LlamaIndex's own `NodeWithScore.get_text()` raises for a node that is not a
-`TextNode` (`llama_index/core/schema.py:1080-1084` in llama-index-core 0.14.23),
-which is the ordinary case for a multi-modal retriever. And LlamaIndex does not
-absorb it: `CallbackManager.on_event_end` (`llama_index/core/callbacks/base.py:125-136`)
-calls each handler with no `try`/`except`, so the exception lands in the
-application's own `query()`. LangChain does absorb it — `handle_event` logs and
-re-raises only when `handler.raise_error` is true, and this handler sets
-`raise_error = False` (`langchain.py:42`) — so there the cost is silence rather
-than a failure.
-
-Both costs are real. Measuring what the store holds after the raising callback,
-with an ordinary `@observe()` function running afterwards in the same context:
-
-```
-llamaindex: retrieve event, node text accessor raises
-  callback raised     : ValueError: Node must be a TextNode to get text.
-  events written      : 1  ['span/application_work']
-  traces loadable     : 0
-  events with no root : 1  ['application_work']
-
-langchain: retriever end, document page_content raises (framework absorbs)
-  callback raised     : no
-  events written      : 2  ['trace/chain', 'trace/application_work']
-  traces loadable     : 2
-  events with no root : 0  []
-```
-
-The LlamaIndex case loses the retrieval event *and* the trace root, and leaves
-the context entered so the application's own next event joins a trace that will
-never exist — the exact state `_lifecycle.py:8-13` was written to prevent,
-reached from a direction that module cannot see. The LangChain case keeps its
-roots but drops the retrieval event silently: it is in neither list above, and
-its registry entry leaks until the 1,024-run bound (`_lifecycle.py:52`) evicts
-it.
-
-The fix went in one function short of the problem. Commit `6597d41` patched
-`_response_text` (`llamaindex.py:265-289`, the same `get_content`/`get_text` loop)
-and left `_node_text` (`llamaindex.py:356-368`) untouched. Coverage says so too:
-`llamaindex.py` is the least-covered integration at 82.07% branch, and lines
-`362-368` — the whole fallback path of `_node_text` — are among the uncovered.
-`langchain.py` is second-lowest at 87.71%, with `441->443`, `444->446`, and
-`447->449` (the `_documents_payload` branches) partial.
-
-**No test pins the current behaviour.** The hostile-response cases live in the
-call-wrapper contract (`tests/integration_contract.py:486` and `:511`, driven by
-`_hostile_responses()` at `:297`). The event-bridge contract
-(`tests/integration_bridge_contract.py`) has no equivalent case at all, which is
-why the gap survived a release that was specifically about this invariant.
-
-**Scope.**
-
-- Route every framework-object read in `langchain.py` and `llamaindex.py` through
-  the guarded `_common._value`, and guard the accessor calls in
-  `llamaindex._node_text` the way `_response_text` already is.
-- Guard the `getattr` in `pydantic_ai._span_id` that sits above its already-guarded
-  call.
-- Add the hostile-object case to `tests/integration_bridge_contract.py` so it
-  holds for every handler and any added later, rather than per bridge — the shape
-  the wrapper contract already uses.
-- Assert the recovery, not just the absence of an exception: the run still
-  finalizes, its event is still written with whatever was readable, and the
-  ambient context is returned to the caller.
-- Re-check the remaining bridges in the same sweep; four came back clean here and
-  should stay that way under the shared case.
-
-**Done when** a framework object whose attribute reads and accessor calls raise
-leaves every event-bridge handler finalizing its run and writing its event, with
-the application's call unaffected, asserted once in the shared bridge contract.
-
-### 2. Follow the store across a rotation in `bir tail`
+### 1. Follow the store across a rotation in `bir tail`
 
 **Why.** `bir tail` is documented as "Follow the trace file and print new events
 as they are written" (`bir/_cli_parser.py:136`) and again in
@@ -246,7 +133,7 @@ live view, silently.
 **Done when** a follow running across rotations prints every event appended while
 it was running, asserted by a test that rotates the store mid-follow.
 
-### 3. Escape and bound what the CLI prints on its error channel
+### 2. Escape and bound what the CLI prints on its error channel
 
 **Why.** The previous release established that recorded text must not be able to
 steer the terminal reading it, and `_visible` (`bir/_cli_present.py:302-326`)
@@ -317,7 +204,7 @@ on stderr, and nothing drives `bir send` against a hostile body.
 terminal escaped and length-bounded, asserted by a test driving `bir send`
 against a server that returns one.
 
-### 4. Refresh the OTLP attribute spellings
+### 3. Refresh the OTLP attribute spellings
 
 **Why.** `bir/integrations/otel.py:14-20` and `README.md:478-481` claim the
 exported attributes "follow the GenAI semantic conventions where they exist". Two
@@ -368,7 +255,7 @@ when the exporter was written, and the conventions moved underneath them.
 agree with a named OpenTelemetry semantic-conventions release, with the pinning
 tests updated to match.
 
-### 5. Record where the redaction boundary stops
+### 4. Record where the redaction boundary stops
 
 **Why.** `docs/site/capture-privacy.md:25-80` enumerates what redaction catches
 in exhaustive detail and warns that recognition is best-effort. It never says
@@ -452,12 +339,10 @@ does not, and a test asserts that boundary.
 
 ## Sequencing
 
-Item 1 first and on its own: it is the only one that can turn a working
-application call into an exception, and its shared-contract case is what stops
-the same gap reappearing in the next bridge. Items 2 and 3 are independent of it
-and of each other, both small, and both in the CLI — reasonable to take together.
-Items 4 and 5 are documentation-and-decision work whose main cost is agreeing on
-the answer; neither blocks anything.
+Items 1 and 2 are independent of each other, both small, and both in the CLI —
+reasonable to take together. Items 3 and 4 are documentation-and-decision work
+whose main cost is agreeing on the answer; neither blocks anything. Nothing here
+blocks anything else.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -491,25 +376,27 @@ tokens, the password inside a connection URI, and the values in a `Cookie` or
 than raising it at the caller, flushing each batch `bir tail` prints so a
 redirected follow is not silent, redacting a secret used as a mapping key, and
 escaping control characters when the CLI renders recorded text for a person,
-guarding the bridges' reads of a provider's response, and creating the store's
-own files readable only by their owner. Regressions in those areas are bugs; new
-scope requires a new issue with current evidence.
+guarding the bridges' reads of a provider's response, creating the store's own
+files readable only by their owner, and guarding the event bridges' reads of a
+framework object. Regressions in those areas are bugs; new scope requires a new
+issue with current evidence.
 
-Three items above are adjacent to entries on that list and none reopens one.
+The guarded event-bridge reads that shipped from this audit are adjacent to the
+earlier "guarding the bridges' reads of a provider's response" and neither
+reopens the other. That work covered the direct call wrappers, whose shared
+helper `_common._value` it guarded, and it patched one accessor loop in the
+LlamaIndex bridge. The follow-up covered the framework bridges' own copies of
+that helper, which were never routed through it.
 
-Item 1 sits beside "guarding the bridges' reads of a provider's response". That
-work covered the direct call wrappers, whose shared helper `_common._value` is now
-guarded, and it patched one accessor loop in the LlamaIndex bridge. Item 1 is the
-framework bridges' *own* copies of that helper, which were never routed through it
-— a different set of functions, in the two modules the shipped contract case does
-not reach.
+Two of the items above are adjacent to entries on that list and neither reopens
+one.
 
-Item 2 sits beside "flushing each batch `bir tail` prints so a redirected follow
+Item 1 sits beside "flushing each batch `bir tail` prints so a redirected follow
 is not silent". That fixed where the bytes went after they were rendered. This is
 which events are rendered at all: the flush is working, and 400 of 400 lines
 arrive when the store does not rotate.
 
-Item 3 sits beside "escaping control characters when the CLI renders recorded
+Item 2 sits beside "escaping control characters when the CLI renders recorded
 text for a person". That covers the rendering path and strings from the local
 store. This is the error path and a string a remote host chose; the two share no
 code.
@@ -532,7 +419,8 @@ evaluator had already scored it.
 
 The guard is at the example boundary (`bir/evals.py:1499-1502`) while the caller's
 code runs inside a list comprehension at `:1182` — the same guard-granularity
-shape as item 1. It is declined because it is already a recorded decision:
+shape as the event-bridge P1. It is declined because it is already a recorded
+decision:
 `docs/EVALUATOR_IMPLEMENTATION_GUIDE.md:611-612` says "Evaluator failure: treat
 like task failure unless a future explicit option separates task failures from
 evaluator failures." That is exactly this behaviour and exactly this future
@@ -601,8 +489,8 @@ raises, one whose `items()` raises, a `__repr__` that raises, a mapping key whos
 `__str__` raises, a value whose `__eq__` and `__hash__` both raise, and a
 self-referential list. All eight recorded two events and none reached the caller;
 the fallbacks were `[uncapturable]`, `<unrepresentable ClassName>`, and
-`[max_depth]` as designed. This is the guard item 1 says is on the right end of
-the wrong operation — it works exactly as advertised where it is.
+`[max_depth]` as designed. This is the guard the event-bridge P1 said was on the
+right end of the wrong operation — it works exactly as advertised where it is.
 
 **Prune running concurrently with four writers.** Four processes wrote 200 traces
 each while a fifth ran `bir prune --keep-last 20` eight times against the same

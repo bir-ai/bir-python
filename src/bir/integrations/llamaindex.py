@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from bir import generation, retrieval
 from bir._sdk import _current_trace_id, _set_event_parent, _trace_context
-from bir.integrations._common import _response_output, _usage_tokens, _value
+from bir.integrations._common import _response_output, _text, _usage_tokens, _value
 from bir.integrations._lifecycle import (
     _ActiveRun,
     _enter_framework_root,
@@ -274,18 +274,30 @@ def _response_text(response: Any) -> Any:
     message = _mapping_value(response, "message")
     if message is not None and message is not response:
         return _response_text(message)
+    return _accessor_text(response)
+
+
+def _accessor_text(source: Any) -> Any:
+    """Return the text a LlamaIndex object's own accessor gives, or ``None``.
+
+    ``get_content`` and ``get_text`` are the framework's code, not an attribute
+    read: a node's accessor formats metadata into a template, and
+    ``NodeWithScore.get_text()`` raises outright for a node that is not a
+    ``TextNode``. A ``TypeError`` means this is not the accessor being looked for
+    and the next one is worth trying; anything else means this one failed, and
+    reading a value for a record must not fail the call it belongs to. Both
+    responses and retrieved nodes go through here so a guard added for one can
+    never again be missing from the other.
+    """
+
     for method_name in ("get_content", "get_text"):
-        method = _value(response, method_name)
+        method = _value(source, method_name)
         if callable(method):
             try:
                 return method()
             except TypeError:
                 continue
             except Exception:
-                # The accessor is the framework's own code. A ``TypeError`` means
-                # this is not the accessor being looked for and the next one is
-                # worth trying; anything else means this one failed, and reading
-                # a response for a record must not fail the call it belongs to.
                 return None
     return None
 
@@ -326,7 +338,11 @@ def _nodes_payload(nodes: Any) -> list[dict[str, Any]]:
 
     documents: list[dict[str, Any]] = []
     for node_with_score in nodes:
-        node = _mapping_value(node_with_score, "node") or node_with_score
+        # ``or`` would ask the node whether it is truthy, which is one more piece
+        # of the framework's code than this needs; the inner node is used when it
+        # is there and the wrapper otherwise.
+        inner = _mapping_value(node_with_score, "node")
+        node = node_with_score if inner is None else inner
         document: dict[str, Any] = {}
 
         document_id = _node_id(node)
@@ -354,13 +370,9 @@ def _node_id(node: Any) -> str | None:
 
 
 def _node_text(node: Any) -> Any:
-    for method_name in ("get_content", "get_text"):
-        method = getattr(node, method_name, None)
-        if callable(method):
-            try:
-                return method()
-            except TypeError:
-                continue
+    text = _accessor_text(node)
+    if text is not None:
+        return text
     for key in ("text", "content"):
         value = _mapping_value(node, key)
         if value is not None:
@@ -369,16 +381,27 @@ def _node_text(node: Any) -> Any:
 
 
 def _payload_value(payload: Mapping[Any, Any], key: str) -> Any:
-    for payload_key, value in payload.items():
-        if _matches_key(payload_key, key):
-            return value
+    """Find ``key`` in a LlamaIndex payload, whatever its keys are spelled as.
+
+    Walking the payload runs the framework's own ``items()``, and each key is an
+    ``EventPayload`` member whose ``value`` and ``name`` are read below, so the
+    whole scan is guarded: a payload that cannot be walked yields nothing rather
+    than failing the callback reading it.
+    """
+
+    try:
+        for payload_key, value in payload.items():
+            if _matches_key(payload_key, key):
+                return value
+    except Exception:
+        return None
     return None
 
 
 def _mapping_value(source: Any, key: str) -> Any:
     if isinstance(source, Mapping):
         return _payload_value(source, key)
-    return getattr(source, key, None)
+    return _value(source, key)
 
 
 def _matches_key(value: Any, key: str) -> bool:
@@ -387,12 +410,30 @@ def _matches_key(value: Any, key: str) -> bool:
 
 
 def _string_names(value: Any) -> list[str]:
-    candidates = [value, getattr(value, "value", None), getattr(value, "name", None)]
+    """Return the lowercase spellings a payload key may be recognized by.
+
+    A plain string key is the overwhelmingly common case and needs no guarding:
+    ``str`` carries no ``value`` or ``name``, and rendering it cannot fail. It is
+    taken first because this runs once per payload key on every lookup, and the
+    guarded path below is what an ``EventPayload`` member needs, not what a
+    string does. The two agree on a string by construction — the reads the
+    guarded path adds are both absent on ``str``.
+    """
+
+    if isinstance(value, str):
+        text = value.lower()
+        return [text, text.rsplit(".", 1)[-1]] if "." in text else [text]
+
+    candidates = [value, _value(value, "value"), _value(value, "name")]
     names: list[str] = []
     for candidate in candidates:
         if candidate is None:
             continue
-        text = str(candidate).lower()
+        # ``__str__`` belongs to whatever the framework used as a key.
+        rendered = _text(candidate)
+        if rendered is None:
+            continue
+        text = rendered.lower()
         names.append(text)
         if "." in text:
             names.append(text.rsplit(".", 1)[-1])
