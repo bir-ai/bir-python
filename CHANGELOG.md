@@ -10,6 +10,56 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir tail` follows the store across a rotation. It is documented as printing
+  new events "as they are written", and with `configure(max_bytes=...)` set it
+  did not: rotation renames the active file away and starts a new one, and the
+  follow held only a byte offset into a path. Same workload every run — 200
+  traces, 400 events, 5 ms apart, followed by a `bir tail` subprocess for the
+  whole run — changing only the rotation limit:
+
+  ```
+                        before                          after
+  no rotation           400 lines, 200/200 traces       400 lines, 200/200 traces
+  rotation at 64 KB     316 lines, 158/200 traces       400 lines, 200/200 traces
+  ```
+
+  Nothing was reported and nothing was duplicated; a quarter of the events
+  simply never appeared. Two things were lost at once. The events appended
+  between the last 0.5 s poll and the rename went with the renamed file, which
+  nothing ever re-read — `--include-rotated` taught every other read command
+  about rotated siblings, but a follow has no such flag. And the replacement was
+  usually already longer than the stale offset by the next poll, so the one
+  rotation check there was — `if size < offset` — read it as ordinary growth and
+  seeked past the beginning of a file it had never read.
+
+  The follow now identifies the file its offset belongs to by device and inode
+  and re-checks that every poll, so a replaced file is recognized however large
+  it has grown. On a rotation it locates that file among the siblings, drains
+  what it still owed, and reads any files that rotated in between, in write
+  order, before continuing with the new active file — several rotations can land
+  inside one poll interval. Only files newer than the one it was reading are
+  touched, so a follow still never prints events that predate it.
+
+  One gap cannot be closed and is now reported instead of silent. Rotating more
+  times than `backup_count` keeps deletes the file the follow was reading before
+  it can be read, and nothing can print what is no longer on disk. The same
+  workload at a 2 KB limit rotates roughly twenty times per poll interval and
+  the store itself ends up holding 15 of the 200 traces; that run now prints
+  `bir: … was rotated or pruned away; the events it still held were not shown`
+  on stderr — off the event stream on stdout — where before it printed nothing
+  and said nothing. `bir prune` against a followed store replaces the active
+  file the same way, which is why the notice names both causes: from inside a
+  follow they leave the same absence.
+
+  No test pinned the old behaviour. The existing cases drive `_follow_trace`
+  against a single appended file and the `tail` command against an un-rotated
+  one, so nothing rotated the store while a follow was running. The new cases
+  rotate through the real writer rather than renaming by hand, and cover a
+  rotation per poll, a file drained after being rotated away mid-interval, two
+  whole files rotating inside one interval, and the reported gap. Truncation in
+  place and a store that does not exist yet are pinned alongside them: both
+  behaved correctly before and still do.
+
 - A framework object that raises while Bir reads it no longer fails the call it
   was recording. The previous release established that rule for the seven direct
   provider wrappers and guarded every read in `_common.py`. The framework event

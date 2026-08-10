@@ -40,6 +40,7 @@ from ._sdk import (
     TraceEvent,
     _iter_trace_events,
     _prune_trace_store,
+    _trace_files_oldest_first,
     send_events,
 )
 from .evals import (
@@ -885,12 +886,37 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class _TailPosition:
+    """How far a follow has read, and which file it read that far into.
+
+    Rotation replaces the active path with a different file rather than
+    truncating it, so a byte offset only means something together with the
+    identity of the file it was measured against. ``identity`` is that file's
+    ``(device, inode)`` pair, or ``None`` while the path does not exist.
+    """
+
+    identity: tuple[int, int] | None
+    offset: int
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """Return the ``(device, inode)`` pair naming ``path``, or None if it is gone."""
+
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (status.st_dev, status.st_ino)
+
+
 def _follow_trace(
     path: Path,
     *,
     out: TextIO,
     poll_interval: float,
     should_stop: Callable[[], bool],
+    err: TextIO | None = None,
 ) -> None:
     """Print trace events appended to ``path`` until ``should_stop`` returns True.
 
@@ -898,18 +924,81 @@ def _follow_trace(
     are shown, then polls for appended complete lines. ``should_stop`` is checked
     after each poll so callers (and tests) can end the loop deterministically; the
     ``tail`` command passes a predicate that never stops and relies on Ctrl-C.
+    ``err`` receives the notice that a rotation outran the follow and defaults to
+    ``sys.stderr``, which keeps it off the event stream on stdout.
     """
 
-    offset = path.stat().st_size if path.exists() else 0
+    try:
+        status = path.stat()
+    except OSError:
+        position = _TailPosition(identity=None, offset=0)
+    else:
+        position = _TailPosition(identity=(status.st_dev, status.st_ino), offset=status.st_size)
+    errors = sys.stderr if err is None else err
     while True:
-        offset = _emit_new_events(path, offset, out)
+        position = _emit_new_events(path, position, out, err=errors)
         if should_stop():
             return
         time.sleep(poll_interval)
 
 
-def _emit_new_events(path: Path, offset: int, out: TextIO) -> int:
-    """Print complete event lines written past ``offset`` and return the new offset.
+def _emit_new_events(path: Path, position: _TailPosition, out: TextIO, *, err: TextIO) -> _TailPosition:
+    """Print event lines written since ``position`` and return the new position.
+
+    A store configured with ``max_bytes`` does not grow the active file forever:
+    it renames the file away and starts a new one at zero. An offset carried
+    across that rename means nothing, so the file the offset belongs to is
+    identified by device and inode and re-checked every poll. Comparing sizes is
+    not enough -- the replacement is usually already longer than the old offset
+    by the time the next poll runs, in which case a size check sees ordinary
+    growth and seeks past the beginning of a file it has never read.
+    """
+
+    identity = _file_identity(path)
+    if identity is None:
+        return position
+    if position.identity is not None and identity != position.identity:
+        _drain_rotated_files(path, position, out, err=err)
+        position = _TailPosition(identity=identity, offset=0)
+    return _TailPosition(identity=identity, offset=_emit_file_events(path, position.offset, out))
+
+
+def _drain_rotated_files(path: Path, position: _TailPosition, out: TextIO, *, err: TextIO) -> None:
+    """Print what the files rotated away since the last poll still owe the follow.
+
+    Everything appended between the last poll and the rename is in a sibling by
+    the time the rotation is noticed, and several rotations can land inside one
+    poll interval, so the file the offset belongs to is located among the
+    siblings by identity and it and every file rotated after it are printed in
+    write order. Only files newer than that one are read: the older siblings hold
+    events that predate the follow, which it is not for.
+
+    When that file is not among them it has been deleted, taking its unread tail
+    with it -- usually because the store rotated more times than ``backup_count``
+    keeps, and otherwise because ``bir prune`` rewrote the active file. Nothing
+    can print what is no longer on disk, and nothing can say how much it was, so
+    the gap is reported rather than passed over in silence and following resumes
+    at the start of the new active file. The notice names both causes because
+    which one it was is not knowable from here: both leave the same absence.
+    """
+
+    siblings = _trace_files_oldest_first(path)[:-1]
+    identities = [_file_identity(sibling) for sibling in siblings]
+    try:
+        rotated_away = identities.index(position.identity)
+    except ValueError:
+        print(f"bir: {path} was rotated or pruned away; the events it still held were not shown", file=err)
+        err.flush()
+        return
+
+    offset = position.offset
+    for sibling in siblings[rotated_away:]:
+        _emit_file_events(sibling, offset, out)
+        offset = 0
+
+
+def _emit_file_events(path: Path, offset: int, out: TextIO) -> int:
+    """Print complete event lines in ``path`` past ``offset`` and return the new offset.
 
     The batch is flushed before returning. Python block-buffers a stdout that is
     not a terminal, and the buffer is larger than a following session ever fills,
@@ -925,7 +1014,7 @@ def _emit_new_events(path: Path, offset: int, out: TextIO) -> int:
     except FileNotFoundError:
         return offset
     if size < offset:
-        # The file was truncated or rotated; restart from the beginning.
+        # The file was truncated in place; restart from the beginning.
         offset = 0
     if size <= offset:
         return offset

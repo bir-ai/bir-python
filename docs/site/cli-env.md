@@ -40,7 +40,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir show TRACE_ID [--path P] [--include-rotated] [--json] [--skip-invalid]` | Print one trace as an indented event tree, or a nested JSON tree. |
 | `bir stats [--path P] [--include-rotated] [--json] [--skip-invalid] [--name SUBSTRING] [--status {success,error}] [--since ISO] [--until ISO]` | Summarize trace counts, token usage, cost per currency, and latency; optionally filtered. |
 | `bir prune [--path P] [--include-rotated] [--before ISO] [--keep-last N] [--status {success,error}] [--dry-run] [--yes] [--json]` | **Destructive.** Remove whole old/unwanted traces from the local store. Safe by default. |
-| `bir tail [--path P]` | Follow a trace file and print new events until interrupted. |
+| `bir tail [--path P]` | Follow a trace file and print new events until interrupted, across rotations. |
 | `bir experiments [--dir D] [--json] [--skip-invalid]` | List local experiment summaries. |
 | `bir experiment-show EXPERIMENT_ID [--dir D] [--json] [--skip-invalid]` | Print one experiment's summary and per-example results. |
 | `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH] [--skip-invalid]` | Render one experiment to a self-contained HTML or Markdown report. |
@@ -251,6 +251,31 @@ follow command should:
 ```bash
 bir tail | grep error
 ```
+
+It also follows the store across a rotation. `configure(max_bytes=...)` renames
+the active file away and starts a new one, so a follow that tracked only a byte
+offset skipped both the tail of the file that was renamed and the beginning of
+its replacement. `bir tail` identifies the file it is reading by device and
+inode instead, drains what the renamed file still owed, and reads any files that
+rotated in between, in write order, before continuing with the new active file.
+No flag is involved: unlike the read commands, a follow shows what is being
+written now, and where the store put it is not something you should have to
+know.
+
+One gap it cannot close. Rotating more times than `backup_count` keeps deletes
+the file the follow was reading before it is read, and nothing can print what is
+no longer on disk. That is reported on stderr rather than passed over:
+
+```
+bir: .bir/traces.jsonl was rotated or pruned away; the events it still held were not shown
+```
+
+It goes to stderr so it stays out of the event stream on stdout, and the follow
+resumes at the start of the new active file. Seeing it usually means the store
+is deleting rotated files faster than the half-second poll can read them; a
+larger `max_bytes` or `backup_count` is the fix. A `bir prune` run against the
+store being followed replaces the active file too and reports the same way,
+because from inside a follow the two leave the same absence.
 
 ### Recorded text cannot steer your terminal
 

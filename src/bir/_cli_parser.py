@@ -133,7 +133,10 @@ def build_parser(
     )
     stats.set_defaults(func=handlers["stats"])
 
-    tail = subparsers.add_parser("tail", help="Follow the trace file and print new events as they are written.")
+    tail = subparsers.add_parser(
+        "tail",
+        help="Follow the trace file and print new events as they are written, across rotations.",
+    )
     tail.add_argument("--path", help="Trace JSONL file to follow (default: .bir/traces.jsonl).")
     tail.set_defaults(func=handlers["tail"])
 

@@ -40,8 +40,8 @@ used: what reaches the terminal on the CLI's error channel rather than its
 rendering path, how `bir tail` and file rotation compose, what the OTLP attribute
 names mean against the OpenTelemetry release the extra actually installs, and
 which fields redaction is scanning at all rather than which patterns it
-recognizes. The P1 came from re-asking the first question; the four items that
-remain came one from each of those axes.
+recognizes. The P1 came from re-asking the first question, and each of those axes
+produced one item. Two have since shipped; the three below are what remain.
 
 ## Product and engineering guardrails
 
@@ -63,77 +63,17 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-The P1 from this audit has shipped and is in `CHANGELOG.md`: the event bridges'
-unguarded reads of a framework object. The four items below are what is left.
+Two items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
+event bridges' unguarded reads of a framework object, and the follow that did not
+survive a rotation. The three items below are what is left.
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|-------------|----------|------|-----------------|------------|
-| 1 | Follow the store across a rotation in `bir tail` | P2 | S | `bir tail` shows every event written while it runs | — |
-| 2 | Escape and bound what the CLI prints on its error channel | P2 | S | A server's response cannot repaint the terminal running `bir send` | — |
-| 3 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
-| 4 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
+| 1 | Escape and bound what the CLI prints on its error channel | P2 | S | A server's response cannot repaint the terminal running `bir send` | — |
+| 2 | Refresh the OTLP attribute spellings | P3 | S | A backend keying on the current attribute names sees the values | — |
+| 3 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
 
-### 1. Follow the store across a rotation in `bir tail`
-
-**Why.** `bir tail` is documented as "Follow the trace file and print new events
-as they are written" (`bir/_cli_parser.py:136`) and again in
-`docs/site/cli-env.md:43` and `:247-249`. With `configure(max_bytes=...)` set it
-does not. Same workload — 200 traces, 400 events, 5 ms apart, followed by a
-`bir tail` subprocess for the whole run — with only the rotation limit changed:
-
-```
-no rotation
-  lines printed     : 400   distinct trace names: 200   coverage: 200/200 traces
-rotation at 64 KB
-  lines printed     : 300   distinct trace names: 151   coverage: 151/200 traces
-rotation at 2 KB
-  lines printed     : 7     distinct trace names: 4     coverage: 4/200 traces
-```
-
-Nothing is reported and nothing is duplicated; the events simply never appear.
-
-`_emit_new_events` (`bir/cli.py:911-951`) holds a byte offset into the active
-path and detects rotation only through `if size < offset` (`:927-929`). Rotation
-renames the active file away and starts a new one at zero
-(`_rotate_trace_files`, `bir/_storage.py:708-720`), so everything appended to the
-old file since the last 0.5 s poll (`_TAIL_POLL_INTERVAL`, `cli.py:59`) is gone —
-nothing ever re-reads `traces.jsonl.1` — and once the new file has grown past the
-stale offset the heuristic does not fire either, so the tail seeks into the new
-file and skips its beginning as well. The loss scales with how often rotation
-happens, which is why 2 KB loses 98% and 64 KB loses 25%.
-
-This is two documented features that do not compose. Rotation is first-class
-(`configure(max_bytes=..., backup_count=...)`), and every other read command was
-taught about rotated siblings through `include_rotated`; the follow command was
-not.
-
-**No test pins the current behaviour.** `TailCommandTests`
-(`tests/test_cli.py:2005-2078`) drives `_follow_trace` against a single appended
-file and the `tail` command against an un-rotated one. No test rotates the store
-while a follow is running.
-
-It is P2 rather than P1 because nothing is lost from the store: the same events
-are readable with `bir traces --include-rotated` afterwards. What is lost is the
-live view, silently.
-
-**Scope.**
-
-- Detect rotation by identity rather than by size — the active path's inode and
-  device, re-checked each poll — so a replaced file is recognized even when the
-  new one is already larger than the old offset.
-- On a detected rotation, drain the tail of the file that was rotated away before
-  switching, so the events written between the last poll and the rename are still
-  printed in order.
-- Decide and record what happens when several rotations land inside one poll
-  interval and an intermediate file has already been dropped by `backup_count`:
-  saying so once is better than a silent gap.
-- Add a case that rotates the store under a live follow and asserts the printed
-  stream against what was written.
-
-**Done when** a follow running across rotations prints every event appended while
-it was running, asserted by a test that rotates the store mid-follow.
-
-### 2. Escape and bound what the CLI prints on its error channel
+### 1. Escape and bound what the CLI prints on its error channel
 
 **Why.** The previous release established that recorded text must not be able to
 steer the terminal reading it, and `_visible` (`bir/_cli_present.py:302-326`)
@@ -204,7 +144,7 @@ on stderr, and nothing drives `bir send` against a hostile body.
 terminal escaped and length-bounded, asserted by a test driving `bir send`
 against a server that returns one.
 
-### 3. Refresh the OTLP attribute spellings
+### 2. Refresh the OTLP attribute spellings
 
 **Why.** `bir/integrations/otel.py:14-20` and `README.md:478-481` claim the
 exported attributes "follow the GenAI semantic conventions where they exist". Two
@@ -255,7 +195,7 @@ when the exporter was written, and the conventions moved underneath them.
 agree with a named OpenTelemetry semantic-conventions release, with the pinning
 tests updated to match.
 
-### 4. Record where the redaction boundary stops
+### 3. Record where the redaction boundary stops
 
 **Why.** `docs/site/capture-privacy.md:25-80` enumerates what redaction catches
 in exhaustive detail and warns that recognition is best-effort. It never says
@@ -339,8 +279,7 @@ does not, and a test asserts that boundary.
 
 ## Sequencing
 
-Items 1 and 2 are independent of each other, both small, and both in the CLI —
-reasonable to take together. Items 3 and 4 are documentation-and-decision work
+Item 1 is small and in the CLI. Items 2 and 3 are documentation-and-decision work
 whose main cost is agreeing on the answer; neither blocks anything. Nothing here
 blocks anything else.
 
@@ -377,9 +316,10 @@ than raising it at the caller, flushing each batch `bir tail` prints so a
 redirected follow is not silent, redacting a secret used as a mapping key, and
 escaping control characters when the CLI renders recorded text for a person,
 guarding the bridges' reads of a provider's response, creating the store's own
-files readable only by their owner, and guarding the event bridges' reads of a
-framework object. Regressions in those areas are bugs; new scope requires a new
-issue with current evidence.
+files readable only by their owner, guarding the event bridges' reads of a
+framework object, and following the store across a rotation in `bir tail`.
+Regressions in those areas are bugs; new scope requires a new issue with current
+evidence.
 
 The guarded event-bridge reads that shipped from this audit are adjacent to the
 earlier "guarding the bridges' reads of a provider's response" and neither
@@ -388,18 +328,17 @@ helper `_common._value` it guarded, and it patched one accessor loop in the
 LlamaIndex bridge. The follow-up covered the framework bridges' own copies of
 that helper, which were never routed through it.
 
-Two of the items above are adjacent to entries on that list and neither reopens
-one.
+The rotation-following `bir tail` that shipped from this audit is likewise
+adjacent to the earlier "flushing each batch `bir tail` prints so a redirected
+follow is not silent", and neither reopens the other. That fixed where the bytes
+went after they were rendered. This was which events were rendered at all: the
+flush was working, and 400 of 400 lines arrived whenever the store did not
+rotate.
 
-Item 1 sits beside "flushing each batch `bir tail` prints so a redirected follow
-is not silent". That fixed where the bytes went after they were rendered. This is
-which events are rendered at all: the flush is working, and 400 of 400 lines
-arrive when the store does not rotate.
-
-Item 2 sits beside "escaping control characters when the CLI renders recorded
-text for a person". That covers the rendering path and strings from the local
-store. This is the error path and a string a remote host chose; the two share no
-code.
+Item 1 above sits beside "escaping control characters when the CLI renders
+recorded text for a person" and does not reopen it. That covers the rendering
+path and strings from the local store. This is the error path and a string a
+remote host chose; the two share no code.
 
 ## Declined
 
@@ -531,7 +470,7 @@ so they survive the block, removes its temporary file, and left the real store
 empty throughout.
 
 **The redaction rules on the value axis.** Every metadata, output, document, and
-error surface in the sweep under item 5 — ten of them — redacted the credential,
+error surface in the sweep under item 3 — ten of them — redacted the credential,
 including a secret used as a mapping key and one inside a framework bridge's
 `tags` and `serialized_id`.
 

@@ -2060,6 +2060,201 @@ class TailCommandTests(CliBaseTest):
             self.assertIn("live", out)
 
 
+class TailRotationTests(CliBaseTest):
+    """A follow has to survive the store rotating underneath it.
+
+    ``configure(max_bytes=...)`` renames the active file away and starts a new
+    one, which a byte offset alone cannot see: the replacement is usually already
+    longer than the old offset by the next poll, so a size check reads it as
+    ordinary growth and seeks past its beginning. Everything appended to the old
+    file since the last poll is in a sibling nothing re-reads. The cases here
+    rotate through the real writer rather than renaming by hand, so what they
+    drive is what ``configure(max_bytes=...)`` actually does.
+    """
+
+    def _write_trace(self, trace_path: Path, name: str, *, max_bytes: int | None, backup_count: int = 3) -> None:
+        """Write one trace root through the SDK. ``max_bytes=None`` leaves rotation off."""
+
+        configure(trace_path=str(trace_path), max_bytes=max_bytes, backup_count=backup_count)
+        with bir.trace(name=name):
+            pass
+
+    def _follow_writing(
+        self,
+        trace_path: Path,
+        names: list[str],
+        *,
+        max_bytes: int | None,
+        backup_count: int = 3,
+    ) -> tuple[str, str]:
+        """Follow ``trace_path`` while ``names`` are written one per poll."""
+
+        out, err = io.StringIO(), io.StringIO()
+        pending = iter(names)
+
+        def should_stop() -> bool:
+            name = next(pending, None)
+            if name is None:
+                return True
+            self._write_trace(trace_path, name, max_bytes=max_bytes, backup_count=backup_count)
+            return False
+
+        cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+        return out.getvalue(), err.getvalue()
+
+    def test_follow_prints_every_event_written_across_rotations(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._write_trace(trace_path, "before", max_bytes=None)
+            names = [f"live{index:02d}" for index in range(12)]
+
+            # Small enough that a single trace event fills the file, so every
+            # write after the first rotates.
+            rendered, errors = self._follow_writing(trace_path, names, max_bytes=200)
+
+            self.assertEqual(errors, "")
+            self.assertNotIn("before", rendered)
+            printed = [line for line in rendered.splitlines() if "live" in line]
+            self.assertEqual(len(printed), len(names))
+            for name, line in zip(names, printed):
+                self.assertIn(name, line)
+            # The store did rotate; without that this passes for the wrong reason.
+            self.assertTrue((workdir / "traces.jsonl.1").exists())
+
+    def test_follow_drains_the_file_that_was_rotated_away(self) -> None:
+        """Events appended between the last poll and the rename still print.
+
+        Those live in the rotated sibling by the time the follow notices, and
+        reading only the new active file is what loses them.
+        """
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._write_trace(trace_path, "before", max_bytes=None)
+            out, err = io.StringIO(), io.StringIO()
+            polls = {"n": 0}
+
+            def should_stop() -> bool:
+                polls["n"] += 1
+                if polls["n"] > 1:
+                    return True
+                # Two writes inside one poll interval: the first lands in the
+                # active file, the second rotates it away and starts a new one.
+                self._write_trace(trace_path, "rotated_away", max_bytes=1_000_000)
+                self._write_trace(trace_path, "after_rotation", max_bytes=200)
+                return False
+
+            cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+
+            rendered = out.getvalue()
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("rotated_away", rendered)
+            self.assertIn("after_rotation", rendered)
+            self.assertLess(rendered.index("rotated_away"), rendered.index("after_rotation"))
+
+    def test_follow_reads_intermediate_files_in_write_order(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._write_trace(trace_path, "before", max_bytes=None)
+            out, err = io.StringIO(), io.StringIO()
+            polls = {"n": 0}
+            names = ["step0", "step1", "step2", "step3"]
+
+            def should_stop() -> bool:
+                polls["n"] += 1
+                if polls["n"] > 1:
+                    return True
+                # Four rotations inside a single poll interval, so two whole
+                # files sit between the one the offset belongs to and the
+                # active one. backup_count keeps all of them.
+                for name in names:
+                    self._write_trace(trace_path, name, max_bytes=200, backup_count=5)
+                return False
+
+            cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+
+            rendered = out.getvalue()
+            self.assertEqual(err.getvalue(), "")
+            printed = [line for line in rendered.splitlines() if "step" in line]
+            self.assertEqual(len(printed), len(names))
+            for name, line in zip(names, printed):
+                self.assertIn(name, line)
+
+    def test_follow_reports_a_rotation_it_could_not_follow(self) -> None:
+        """A gap the follow cannot close is said out loud, not passed over.
+
+        Enough rotations inside one poll interval and the file the offset
+        belongs to is deleted by ``backup_count``, taking its unread tail with
+        it. Nothing can print what is no longer on disk, so the notice goes to
+        stderr -- off the event stream on stdout -- and following resumes.
+        """
+
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            self._write_trace(trace_path, "before", max_bytes=None)
+            out, err = io.StringIO(), io.StringIO()
+            polls = {"n": 0}
+
+            def should_stop() -> bool:
+                polls["n"] += 1
+                if polls["n"] > 2:
+                    return True
+                if polls["n"] == 1:
+                    for index in range(6):
+                        self._write_trace(trace_path, f"lost{index}", max_bytes=200, backup_count=1)
+                    return False
+                self._write_trace(trace_path, "resumed", max_bytes=200, backup_count=1)
+                return False
+
+            cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+
+            self.assertEqual(err.getvalue().count("rotated or pruned away"), 1)
+            self.assertIn(str(trace_path), err.getvalue())
+            self.assertIn("resumed", out.getvalue())
+
+    def test_follow_still_restarts_when_the_file_is_truncated_in_place(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            old = json.dumps({"type": "trace", "name": "old", "status": "success", "start_time": "T0"}) + "\n"
+            trace_path.write_text(old * 4, encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            polls = {"n": 0}
+
+            def should_stop() -> bool:
+                polls["n"] += 1
+                if polls["n"] > 1:
+                    return True
+                # Truncated and rewritten in place: same inode, shorter file.
+                with trace_path.open("w", encoding="utf-8") as trace_file:
+                    trace_file.write(
+                        json.dumps({"type": "trace", "name": "fresh", "status": "success", "start_time": "T1"}) + "\n"
+                    )
+                return False
+
+            cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("fresh", out.getvalue())
+
+    def test_follow_waits_for_a_store_that_does_not_exist_yet(self) -> None:
+        with temporary_workdir() as workdir:
+            trace_path = workdir / "traces.jsonl"
+            out, err = io.StringIO(), io.StringIO()
+            polls = {"n": 0}
+
+            def should_stop() -> bool:
+                polls["n"] += 1
+                if polls["n"] > 1:
+                    return True
+                self._write_trace(trace_path, "first", max_bytes=None)
+                return False
+
+            cli._follow_trace(trace_path, out=out, poll_interval=0, should_stop=should_stop, err=err)
+
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("first", out.getvalue())
+
+
 class TailStreamingTests(unittest.TestCase):
     """A redirected follow has to show events while it is still running.
 
