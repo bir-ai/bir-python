@@ -41,7 +41,7 @@ rendering path, how `bir tail` and file rotation compose, what the OTLP attribut
 names mean against the OpenTelemetry release the extra actually installs, and
 which fields redaction is scanning at all rather than which patterns it
 recognizes. The P1 came from re-asking the first question, and each of those axes
-produced one item. Four have since shipped; the one below is what remains.
+produced one item. All five have since shipped.
 
 ## Product and engineering guardrails
 
@@ -63,102 +63,17 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Four items from this audit have shipped and are in `CHANGELOG.md`: the P1, the
+Every item from this audit has shipped and is in `CHANGELOG.md`: the P1, the
 event bridges' unguarded reads of a framework object; the follow that did not
 survive a rotation; the error channel that printed a remote host's response body
-raw; and the two superseded OTLP attribute spellings. The one item below is what
-is left.
-
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|-------------|----------|------|-----------------|------------|
-| 1 | Record where the redaction boundary stops | P3 | S | The privacy page states which fields are scanned and which are not | — |
-
-### 1. Record where the redaction boundary stops
-
-**Why.** `docs/site/capture-privacy.md:25-80` enumerates what redaction catches
-in exhaustive detail and warns that recognition is best-effort. It never says
-which *fields* are scanned. Sweeping a `sk-live-…` credential through every
-public surface that accepts a string and writes it to the store:
-
-```
-  configure(service_name=secret)              LEAKED
-  configure(environment=secret)               LEAKED
-  configure(source=secret)                    LEAKED
-  trace(name=secret)                          LEAKED
-  trace(metadata={'note': secret})            redacted
-  trace(metadata={secret: 'v'})               redacted
-  span.set_metadata({'note': secret})         redacted
-  generation(metadata={'note': secret})       redacted
-  generation.set_model(secret)                LEAKED
-  generation.set_output({'answer': secret})   redacted
-  tool_call(name=secret)                      LEAKED
-  score(metadata={'note': secret})            redacted
-  score(name=secret)                          LEAKED
-  prompt(template/variables/rendered=secret)  redacted
-  retrieval.add_document(text=secret)         redacted
-  traced call raises with secret in message   redacted
-  langchain tags/metadata/serialized id       redacted
-  generation(model=secret) with prices        LEAKED
-
-8 of 18 surfaces wrote the secret verbatim
-```
-
-The split is coherent: payloads and metadata are scanned, identity fields are
-not. Three of the leaking surfaces are operator-set constants and are nobody's
-surprise. The rest are the event `name`, the score name, and `model` — and two of
-those the SDK fills in from a third party rather than from the developer:
-
-```
-openai bridge, provider-echoed model
-   generation  name='openai.chat.completions' model='sk-live-…'
-langchain bridge, framework-supplied tool name
-   tool_call   name='sk-live-…'
-   trace       name='sk-live-…'
-```
-
-`event.model` comes from `_value(response, "model")` on whatever the provider
-echoed back (`bir/integrations/openai.py:232`), and `event.name` from
-`_callback_name(serialized, kwargs, ...)` on whatever the framework announced
-(`bir/integrations/langchain.py:261-279`). The SDK already makes this argument
-itself, in `_visible`'s docstring (`_cli_present.py:305-307`): "Names, models,
-and captured values are data, and a name is often not a literal: a bridge passes
-the tool the model chose." It escapes those names for the terminal and does not
-scan them for credentials.
-
-This is not the same axis as the redaction work already declined or shipped.
-Every previous sweep asked *which patterns* are recognized — credential formats,
-value shapes, encoding and normalisation, non-ASCII spellings. This one asks
-which *fields* the recognizer is pointed at, and the answer is undocumented.
-
-Redacting names outright would be the wrong fix: names are the primary index for
-reading a trace, and a redacted tool name destroys the record it belongs to. So
-the deliverable here is a decision, not a behaviour change — with the possible
-exception of `model`, which is a closed vocabulary in practice and the one
-identity field a third party supplies wholesale.
-
-**No test pins either answer.** `tests/test_redaction_parity.py` and
-`tests/test_custom_redaction.py` cover pattern recognition; nothing asserts that
-an identity field is or is not scanned.
-
-**Scope.**
-
-- State the boundary in `docs/site/capture-privacy.md`: captured inputs, outputs,
-  metadata (keys and values), documents, and error messages are scanned; the
-  event `name`, `model`, score name, and the configured `service.*` / `source`
-  are recorded as given.
-- Decide separately on `model`, the one identity field read from a provider's
-  response rather than chosen by the developer, and record the reasoning either
-  way.
-- Add a test that pins whichever boundary is chosen, so the next change to
-  `_capture` cannot move it without saying so.
-
-**Done when** the privacy page names the fields redaction scans and the fields it
-does not, and a test asserts that boundary.
+raw; the two superseded OTLP attribute spellings; and the undocumented redaction
+boundary. **This list is empty. The next change here starts with a new audit.**
 
 ## Sequencing
 
-The remaining item is documentation-and-decision work whose main cost is agreeing
-on the answer. Nothing here blocks anything else.
+Nothing is queued. What is left below is the record: what must not be reopened,
+what was driven and declined, and what was checked and found sound, so the next
+audit starts from evidence rather than from a blank page.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -195,9 +110,10 @@ escaping control characters when the CLI renders recorded text for a person,
 guarding the bridges' reads of a provider's response, creating the store's own
 files readable only by their owner, guarding the event bridges' reads of a
 framework object, following the store across a rotation in `bir tail`, escaping
-and bounding what the CLI prints on its error channel, and refreshing the OTLP
-attribute spellings. Regressions in those areas are bugs; new scope requires a
-new issue with current evidence.
+and bounding what the CLI prints on its error channel, refreshing the OTLP
+attribute spellings, and recording where the redaction boundary stops.
+Regressions in those areas are bugs; new scope requires a new issue with current
+evidence.
 
 The guarded event-bridge reads that shipped from this audit are adjacent to the
 earlier "guarding the bridges' reads of a provider's response" and neither
@@ -226,6 +142,16 @@ renamed them; no attribute was added or removed, and both spellings of each
 carry the same value. The end of that transition is a real follow-up, but it is
 triggered by the extra's floor rising rather than by an audit, and the test
 pinning the superseded spellings says so where someone will see it.
+
+The recorded redaction boundary sits beside every redaction entry on that list —
+the `Authorization` header, the connection URI, `Cookie` values, GitHub tokens,
+a secret used as a mapping key — and reopens none of them. Each of those asked
+which *patterns* the recognizer knows. This asked which *fields* it is aimed at,
+found the answer coherent and undocumented, and wrote it down without changing
+it. A future audit that wants an identity field scanned is making a product
+decision, not fixing a defect, and `tests/test_redaction_boundary.py` is where
+it has to be made: both columns of the table are pinned, so moving one is a
+visible edit rather than a silent drift.
 
 ## Declined
 
@@ -357,7 +283,7 @@ so they survive the block, removes its temporary file, and left the real store
 empty throughout.
 
 **The redaction rules on the value axis.** Every metadata, output, document, and
-error surface in the sweep under item 1 — ten of them — redacted the credential,
+error surface in the redaction sweep — ten of them — redacted the credential,
 including a secret used as a mapping key and one inside a framework bridge's
 `tags` and `serialized_id`.
 

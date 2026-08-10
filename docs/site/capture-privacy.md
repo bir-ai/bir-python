@@ -24,6 +24,43 @@ for how it relates to sampling.
 
 ## Redaction
 
+### Which fields are scanned
+
+Redaction is pointed at what your application passed as *content*, not at what
+identifies the record. Everything below was measured by sweeping one
+`sk-live-…` credential through every public surface that accepts a string and
+writes it to the store:
+
+| scanned | recorded as given |
+| --- | --- |
+| `metadata` — keys and values, on every event type | the event `name` — trace, span, generation, `tool_call`, `retrieval`, score |
+| captured `input` and `output`, including `@observe()` arguments and return values | `model` on a generation |
+| a retrieval's `query` and each `add_document(text=...)` | `service_name`, `environment`, and `source` from `configure()` |
+| a prompt's `template`, `variables`, and `rendered` text | |
+| the message of an exception a traced call raised | |
+
+The split is deliberate rather than incidental. A name and a model are how you
+find a record and read it back: `bir traces --name`, the tree `bir show` prints,
+and the `model_prices` table that fills in a generation's cost all key on them.
+Replacing one with `[redacted]` would not un-leak the value — it would destroy
+the record it belongs to while the credential stayed wherever it actually came
+from.
+
+Two of those fields are worth knowing about specifically, because the SDK fills
+them in from a third party rather than from your code. A generation's `model` is
+whatever the provider echoed back, and an event `name` from a framework bridge
+is whatever the framework announced — a LangChain tool name is the tool the
+model chose. Neither is scanned. A credential arriving in either one means it
+was already sent to that third party, so the place to fix it is the call, not
+the trace. `service_name`, `environment`, and `source` are constants you set;
+they are recorded exactly as given.
+
+If you need an identity field scanned in your setup, put the value in
+`metadata` as well and read it from there — metadata is scanned, keys and
+values alike.
+
+### What is recognized
+
 Before captured events are written, Bir redacts common secret-like fields such
 as `api_key`, `authorization`, `password`, `secret`, and `token`.
 

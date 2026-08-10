@@ -8,6 +8,47 @@ Before publishing, verify the release with the SDK release checklist in
 
 ## Unreleased
 
+### Documentation
+
+- The privacy page now says which *fields* redaction scans and which it does
+  not. It enumerated what the recognizer catches in exhaustive detail and warned
+  that recognition is best-effort, but never said where the recognizer is
+  pointed. Sweeping one `sk-live-…` credential through every public surface that
+  accepts a string and writes it to the store, 9 of 21 recorded it verbatim, and
+  the split is coherent rather than accidental:
+
+  ```
+  scanned                                   recorded as given
+  metadata, keys and values                 the event name, on every event type
+  captured input and output                 model on a generation
+  a retrieval's query and documents         service_name / environment / source
+  a prompt's template, variables, rendered
+  the message of an exception a call raised
+  ```
+
+  What the application passed as content is scanned; what identifies the record
+  is written as given. No behaviour changed, which is the decision: a name and a
+  model are how a record is found and read back — `bir traces --name`, the tree
+  `bir show` prints, and the `model_prices` table that fills in a generation's
+  cost all key on them — so replacing one with `[redacted]` would destroy the
+  record without un-leaking anything, since the credential is already wherever
+  it came from.
+
+  `model` was weighed separately, being the one identity field a third party
+  supplies wholesale: a generation's `model` is whatever the provider echoed
+  back, as an event `name` from a framework bridge is whatever the framework
+  announced. It is not scanned either. A credential arriving in either one was
+  already sent to that third party, so the place to fix it is the call rather
+  than the trace, and scanning `model` alone would leave a boundary that is
+  harder to state than to defend. The page says this outright and tells a reader
+  who needs an identity value scanned to put it in `metadata` as well.
+
+  A new `tests/test_redaction_boundary.py` pins the whole table, both columns, by
+  running the real primitives against a real store and reading the JSONL back.
+  Previous redaction tests all ask which patterns are recognized; nothing asked
+  which fields the recognizer is aimed at, so nothing would have noticed the
+  boundary moving.
+
 ### Changed
 
 - The OTLP exporter emits the current spelling of two attribute names alongside
