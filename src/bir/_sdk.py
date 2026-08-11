@@ -2033,7 +2033,7 @@ def _write_event(event: dict[str, Any]) -> None:
     try:
         # One binding for the whole write, so a reconfiguration cannot pair a new
         # trace path with the previous rotation settings.
-        _storage_helpers._append_event(
+        dropped_bytes = _storage_helpers._append_event(
             event,
             trace_path=config.trace_path,
             max_bytes=config.max_bytes,
@@ -2045,6 +2045,8 @@ def _write_event(event: dict[str, Any]) -> None:
         # destroy a production call rather than a trace.
         _report_write_failure(config.trace_path, error)
         return
+    if dropped_bytes:
+        _report_unfinished_tail_dropped(config.trace_path, dropped_bytes)
     if _write_failing:
         _report_write_recovered()
 
@@ -2072,6 +2074,24 @@ def _report_write_failure(trace_path: Path, error: BaseException) -> None:
         "writing recovers.",
         trace_path,
         error,
+    )
+
+
+def _report_unfinished_tail_dropped(trace_path: Path, dropped_bytes: int) -> None:
+    """Say that the store ended in a write that never finished, and was repaired.
+
+    Emitted per occurrence rather than per event, which is the same thing here:
+    the repair leaves the file ending in a terminator, so the next append finds
+    nothing to drop. A store recording into a filesystem that fills repeatedly
+    reports once per outage, matching :func:`_report_write_failure`.
+    """
+
+    _logger.warning(
+        "bir found the trace store at %s ending in a write that never finished; %d byte(s) were "
+        "dropped so the next event is not written onto them. Those bytes were never a complete "
+        "event and no reader could read them.",
+        trace_path,
+        dropped_bytes,
     )
 
 
@@ -2312,3 +2332,6 @@ def _reset_config_for_tests() -> None:
     with _write_failure_lock:
         _write_failing = False
         _events_lost_while_failing = 0
+    # Nor may it leave a claim that some store still ends where this process last
+    # wrote, which is what lets the next append skip reading its final byte.
+    _storage_helpers._forget_verified_tail()

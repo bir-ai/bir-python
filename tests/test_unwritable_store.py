@@ -29,6 +29,8 @@ import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 import bir
 from bir._sdk import _prune_trace_store, _reset_config_for_tests, load_events, load_traces
@@ -288,6 +290,175 @@ class RecordedDataIsUnchangedTests(unittest.TestCase):
             event = load_events("traces.jsonl")[0]
             self.assertEqual(event.status, "error")
             self.assertEqual(event.error, "business rule violated")
+
+
+@contextmanager
+def failing_part_way_through_a_write(prefix_bytes: int) -> Iterator[None]:
+    """Let the next append write ``prefix_bytes`` and then fail, as a full disk does.
+
+    ``open`` is patched rather than the filesystem because a partial write is
+    what an interrupted append actually leaves, and no portable filesystem
+    trigger produces exactly that many bytes on demand.
+    """
+
+    real_open = open
+    exhausted = False
+
+    class _PartialWriter:
+        def __init__(self, handle: Any) -> None:
+            self._handle = handle
+
+        def write(self, text: str) -> int:
+            nonlocal exhausted
+            if exhausted:
+                return self._handle.write(text)
+            exhausted = True
+            self._handle.write(text[:prefix_bytes])
+            self._handle.flush()
+            raise OSError(28, "No space left on device")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._handle, name)
+
+        def __enter__(self) -> _PartialWriter:
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exception: Any) -> Any:
+            return self._handle.__exit__(*exception)
+
+    def opener(*args: Any, **kwargs: Any) -> Any:
+        handle = real_open(*args, **kwargs)
+        if exhausted or "a" not in str(args[1] if len(args) > 1 else kwargs.get("mode", "")):
+            return handle
+        return _PartialWriter(handle)
+
+    with mock.patch("bir._storage.open", opener, create=True):
+        yield
+
+
+class AppendingOntoAnUnfinishedWriteTests(unittest.TestCase):
+    """An append never lands on the bytes of a write that did not finish.
+
+    An append writes at the byte after whatever is already there, so a store
+    ending mid-line would fuse the fragment and the incoming event into one line
+    that parses as neither — destroying an event that was written whole along
+    with the one that was not, and leaving damage no reader and no writing
+    command can get past. The unfinished bytes are removed first instead.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def test_the_event_after_an_interrupted_write_is_written_whole(self) -> None:
+        with temporary_workdir():
+            bir.configure(trace_path="traces.jsonl")
+            with bir.trace("before"):
+                pass
+
+            with failing_part_way_through_a_write(40):
+                with self.assertLogs("bir", level="ERROR"):
+                    with bir.trace("interrupted"):
+                        pass
+
+            store = Path("traces.jsonl")
+            self.assertFalse(store.read_bytes().endswith(b"\n"))
+
+            with self.assertLogs("bir", level="WARNING") as logs:
+                with bir.trace("after"):
+                    pass
+
+            self.assertIn("ending in a write that never finished", logs.output[0])
+            # Nothing unreadable is left, so the strict loaders read the store
+            # whole rather than refusing it.
+            self.assertEqual([event.name for event in load_events("traces.jsonl")], ["before", "after"])
+
+    def test_the_traced_call_is_unaffected_by_the_repair(self) -> None:
+        with temporary_workdir():
+            bir.configure(trace_path="traces.jsonl")
+            with bir.trace("before"):
+                pass
+            with failing_part_way_through_a_write(40):
+                with self.assertLogs("bir", level="ERROR"):
+                    with bir.trace("interrupted"):
+                        pass
+
+            @bir.observe(name="checkout")
+            def checkout(order: str) -> str:
+                return f"charged {order}"
+
+            with self.assertLogs("bir", level="WARNING"):
+                self.assertEqual(checkout("A-1"), "charged A-1")
+
+    def test_a_store_left_unfinished_by_an_earlier_run_is_repaired(self) -> None:
+        with temporary_workdir():
+            # No failure in this process: the fragment is simply already on disk,
+            # which is what an OOM-killed run or another writer leaves behind.
+            bir.configure(trace_path="traces.jsonl")
+            with bir.trace("before"):
+                pass
+            store = Path("traces.jsonl")
+            store.write_bytes(store.read_bytes() + b'{"id":"frag","type":"tr')
+
+            with self.assertLogs("bir", level="WARNING") as logs:
+                with bir.trace("after"):
+                    pass
+
+            self.assertIn("23 byte(s) were dropped", logs.output[0])
+            self.assertEqual([event.name for event in load_events("traces.jsonl")], ["before", "after"])
+
+    def test_a_file_that_is_nothing_but_an_unfinished_write_is_emptied(self) -> None:
+        with temporary_workdir():
+            bir.configure(trace_path="traces.jsonl")
+            Path("traces.jsonl").write_bytes(b'{"id":"frag","type":"tr')
+
+            with self.assertLogs("bir", level="WARNING"):
+                with bir.trace("after"):
+                    pass
+
+            self.assertEqual([event.name for event in load_events("traces.jsonl")], ["after"])
+
+    def test_the_repair_happens_before_rotation_carries_it_away(self) -> None:
+        with temporary_workdir():
+            # A rotated sibling is never appended to, so a fragment renamed into
+            # one would stay unreadable for good.
+            bir.configure(trace_path="traces.jsonl", max_bytes=200, backup_count=3)
+            with bir.trace("before"):
+                pass
+            store = Path("traces.jsonl")
+            store.write_bytes(store.read_bytes() + b'{"id":"frag","type":"tr')
+
+            with self.assertLogs("bir", level="WARNING"):
+                for index in range(4):
+                    with bir.trace(f"after-{index}"):
+                        pass
+
+            rotated = sorted(Path().glob("traces.jsonl.*"))
+            self.assertTrue(rotated)
+            for path in [*rotated, store]:
+                with self.subTest(file=path.name):
+                    self.assertTrue(path.read_bytes().endswith(b"\n"))
+            # Reading every file strictly is the assertion: had the fragment been
+            # renamed into a sibling it would still be there, and nothing appends
+            # to a sibling to repair it later. ("before" is gone because rotation
+            # dropped it past backup_count, which is rotation working.)
+            names = [event.name for event in load_events("traces.jsonl", include_rotated=True)]
+            self.assertEqual(names, ["after-0", "after-1", "after-2", "after-3"])
+
+    def test_a_healthy_store_is_never_touched_and_says_nothing(self) -> None:
+        with temporary_workdir():
+            bir.configure(trace_path="traces.jsonl")
+            store = Path("traces.jsonl")
+            sizes = []
+            with self.assertNoLogs("bir"):
+                for index in range(5):
+                    with bir.trace(f"t{index}"):
+                        pass
+                    sizes.append(store.stat().st_size)
+
+            # Every append only ever added, and the store reads back whole.
+            self.assertEqual(sizes, sorted(sizes))
+            self.assertEqual(len(load_events("traces.jsonl")), 5)
 
 
 if __name__ == "__main__":

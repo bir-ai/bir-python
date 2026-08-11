@@ -317,6 +317,36 @@ Commands you invoke for their effect are unaffected and still report failure:
 `bir prune`, `bir send`, `load_events()`, and `load_traces()` all raise what they
 hit, because there the write or read *is* the operation you asked for.
 
+### What the interrupted write leaves, and what happens next
+
+An append that is cut short leaves a final line with no newline. Those bytes
+were never a complete event and no reader can read them, so the next append
+removes them before writing — otherwise it would write at the byte after the
+fragment and fuse the two into one line that parses as neither, destroying an
+event that *was* written whole. That repair is reported once, with what it cost:
+
+```
+WARNING bir: bir found the trace store at /srv/.bir/traces.jsonl ending in a
+  write that never finished; 73 byte(s) were dropped so the next event is not
+  written onto them. Those bytes were never a complete event and no reader
+  could read them.
+```
+
+So a full disk that later frees up leaves a store every reader accepts. Driven
+on a 1 MB volume filled by an actual workload: 2,710 lines with one unreadable,
+then 60 KB freed and recording resumed, then 2,532 lines with **none**
+unreadable and `load_events()` returning all 2,532.
+
+Only the file being appended to is repaired, and only when something has touched
+it since this process last wrote — the first append of a process, an append after
+one that did not finish, another process's write, a rotation, an edit. An
+ordinary append reads no extra bytes; the guard costs one `stat`, measured at
+1–4% of a recorded trace.
+
+If the process never records again, the fragment stays. `--skip-invalid` reads
+past it and `bir prune` drops it; see
+[recovering after a full disk](cli-env.md#recovering-after-a-full-disk).
+
 ## Event loading
 
 `load_events()` validates JSONL records against the current event schema and

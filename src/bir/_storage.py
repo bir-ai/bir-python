@@ -690,21 +690,137 @@ def _append_event(
     trace_path: Path,
     max_bytes: int | None,
     backup_count: int,
-) -> None:
-    """Serialize and append one event while holding the store's writer locks."""
+) -> int:
+    """Serialize and append one event, returning bytes dropped to repair the file.
+
+    An append lands at the byte after whatever is already there, so appending to
+    a file a previous write never finished runs the two together into one line
+    that parses as neither: the event being recorded now is destroyed along with
+    the one that was interrupted. The unfinished bytes are therefore removed
+    first, which also leaves the store readable rather than carrying an
+    unreadable line forever. The return value is how many bytes that cost, for
+    the caller to report; it is ``0`` on every ordinary append.
+    """
 
     payload = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     with _write_lock:
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         with _InterProcessFileLock(trace_path):
+            # Before rotation, so an unfinished line is repaired rather than
+            # renamed away with the file that holds it: nothing appends to a
+            # rotated sibling, so a fragment carried into one would stay there
+            # for good. Rotation then measures the repaired file.
+            global _verified_tail
+            dropped = 0
+            if _verified_tail != (trace_path, _file_size(trace_path)):
+                dropped = _drop_unfinished_tail(trace_path)
             _rotate_trace_file_if_needed(
                 trace_path,
                 payload,
                 max_bytes=max_bytes,
                 backup_count=backup_count,
             )
+            # Cleared across the write, so an append that does not complete
+            # leaves nothing claiming this file ends where we left it.
+            _verified_tail = None
             with open(trace_path, "a", encoding="utf-8", opener=_private_opener) as trace_file:
                 trace_file.write(payload)
+                trace_file.flush()
+                _verified_tail = (trace_path, os.fstat(trace_file.fileno()).st_size)
+    return dropped
+
+
+# The file this process last appended to, and the size it had when that append
+# finished. An append whose file is exactly where it was left cannot end
+# mid-line: this process wrote that ending, and anything that changed the file
+# since -- another process appending, a torn write here or elsewhere, a prune, a
+# hand edit -- changes the size with it. So the byte read that decides whether
+# the store ends mid-line is paid on the first append to a store, after an append
+# that did not complete, and whenever someone else has touched the file, rather
+# than on every event. Guarded by ``_write_lock``, which every append holds.
+_verified_tail: tuple[Path, int] | None = None
+
+
+def _file_size(trace_path: Path) -> int:
+    """Return the file's size, or -1 when it is not there to have one."""
+
+    try:
+        return trace_path.stat().st_size
+    except OSError:
+        return -1
+
+
+def _forget_verified_tail() -> None:
+    """Drop the record of where this process last left a store.
+
+    The next append then reads the file's final byte rather than trusting it,
+    which is what a test that builds a store behind the writer's back needs.
+    """
+
+    global _verified_tail
+    with _write_lock:
+        _verified_tail = None
+
+
+# Read backwards a page at a time when looking for the terminator an unfinished
+# line lacks: the fragment is part of one event's line, so the first window
+# almost always contains the terminator before it, and a store that is one
+# enormous unfinished write is still walked with bounded memory.
+_TAIL_SCAN_WINDOW = 8192
+
+
+def _drop_unfinished_tail(trace_path: Path) -> int:
+    """Truncate a final line no write finished, returning the bytes removed.
+
+    A store is written one whole line at a time and every writer here ends its
+    line with a terminator, so a file that does not end in one ends in a write
+    that never finished -- an interrupted process, a full disk, an OOM kill.
+    Nothing that completed is inside those bytes: they were never a whole event,
+    and no reader has ever been able to read them. This is the same judgement
+    ``prune`` makes about the same bytes, made earlier and for the same reason.
+
+    The file is asked rather than a flag remembered, because the write that left
+    the fragment need not have been this process's: an OOM kill ends the process
+    that tore the line, and several processes may share one store under the
+    advisory lock. A flag set on a failed append would cover neither.
+
+    The last byte is read as a byte rather than through the text layer.
+    Universal-newline decoding reports a lone ``\\r`` as a line ending, and a lone
+    ``\\r`` is exactly what a torn write leaves where text mode writes ``\\r\\n``,
+    so asking the bytes keeps both platforms answering the same question.
+
+    Called while holding both writer locks, so no append can interleave with the
+    truncation.
+    """
+
+    try:
+        with open(trace_path, "rb") as trace_file:
+            size = trace_file.seek(0, os.SEEK_END)
+            if size == 0:
+                return 0
+            trace_file.seek(size - 1)
+            if trace_file.read(1) in (b"\n", b"\r"):
+                return 0
+            cut = _last_line_end(trace_file, size)
+        os.truncate(trace_path, cut)
+    except FileNotFoundError:
+        return 0
+    return size - cut
+
+
+def _last_line_end(trace_file: IO[bytes], size: int) -> int:
+    """Return the offset just past the last line terminator, or 0 if there is none."""
+
+    position = size
+    while position > 0:
+        start = max(0, position - _TAIL_SCAN_WINDOW)
+        trace_file.seek(start)
+        block = trace_file.read(position - start)
+        index = max(block.rfind(b"\n"), block.rfind(b"\r"))
+        if index != -1:
+            return start + index + 1
+        position = start
+    return 0
 
 
 def _rotate_trace_file_if_needed(

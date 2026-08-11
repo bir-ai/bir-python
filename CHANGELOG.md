@@ -169,6 +169,77 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- An append onto a store whose last write never finished no longer destroys the
+  event it is recording. An append lands at the byte after whatever is already
+  there, so a file ending mid-line ran the fragment and the incoming event
+  together into one line that parsed as neither. The event being recorded had
+  been written whole and was lost anyway, and the damage stopped being a
+  trailing fragment — which `bir prune` can drop — and became a permanent
+  unreadable line in the middle of the store, which every writing command
+  refuses by design:
+
+  ```
+                                before                        after
+  after the interrupted write   6 lines, 1 unreadable         6 lines, 1 unreadable
+  after 1 more append           6 lines, 1 unreadable         6 lines, 0 unreadable
+                                t0 t1 t2 t3 t4 <unreadable>   t0 t1 t2 t3 t4 first-after-recovery
+  after 3 more appends          9 lines, 1 unreadable         9 lines, 0 unreadable
+  bir prune afterwards          exit 1, Invalid JSON          exit 0
+  ```
+
+  This is the ordinary sequence after a full disk, not a corner: recording is
+  paused and retried per event, so the first append to succeed after any space
+  frees is the one that gets eaten. Driven on a 1 MB HFS+ volume filled by an
+  actual workload — 2,710 lines with one unreadable — then 60 KB freed and
+  recording resumed: 2,532 lines, **none** unreadable, and `load_events()`
+  returning all 2,532. Before, that store held an unreadable line for good.
+
+  The unfinished bytes are now removed before the append rather than written
+  onto. That is the same judgement `bir prune` already makes about the same
+  bytes — they were never a whole event and no reader could ever read them —
+  made earlier and for the same reason. Truncating rather than starting a new
+  line was the choice: a new line keeps the fragment, and once a later append
+  terminates it, it is no longer the shape prune can drop, so the store would
+  carry it forever.
+
+  It is not silent. The repair is reported once on the `bir` logger at
+  `WARNING`, naming the byte count, alongside the outage and recovery messages
+  that already exist. Once per occurrence is once per outage: the repair leaves
+  the file ending in a terminator, so the next append finds nothing to drop.
+
+  The file's last byte is read rather than a flag remembered, because the write
+  that left the fragment need not have been this process's — an OOM kill ends the
+  process that tore the line, and several processes may share one store. Reading
+  it on every append cost 20–24% of the recording path, which is too much for a
+  guard against something rare:
+
+  ```
+                       baseline    every append    guarded by size
+  trace_recorded       70.4 µs     86.9 µs (+23%)  72.4 µs (+2.8%)
+  generation_recorded  145.1 µs    176.7 µs (+22%) 146.6 µs (+1.0%)
+  store_rotation       171.1 µs    206.0 µs (+20%) 178.5 µs (+4.3%)
+  ```
+
+  So the byte is read only when the file is not exactly where this process left
+  it: the first append to a store, an append after one that did not finish,
+  another process's write, a rotation, an edit. An append that finds the size it
+  wrote skips it. That is not a heuristic with a hole — anything that can put a
+  fragment there also changes the size — except an in-place edit that replaces
+  the final terminator without changing the length, which is noted where the
+  guard is defined.
+
+  The repair runs before rotation rather than after, so a fragment is fixed
+  instead of being renamed into a sibling: nothing appends to a rotated file, so
+  one carried in there would stay unreadable for good.
+
+  No test pinned any of this. `tests/test_unwritable_store.py` drove failing
+  writes but never let one succeed afterwards on a file left unterminated, and
+  `tests/test_damaged_store.py` truncates a store and only reads it. The new
+  cases interrupt a real append part-way through and then record again, cover a
+  fragment left by an earlier run, a file that is nothing but an unfinished
+  write, the rotation ordering, the traced call being unaffected throughout, and
+  a healthy store that must be touched by none of it.
+
 - `bir prune` can now reclaim space on the store a full disk produces. The
   full-disk path is documented and works — the append fails, the traced call is
   unaffected, one `ERROR bir:` line says recording is paused — but what it leaves

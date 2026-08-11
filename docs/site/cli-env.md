@@ -386,8 +386,14 @@ one a full disk leaves.
 
 An event is appended as one whole line ending in a newline, so a file whose last
 line has no newline ends in a write that never finished: those bytes were never a
-complete event and no reader ever could read them. `bir prune` drops that one
-line as it rewrites the store, and says so:
+complete event and no reader ever could read them.
+
+If the application is still running, it repairs this itself — the next append
+drops those bytes rather than writing onto them, and says so on the `bir` logger
+(see [when the trace store cannot be
+written](core-api.md#when-the-trace-store-cannot-be-written)). `bir prune` is for
+the store nothing is recording into any more. It drops that one line as it
+rewrites, and says so:
 
 ```
 $ bir prune --keep-last 500 --yes
