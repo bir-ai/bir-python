@@ -116,8 +116,10 @@ class _StubResponse:
         self._body = body
         self.status = status
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amt: int | None = None) -> bytes:
+        # http.client.HTTPResponse.read takes an optional byte count, and the
+        # transport passes one to bound a success response.
+        return self._body if amt is None else self._body[:amt]
 
     def __enter__(self) -> _StubResponse:
         return self
@@ -251,8 +253,11 @@ def prepare_send_batched(workdir: Path, size: int) -> Callable[[], object]:
 
     def body() -> None:
         pending = iter(responses)
+        # Bir sends through its own opener rather than urllib's global one, so
+        # this stubs that seam; patching urllib would leave the send to make a
+        # real connection.
         with patch(
-            "bir._sdk.urllib.request.urlopen",
+            "bir._sending._opener.open",
             side_effect=lambda *_args, **_kwargs: _StubResponse(next(pending)),
         ):
             bir.send_events("http://127.0.0.1:9", batch_size=batch_size)

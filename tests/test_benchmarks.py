@@ -127,6 +127,49 @@ class BenchmarkRunTests(unittest.TestCase):
             self.assertGreaterEqual(result["peak_kib"], 0.0)
             self.assertGreater(result["per_unit_us"], 0.0)
 
+    def test_every_case_runs(self) -> None:
+        """Run all of them, because the one that rots is the one nobody runs.
+
+        A case that stubs an SDK internal stops stubbing it the moment that
+        internal moves, and the benchmark then does for real what it meant to
+        fake — ``send_batched`` patches the transport's opener and would
+        otherwise try to reach a server. Nothing about the printed number says
+        so, and running a single case here left that to CI to discover. The
+        whole smoke subset costs about a second at ``--repeat 1``.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            results_path = Path(directory) / "results.json"
+            status, _table = run_main(self.benchmarks, ["--smoke", "--repeat", "1", "--json", str(results_path)])
+
+            self.assertEqual(status, 0)
+            payload = json.loads(results_path.read_text(encoding="utf-8"))
+            measured = {result["name"]: result for result in payload["results"]}
+            self.assertEqual(
+                sorted(measured),
+                sorted(benchmark.name for benchmark in self.benchmarks.BENCHMARKS if benchmark.smoke),
+            )
+            for name, result in measured.items():
+                with self.subTest(benchmark=name):
+                    self.assertGreater(result["units"], 0)
+                    self.assertGreater(result["seconds_best"], 0.0)
+
+    def test_the_cases_outside_the_smoke_subset_run_too(self) -> None:
+        # They are out of the subset for stability on a shared runner, not
+        # because they may rot unnoticed. The only one is export_otel, which
+        # needs the optional extra it is excluded for.
+        outside = [benchmark.name for benchmark in self.benchmarks.BENCHMARKS if not benchmark.smoke]
+        if importlib.util.find_spec("opentelemetry") is None:
+            self.skipTest("the otel extra is not installed")
+
+        for name in outside:
+            with self.subTest(benchmark=name):
+                # Without --smoke, since that flag is what excludes them.
+                status, table = run_main(self.benchmarks, ["--only", name, "--repeat", "1"])
+
+                self.assertEqual(status, 0)
+                self.assertIn(name, table)
+
     def test_repeat_must_be_positive(self) -> None:
         with self.assertRaises(SystemExit):
             run_main(self.benchmarks, ["--smoke", "--only", "trace_disabled", "--repeat", "0"])

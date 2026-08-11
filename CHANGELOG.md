@@ -169,6 +169,23 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `scripts/benchmarks.py --smoke` runs again. Its `send_batched` case stubs the
+  transport so the measurement is Bir's batching rather than a server, and it
+  stubbed `urllib.request.urlopen` — which sends no longer call. The stub was
+  bypassed, the benchmark tried to reach `http://127.0.0.1:9` for real, and the
+  CI step failed with `ConnectionRefusedError`. Its fake response also needed the
+  optional byte count `read` now receives. Both match what the test suite's fakes
+  already do.
+
+  The guard that should have caught it is the interesting part.
+  `tests/test_benchmarks.py` ran the harness end to end on `--only
+  trace_disabled`, which touches no transport, so the one case that stubs an SDK
+  internal was never executed — exactly the rot its own docstring warns about
+  ("nothing fails when a case stops measuring what it claims to"). It now runs
+  every case in the smoke subset, which costs about a second at `--repeat 1`,
+  plus the cases held out of that subset when their optional extra is installed.
+  Reverting the stub target makes the new test fail with the CI error.
+
 - The two report-mode tests added with the staged report write now skip on
   Windows, where they could not pass. `os.chmod` there sets only the read-only
   flag, so a file asked for `0o600` still reports `0o666` and the mode a rename
