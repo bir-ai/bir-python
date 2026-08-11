@@ -169,6 +169,38 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A concurrent run that is waiting on stuck workers now says so instead of
+  looking hung. `max_workers > 1` bounds its threads by construction, but a task
+  that outran its timeout holds its pool slot until it returns, so a queued
+  example waits for one and the run takes as long as the stuck tasks do: 60
+  examples against a 20 s task with `max_workers=4` and a 5 ms timeout take
+  about 280 s. It now reports once, on the first example that waits longer than
+  a whole timeout, naming the workers it is waiting on.
+
+  Bounding that wait — the obvious fix, and the one the roadmap asked for — was
+  implemented, measured, and rejected. Two slow examples saturating a two-worker
+  pool made **four of ten** queued fast examples be recorded as failures they
+  would not have had, because a worker frees a moment after the bound expires:
+
+  ```
+  2 slow (0.30 s) + 10 fast, max_workers=2, timeout=0.05 s
+                          succeeded   recorded as never run
+  bounded wait            6           4
+  waiting as before       10          0
+  ```
+
+  Refusing an example that would have passed is worse than a slow run, and there
+  is no bound that separates "returns in 0.30 s" from "never returns" without
+  waiting 0.30 s to find out. The serial path can bound its wait because it has
+  sixteen slots of headroom before it refuses anything; a pool's bound *is*
+  `max_workers`, so there is none. Bounding the run rather than the example would
+  need a budget for the run, which `run_experiment()` does not take — that is a
+  feature, not a fix, and it is recorded on the roadmap as one.
+
+  `tests/test_evals.py::test_threaded_timeout_excludes_worker_queue_time` is what
+  caught it. It was written for the property that a queued example is not charged
+  for its wait, and the bound broke it by refusing the example outright.
+
 - A serial run with a timeout no longer holds one thread per timed-out example.
   Python cannot stop a thread, so a task that outran its timeout keeps running
   until it returns; the serial path gave every example its own worker and

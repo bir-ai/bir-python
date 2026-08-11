@@ -3193,6 +3193,90 @@ class RunExperimentTimeoutTests(unittest.TestCase):
                 )
 
 
+class ConcurrentTimeoutWaitTests(unittest.TestCase):
+    """A concurrent run waits for a worker, and says so instead of looking hung.
+
+    Its threads are already bounded — the pool is the bound — but a task that
+    outran its timeout holds its slot until it returns, so a queued example waits
+    and the run can take as long as the stuck tasks do. Bounding that wait by the
+    example's own timeout was tried and measured: two slow examples saturating a
+    two-worker pool made four of ten queued fast examples be recorded as failures
+    they would not have had. Refusing an example that would have passed is worse
+    than a slow run, so the wait stays and the run explains itself.
+    """
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def test_a_fast_example_queued_behind_slow_ones_still_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [DatasetExample(id=f"slow{index}", input="slow", expected="ok") for index in range(2)]
+            rows += [DatasetExample(id=f"fast{index}", input="fast", expected="ok") for index in range(10)]
+
+            def task(value: str) -> str:
+                if value == "slow":
+                    time.sleep(0.30)  # overruns the limit, then frees its worker
+                return "ok"
+
+            with self.assertLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "mixed",
+                    dataset=Dataset(rows),
+                    task=task,
+                    evaluators=[exact_match()],
+                    path=Path(directory) / "mixed.jsonl",
+                    raise_on_error=False,
+                    timeout=0.05,
+                    max_workers=2,
+                )
+
+            by_id = {row.example_id: row for row in result.results}
+            # The two that overran fail; every one queued behind them succeeds,
+            # which is the property a bounded wait would have cost.
+            self.assertTrue(all(by_id[f"slow{index}"].status == "error" for index in range(2)))
+            self.assertTrue(all(by_id[f"fast{index}"].status == "success" for index in range(10)))
+
+    def test_a_run_waiting_on_stuck_workers_says_so_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Long enough that every queued example waits past a whole timeout,
+            # short enough that the test does not wait with them.
+            def slow(_value: object) -> str:
+                time.sleep(0.2)
+                return "ok"
+
+            with self.assertLogs("bir", level="WARNING") as logs:
+                run_experiment(
+                    "hung",
+                    dataset=Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(6)]),
+                    task=slow,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "hung.jsonl",
+                    raise_on_error=False,
+                    timeout=0.005,
+                    max_workers=2,
+                )
+
+            waiting = [line for line in logs.output if "waiting for a free worker" in line]
+            # Once for the whole run, however many examples queue behind it.
+            self.assertEqual(len(waiting), 1)
+            self.assertIn("all 2 are still running", waiting[0])
+
+    def test_a_run_that_never_waits_says_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertNoLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "healthy",
+                    dataset=Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(20)]),
+                    task=lambda value: value,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "healthy.jsonl",
+                    timeout=5.0,
+                    max_workers=4,
+                )
+
+            self.assertTrue(all(row.status == "success" for row in result.results))
+
+
 class SerialTimeoutWorkerBudgetTests(unittest.TestCase):
     """A serial timed run holds a bounded number of the threads it abandons.
 

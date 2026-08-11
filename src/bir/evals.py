@@ -724,10 +724,10 @@ def run_experiment(
                     end_time=_now(),
                     results=results,
                 )
-                _report_live_timed_workers(name, budget)
+                _report_live_timed_workers(name, budget.live, limit=_MAX_LIVE_TIMED_WORKERS)
                 raise error
 
-    _report_live_timed_workers(name, budget)
+    _report_live_timed_workers(name, budget.live, limit=_MAX_LIVE_TIMED_WORKERS)
     return _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
@@ -1404,6 +1404,7 @@ def _run_experiment_threaded(
 
     results_by_index: dict[int, ExperimentExampleResult] = {}
     errors_by_index: dict[int, Exception] = {}
+    live_workers = 0
     with _ExperimentResultWriter(
         output_path,
         experiment_id=experiment_id,
@@ -1424,7 +1425,8 @@ def _run_experiment_threaded(
                         errors_by_index[index] = error
                     writer.write(result, failed=error is not None)
         else:
-            _collect_threaded_results_with_timeout(
+            live_workers = _collect_threaded_results_with_timeout(
+                name=name,
                 run_one=run_one,
                 examples=examples,
                 max_workers=max_workers,
@@ -1447,8 +1449,10 @@ def _run_experiment_threaded(
             end_time=end_time,
             results=ordered_results[: first_error_index + 1],
         )
+        _report_live_timed_workers(name, live_workers, limit=max_workers)
         raise errors_by_index[first_error_index]
 
+    _report_live_timed_workers(name, live_workers, limit=max_workers)
     return _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
@@ -1461,6 +1465,7 @@ def _run_experiment_threaded(
 
 def _collect_threaded_results_with_timeout(
     *,
+    name: str,
     run_one: Callable[[int, DatasetExample], tuple[int, ExperimentExampleResult, Exception | None]],
     examples: list[DatasetExample],
     max_workers: int,
@@ -1468,7 +1473,7 @@ def _collect_threaded_results_with_timeout(
     results_by_index: dict[int, ExperimentExampleResult],
     errors_by_index: dict[int, Exception],
     writer: _ExperimentResultWriter,
-) -> None:
+) -> int:
     """Run examples on a thread pool, recording a timeout error per example.
 
     Every example is submitted up front, but each example's timeout clock starts
@@ -1476,18 +1481,28 @@ def _collect_threaded_results_with_timeout(
     queued behind other examples never counts against it. The worker records its
     start (a monotonic deadline anchor plus the wall-clock timestamp) and sets a
     started event as its first action; the collector, walking futures in dataset
-    order, waits untimed for that event and then allows the task ``timeout``
-    seconds measured from the recorded start. An example whose own runtime
-    exceeds ``timeout`` is recorded as a failed example via the same
+    order, waits for that event and then allows the task ``timeout`` seconds
+    measured from the recorded start. An example whose own runtime exceeds
+    ``timeout`` is recorded as a failed example via the same
     :func:`_error_example_result` shape — stamped with the task's real start
     time so ``duration_ms`` reflects the wait — with the timeout exception
-    stored so ``raise_on_error`` can re-raise it. Python cannot force a thread
-    to stop, so a timed-out task keeps running and occupies its pool slot until
-    it returns; a queued example may therefore wait for a free worker, but its
-    own clock is not running while it waits. The executor is shut down without
-    waiting so the run finishes as soon as every example is resolved. Because the
-    collector already walks dataset order, each resolved example's row goes
-    straight to ``writer``, so a run stopped part-way keeps what it had finished.
+    stored so ``raise_on_error`` can re-raise it.
+
+    Python cannot force a thread to stop, so a timed-out task keeps running and
+    occupies its pool slot until it returns; a queued example may therefore wait
+    for a free worker, but its own clock is not running while it waits. That wait
+    is open-ended on purpose. Bounding it by the example's own ``timeout`` was
+    tried and measured: two slow examples saturating a two-worker pool made four
+    of ten queued fast examples be recorded as failures they would not have had,
+    because a worker frees a moment after the bound expires. Refusing an example
+    that would have passed is worse than a slow run, so the wait stays, and what
+    changed is that a run which is waiting says so.
+
+    The executor is shut down without waiting so the run finishes as soon as
+    every example is resolved. Because the collector already walks dataset order,
+    each resolved example's row goes straight to ``writer``, so a run stopped
+    part-way keeps what it had finished. Returns how many tasks are still running
+    when it does, which its results cannot show.
     """
 
     started_events = [threading.Event() for _ in examples]
@@ -1505,8 +1520,16 @@ def _collect_threaded_results_with_timeout(
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
         futures = [executor.submit(run_one_recording_start, index, example) for index, example in enumerate(examples)]
+        reported_waiting = False
         for index, (future, example) in enumerate(zip(futures, examples)):
-            started_events[index].wait()
+            if not started_events[index].wait(timeout=timeout):
+                # Longer than one example's whole budget without a worker means
+                # every one of them is holding a task that already timed out. The
+                # run still waits, but it stops looking hung while it does.
+                if not reported_waiting:
+                    reported_waiting = True
+                    _report_waiting_for_worker(name, max_workers)
+                started_events[index].wait()
             remaining = timeout - (time.monotonic() - started_monotonic[index])
             try:
                 result_index, result, error = future.result(timeout=max(remaining, 0.0))
@@ -1518,6 +1541,8 @@ def _collect_threaded_results_with_timeout(
             if error is not None:
                 errors_by_index[result_index] = error
             writer.write(result, failed=error is not None)
+        # A future that is neither finished nor cancelled is a task still running.
+        return sum(1 for future in futures if not future.done())
     finally:
         executor.shutdown(wait=False)
 
@@ -1693,10 +1718,27 @@ def _releasing(budget: _LiveWorkerBudget, work: Callable[..., Any]) -> Callable[
     return run
 
 
-def _report_live_timed_workers(name: str, budget: _LiveWorkerBudget) -> None:
+def _report_waiting_for_worker(name: str, max_workers: int) -> None:
+    """Say that a run is waiting for a worker rather than appearing to hang.
+
+    Emitted once per run, on the first example that waits longer than a whole
+    timeout for a slot. By then every worker is holding a task that already timed
+    out, so the run proceeds only when one of them returns -- which it cannot
+    hurry, and which nothing else would have told anyone about.
+    """
+
+    _logger.warning(
+        "bir experiment %r is waiting for a free worker: all %d are still running tasks from "
+        "examples that already timed out, and Python cannot stop a thread. The run continues as "
+        "they return.",
+        name,
+        max_workers,
+    )
+
+
+def _report_live_timed_workers(name: str, live: int, *, limit: int) -> None:
     """Say that a run left tasks running, since its results do not show it."""
 
-    live = budget.live
     if not live:
         return
     _logger.warning(
@@ -1704,7 +1746,7 @@ def _report_live_timed_workers(name: str, budget: _LiveWorkerBudget) -> None:
         "cannot stop a thread, so they end when they return on their own. At most %d run at once.",
         name,
         live,
-        _MAX_LIVE_TIMED_WORKERS,
+        limit,
     )
 
 

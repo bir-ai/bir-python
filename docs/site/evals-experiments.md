@@ -192,6 +192,30 @@ reaches it. Measured on 400 examples against a task that never returns, with a
 The third row is what ships: waiting open-endedly bounds the threads but hands
 back exactly what `timeout` exists to prevent.
 
+### A concurrent run waits for a stuck worker, and says so
+
+`max_workers > 1` bounds its threads by construction — the pool is the bound —
+but a task that outran its timeout holds its slot until it returns, so a queued
+example waits for one. That wait is open-ended, and deliberately so: bounding it
+by the example's own timeout was measured, and two slow examples saturating a
+two-worker pool made four of ten queued fast examples be recorded as failures
+they would not have had, because a worker frees a moment after the bound
+expires. Refusing an example that would have passed is worse than a slow run.
+
+So a concurrent run can still take as long as its stuck tasks do — 60 examples
+against a 20 s task with `max_workers=4` and a 5 ms timeout take about 280 s.
+What it no longer does is look hung while it happens:
+
+```
+WARNING bir: bir experiment 'nightly' is waiting for a free worker: all 4 are
+  still running tasks from examples that already timed out, and Python cannot
+  stop a thread. The run continues as they return.
+```
+
+Said once per run, on the first example that waits longer than a whole timeout.
+Bounding the run itself would need a budget for the run rather than for each
+example, which is not something `run_experiment()` takes.
+
 A run that returns with tasks still going says so once, on the `bir` logger:
 
 ```
