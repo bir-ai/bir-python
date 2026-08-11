@@ -1,6 +1,6 @@
 # Bir Python SDK — Improvement Roadmap
 
-> Current baseline: **v0.3.0**, audited **2026-08-10**.
+> Current baseline: **v0.3.0**, audited **2026-08-11**.
 >
 > This document contains only work that is still open. Completed work belongs in
 > `CHANGELOG.md`; implementation details and copy-paste task prompts belong in
@@ -15,11 +15,11 @@ Python 3.10–3.14. The runtime package has no third-party dependencies, ships P
 
 Measured at this audit on CPython 3.14.6:
 
-- 18,147 lines of runtime source across 40 modules — 19 dependency-free
+- 18,611 lines of runtime source across 40 modules — 19 dependency-free
   integration modules plus the core, evaluation, storage, transport, and CLI
   modules;
-- 1,756 tests (1,755 passing, 1 skipped, 1,969 subtests) in 49 files, running in
-  17.1 s wall under coverage instrumentation at **94.59%** branch coverage,
+- 1,797 tests (1,796 passing, 1 skipped, 1,988 subtests) in 49 files, running in
+  16.0 s wall under coverage instrumentation at **94.68%** branch coverage,
   against a CI floor of 89%, with strict resource-warning handling, Ruff
   lint/format, Pyright, strict MkDocs, example smoke tests, and hermetic
   wheel/sdist release verification;
@@ -33,21 +33,22 @@ Measured at this audit on CPython 3.14.6:
 Every item from the previous list shipped and is in `CHANGELOG.md`. This list is
 not a continuation of it.
 
-The previous five audits worked the recording path: where it runs code the SDK
-did not write, what reaches the terminal on the CLI's rendering path and then on
-its error channel, how `bir tail` and rotation compose, what the OTLP attribute
-names mean against the release the extra installs, and which fields redaction is
-aimed at. This one went where they did not. The evaluation and experiment half
-was driven as a product — the gate's decision under partial failure, the
-evaluator-name contract, concurrency at eight workers, report rendering — and it
-produced three of the four items it raised, including the P1. Storage pressure
-was driven for real rather than simulated: a 1 MB HFS+ volume filled by an actual
-recording workload, which produced the fourth and, while that one was being
-fixed, a fifth. All five have shipped. The remaining axes — Unicode and encoding
-end to end
-(what the store accepts, what survives a locale, what each renderer can encode),
-cost, usage and clock arithmetic, and sampling and the kill switch under
-contention — produced no item and are recorded below with their numbers.
+The six previous audits worked the *recording* path and then the *evaluation*
+one: where recording runs code the SDK did not write, what reaches the terminal
+on the CLI's rendering path and then on its error channel, how `bir tail` and
+rotation compose, which fields redaction is aimed at, what a full disk leaves
+behind, and what the gate decides under partial failure. All of them treated the
+server as a fixture. This one pointed the other way and asked what the SDK
+*believes*: the transport was driven against real local HTTP servers that answer
+in ways the Bir server would not — a redirect, a body larger than the store, a
+response whose own numbers are impossible — and that produced two items. The
+third came from asking what a long-lived process accumulates, driven by counting
+descriptors and threads across 20,000 events, 50 prunes, and a run whose examples
+all time out. The fourth came from the public API surface as a contract: what a
+caller can pass that the type hints permit and the implementation writes into the
+schema anyway. Two further axes — `@observe` against every callable shape its
+hints allow, and where the trace context is and is not visible across threads and
+asyncio — produced no item and are recorded below with their numbers.
 
 ## Product and engineering guardrails
 
@@ -69,25 +70,256 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-Every item this audit raised has shipped and is in `CHANGELOG.md`: the P1, an
-`eval-gate` that scored only the examples that survived; the store a full disk
-filled and `bir prune` refused to read; the append that destroyed the next event
-by landing on an unfinished write, found while shipping that one; the report
-`--output` truncated before it could fail; and the two evaluators that shared one
-name and one aggregate. **This list is empty. The next change here starts with a
-new audit.**
+| # | Improvement | Priority | Size | Primary outcome | Depends on |
+|---|---|---|---|---|---|
+| 1 | A redirect turns `bir send` into a report of a delivery that never happened | P1 | S | A send that reports success has posted the events | — |
+| 2 | The batch response is believed about its own size and its own numbers | P2 | M | A server cannot make the CLI print impossible arithmetic or read a store's worth of body | 1 |
+| 3 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
+| 4 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
+
+### 1. A redirect turns `bir send` into a report of a delivery that never happened
+
+**Why.** `_post_event_batch` (`bir/_sending.py:117-153`) and `_post_event`
+(`:176-202`) call `urllib.request.urlopen`, which uses the default opener and so
+includes `HTTPRedirectHandler`. For a POST, that handler follows 301, 302, and
+303 by reissuing the request as a **GET with no body**, at whatever host the
+`Location` header names. The events are never sent, and the redirect target's
+answer is parsed as the batch result.
+
+Driven with two local HTTP servers — the one the operator configured, which
+answers every POST with a redirect, and a second one it points at:
+
+```
+$ bir send --path traces.jsonl --server http://127.0.0.1:50891 --mark-sent
+exit 0
+accepted=99 attempted=3 skipped=0
+
+the other host saw:                    ['GET /v1/events/batch']
+event bytes delivered to either host:  0
+traces.jsonl.sent now holds:           {"event_ids":["not-a-real-id"]}
+```
+
+A second `bir send` prints the same thing. Nothing on stdout, stderr, or the exit
+code distinguishes this from a successful upload of every event in the store.
+
+The status matters and 307/308 behave differently, which is worth pinning
+because it is the handler's rule rather than Bir's:
+
+```
+301 Moved      accepted=1 attempted=2   elsewhere saw GET /v1/events
+302 Found      accepted=1 attempted=2   elsewhere saw GET /v1/events
+303 See Other  accepted=1 attempted=2   elsewhere saw GET /v1/events
+307 Temporary  RuntimeError: … HTTP 307  elsewhere saw nothing
+308 Permanent  RuntimeError: … HTTP 308  elsewhere saw nothing
+```
+
+`send_experiment` (`bir/_eval_persistence.py:483`) opens the same way and is
+saved only by a stricter response check: the redirect target's answer failed on
+`bir server experiment response field 'id' must be a non-empty string`. It is one
+validator away from the same silence.
+
+Nothing in the SDK asked for redirects. `--server URL` is documented as the
+address of the local Bir server and `_events_endpoint` (`bir/_sending.py:68-72`)
+appends a fixed path to it; a cross-origin hop is a policy no one chose, and it
+also silently downgrades `https` to `http` if the `Location` says so.
+
+No test pins the current behavior, and none could: the suite patches
+`urllib.request.urlopen` with a fake in all 33 places it exercises sending, and
+`grep -rn "HTTPServer\|socketserver" tests/` finds nothing, so the real opener
+has never run against a real server and a redirect never reaches the code under
+test.
+
+**Scope.**
+
+- Send through an opener built without `HTTPRedirectHandler`, so a 3xx is
+  reported like any other refusal rather than followed.
+- Decide and record what the message says. A redirect is not a server error and
+  the operator's likely cause is a misconfigured `--server` (a proxy, a trailing
+  path, `http` where the server wants `https`), so the message should name the
+  status and the `Location` it declined to follow — bounded and escaped like
+  every other body the error channel prints.
+- Apply it to `send_experiment` as well, which shares the shape and is currently
+  protected only by a field check.
+- Add a test that drives a real local HTTP server rather than a patched
+  `urlopen`. That is what would have caught this, and the suite has no such test
+  today.
+
+**Done when** a `bir send` whose server answers 301, 302, 303, 307, or 308 exits
+non-zero, names the status, and posts nothing to the redirect target.
+
+### 2. The batch response is believed about its own size and its own numbers
+
+**Why.** `_batch_result_from_response` (`bir/_sending.py:156-173`) checks that
+`accepted` is an `int` and that `event_ids` is a list of `str`, and nothing else.
+It never compares either against what was sent. `SendEventsResult.skipped`
+(`bir/_sending.py:30-34`) then computes `max(attempted - accepted, 0)` and the
+CLI prints all three. Driven against a local server that answers each POST with a
+chosen body, for a store holding 3 events:
+
+```
+server said                              bir send printed                exit
+{"accepted": 99,  "event_ids": ["a"]}    accepted=99 attempted=3 skipped=0   0
+{"accepted": -5,  "event_ids": []}       accepted=-5 attempted=3 skipped=8   0
+{"accepted": 3, "event_ids": ["x","y","z"]}  accepted=3 attempted=3 skipped=0   0
+```
+
+The second line is arithmetic no store can produce: more events skipped than were
+attempted, from a negative acceptance. `--json` emits the same numbers, so a
+pipeline gating on `accepted` gets them too.
+
+The body is also read without a bound on the success path. `_post_event_batch`
+does `response.read()` whole, deliberately — the comment at `:157-159` says a
+large batch's accepted ids are legitimately long, which is true — but nothing
+ties "legitimately long" to the batch. A 200 response carrying a 200 MB
+`event_ids` string for a **one-event** send:
+
+```
+peak RSS before:  31 MB
+peak RSS after:  699 MB      (accepted=1, in 0.7 s)
+```
+
+That is the one place in the SDK where a single value's size is unbounded. The
+loaders stream, `prune` is disk-backed, the upload spool is disk-backed, and the
+*error* body was bounded to 500 characters by an earlier audit
+(`_MAX_REPORTED_BODY_CHARS`, `bir/_sending.py:85`) — the success body was left
+out of that work because it has to be parsed.
+
+No test pins any of this. `tests/test_sending_errors.py` covers malformed
+responses that are *rejected* (not JSON, not an object, wrong types); nothing
+sends a well-formed response whose numbers or size are impossible.
+
+**Scope.**
+
+- Reject a batch response whose `accepted` is negative or exceeds `attempted`,
+  and whose `event_ids` holds more ids than events were sent, with the same
+  "invalid batch response" error those checks already raise.
+- Bound the success read by what was sent rather than by a constant: the ids of
+  N events cannot exceed N × (id length + separator) plus a small envelope, so
+  the limit is computable at the call site and never refuses a legitimate batch.
+- Decide and record whether the ids are also checked for being *the* ids sent, or
+  only for their count. Matching them is what makes `--mark-sent` trustworthy;
+  the cost is holding the sent ids for the duration of the request, which the
+  batch path already does.
+- Decide and record what happens to `skipped` when a server is refused mid-run —
+  today the whole send raises, which is probably right, but it should be stated.
+
+**Done when** a batch response claiming more acceptances than the events sent, or
+carrying more bytes than those events' ids could occupy, is refused instead of
+reported.
+
+### 3. A serial run with a timeout holds one thread per timed-out example
+
+**Why.** `_run_example_capturing_sync` (`bir/evals.py:1549-1592`) gives every
+example its own `ThreadPoolExecutor(max_workers=1)` when `timeout` is set, and
+abandons it with `shutdown(wait=False)` when the example times out. The
+docstring explains why — a shared executor would make the next example wait
+behind a hung one, defeating the timeout — but nothing bounds how many abandoned
+workers pile up, and `max_workers=1` is the default.
+
+Driven with 400 examples whose task sleeps 30 s and a 5 ms timeout:
+
+```
+max_workers=1   400 examples, 400 timed out, run took 2.70 s, peak live threads: 402
+                threads still alive when run_experiment returned: 401
+                they drain only as their tasks return, up to 30 s later
+```
+
+The threaded path bounds the same workload at `max_workers` — the earlier
+20,000-event and 50-prune sweeps showed no growth in descriptors, threads, or
+temporary directories anywhere else, so this is the one place a long run
+accumulates. A hung network call is exactly what the timeout exists for, so the
+dataset size is the only limit on the thread count.
+
+Tests pin the surrounding behaviour but not this. `tests/test_evals.py`'s timeout
+cases assert the recorded error, the preserved order, and that queue time is
+excluded; none counts threads, and none uses a dataset large enough to notice.
+
+**Scope.**
+
+- Bound the abandoned workers. The options are a shared executor that grows to a
+  cap, a cap on concurrently abandoned workers after which the run waits, or
+  refusing to start a serial timed run above some dataset size — the first keeps
+  the timeout's meaning, the second trades it for a bound, and the third is
+  honest but unhelpful.
+- Decide and record what happens when the cap is reached. Waiting for a hung task
+  reintroduces exactly what the per-example executor was built to avoid, so
+  whatever is chosen has to say which of the two properties it keeps.
+- Report it rather than only bounding it: a run that abandoned workers should say
+  how many are still running when it returns, the way a rotation gap and a
+  repaired store already report.
+- Add a benchmark or test that counts live threads, since nothing does.
+
+**Done when** a serial run over a dataset of any size, all of whose examples time
+out, holds a bounded number of live threads.
+
+### 4. A prompt's `name` and `version` are written with whatever type they were given
+
+**Why.** `prompt()` (`bir/_sdk.py:1128-1161`) validates `template` and `rendered`
+with `isinstance` and rejects an empty `name` or `version`, but never checks that
+either of those two *is a string*. Whatever is passed is written into the event:
+
+```
+declared: name: str, version: str | None
+
+prompt(name=3)             recorded {"name": 3}
+prompt(name=3.5)           recorded {"name": 3.5}
+prompt(name=True)          recorded {"name": true}
+prompt(name={'a': 1})      recorded {"name": {"a": 1}}
+prompt(name=['a'])         recorded {"name": ["a"]}
+prompt(version=3)          recorded version=3        json type=int
+prompt(version={'major':3})recorded version={"major": 3}   json type=dict
+```
+
+Every one of those loads back through `load_events` without complaint, so a
+consumer reading `metadata.prompt.name` gets a string, a number, a boolean, or an
+object depending on what the application happened to pass. That is a
+`schema_version = "1.0"` field, and the stability page says field types do not
+change within `1.0` (`docs/site/stability.md`, "Recorded data").
+
+The contrast is inside the same module. Every other name goes through
+`_validate_event_name` (`bir/_config.py:169-174`), which raises
+`TypeError: bir <field> must be a string` — measured on the neighbouring
+primitive:
+
+```
+bir.generation(name=3)          TypeError: bir generation name must be a string
+bir.generation(name={'a': 1})   TypeError: bir generation name must be a string
+bir.prompt(3)                   accepted, recorded as {"name": 3}
+```
+
+So the validator this needs already exists and is used everywhere else; `prompt`
+is the one caller that does not reach for it.
+
+No test pins the current behavior. `tests/test_sdk.py`'s prompt cases pass
+strings throughout and assert the recorded shape; nothing passes a non-string.
+
+**Scope.**
+
+- Route `name` and `version` through `_validate_event_name`, which already
+  produces the empty-string error these two raise by hand, so the two checks
+  collapse into one call each.
+- Decide and record whether this is a breaking change worth a deprecation. It
+  turns a silent acceptance into a `TypeError`, and a caller passing an `int`
+  version is relying on behaviour the type hints never promised — but it is still
+  a raise where there was none, so it belongs in a `Changed` entry with the
+  migration named (`str(version)`).
+- Sweep the remaining public entry points for the same gap rather than fixing
+  only the one found, and record what the sweep covered.
+
+**Done when** `bir.prompt()` raises `TypeError` for a non-string `name` or
+`version`, with the same message shape every other name already produces.
 
 ## Sequencing
 
-Nothing is queued. What is left below is the record: what must not be reopened,
-what was driven and declined, and what was checked and found sound, so the next
-audit starts from evidence rather than from a blank page.
+Items 1 and 2 are the same surface and should be taken together, 1 first: both
+land in `bir/_sending.py`, both need the same new test scaffolding — a real local
+HTTP server instead of a patched `urlopen` — and item 2's bound is easier to
+reason about once a response is known to have come from the host that was asked.
+Item 2 depends on 1 only in that order, not in mechanism.
 
-The full-disk story is finished on both sides: the store's own writer repairs an
-interrupted write on its next append, and `bir prune` repairs one nothing is
-recording into any more. What remains of it is recorded under "Checked and found
-sound" — prune stages the survivors before replacing the original, so it needs
-free space to free space, which is a property of staging rather than a defect.
+Items 3 and 4 are independent of those and of each other. Item 4 is the smallest
+piece of work here; item 3 is the only one that needs a decision about which of
+two properties to keep.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -134,139 +366,104 @@ list that names the same evaluator twice.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-The gate that shipped from this audit sits beside the declined "A failing
-evaluator discards the example's output and the other evaluators' scores" below
-and does not reopen it. That asks whether an evaluator that raises should void
-the example; the gate work asked whether the gate should notice a voided example
-at all, and the answer does not depend on what voided it. The two compose in one
-direction only: while that decision stands, an evaluator failure also shrinks the
-gate's denominator, and it is no longer silent when it does.
+Items 1 and 2 sit beside "escaping and bounding what the CLI prints on its error
+channel" and reopen none of it. That work asked what a server's *error* body may
+do to the operator's terminal, and it holds: the error path escapes and stops at
+500 characters. These ask what the SDK does with a response it treats as a
+*success* — a redirect it follows and a 200 body it reads whole and believes —
+which that work explicitly scoped out, saying the bound is on what a message
+shows rather than on what is parsed.
 
-The distinct evaluator names that shipped from this audit sit beside that same
-declined entry and beside the gate work, and reopen neither. The declined one
-asks what a *failing* evaluator does to its example; the gate work asked whether
-the gate notices an example nobody scored. This asks what happens when two
-evaluators that both succeed are filed under one name, which none of the three
-had reason to look at: each of them starts from a score and this one is about a
-score's address.
+Item 2 also sits beside "reporting a failed OTLP export instead of counting the
+spans it built" without reopening it. Both are the same failure in shape — a
+count reported that no delivery backs — but that one was about a number the SDK
+computed itself before the export ran, and this is about a number the server
+chose.
+
+Item 3 sits beside "experiment timeouts" and does not reopen them. The timeout
+mechanism works exactly as documented: 400 of 400 examples timed out, were
+recorded as error rows, kept dataset order, and the run returned in 2.70 s. This
+is about what the mechanism leaves running behind it, which that work named as a
+consequence ("a timed-out task keeps running in the background") without bounding
+it.
 
 ## Declined
 
-Six things were driven and deliberately left off the list. The first four were
-declined by earlier audits, re-measured here, and still hold.
+Eight things were driven and deliberately left off the list. The first four were
+declined by earlier audits and still hold; the next two were declined by the
+previous audit and re-confirmed here; the last two are new.
 
 **A failing evaluator discards the example's output and the other evaluators'
 scores.** With `raise_on_error=False`, one evaluator that raises turns the whole
 example into an error row: `output=None`, `scores=[]`, and an error message that
 does not name which evaluator failed, even though the task succeeded and a second
-evaluator had already scored it. The guard is at the example boundary
-(`bir/evals.py:1499-1502`) while the caller's code runs inside a list
-comprehension at `:1182`. Still declined for the same reason: it is a recorded
-decision, not a defect. `docs/EVALUATOR_IMPLEMENTATION_GUIDE.md:611-612` says
-"Evaluator failure: treat like task failure unless a future explicit option
-separates task failures from evaluator failures." Reopening it needs a product
-argument.
+evaluator had already scored it. Still declined for the same reason: it is a
+recorded decision, not a defect.
+`docs/EVALUATOR_IMPLEMENTATION_GUIDE.md` says "Evaluator failure: treat like task
+failure unless a future explicit option separates task failures from evaluator
+failures." Reopening it needs a product argument.
 
 **`Dataset.to_jsonl()` truncates as well as redacts.** The default `redact=True`
-runs the export through `_safe_capture`, so a dataset does not round-trip.
-Re-measured on the current code:
-
-```
-nesting depth 6: intact
-nesting depth 7: TRUNCATED, replaced with [max_depth]
-```
-
-and with capture limits configured for tracing, the same export mangles keys as
-well as values:
-
-```
-configure(max_value_length=20, max_collection_items=1)
-{"expected":"x","id":"q1","input":{"question":"What is the refund w…[truncated]",
- "…[truncated]":"…[truncated]"},"metadata":{}}
-```
-
-`_MAX_CAPTURE_DEPTH = 6` (`bir/_capture.py:19`) is not configurable, so the depth
-cut applies to every `to_jsonl()` call regardless of settings. Still declined:
-the method's own docstring already says it uses the same safe capture behavior as
-trace and experiment artifacts, which is the truncating one, and the narrower
-"redacts common secret-like values" wording in
-`docs/site/evals-experiments.md:179` and `docs/site/capture-privacy.md:258-259`
-is the only gap. A docs sentence is too small to carry an item.
+runs the export through `_safe_capture`, so a dataset does not round-trip past
+nesting depth 6, and with capture limits configured for tracing the same export
+mangles keys as well as values. `_MAX_CAPTURE_DEPTH = 6` (`bir/_capture.py:19`)
+is not configurable. Still declined: the method's own docstring already says it
+uses the same safe capture behavior as trace and experiment artifacts, and the
+narrower "redacts common secret-like values" wording elsewhere is the only gap. A
+docs sentence is too small to carry an item.
 
 **Retry classification for HTTP 429.** `_is_retryable_status`
 (`bir/_sending.py:75-78`) retries 5xx only, so a rate-limited `bir send` fails
 immediately and `Retry-After` is ignored. Still declined because `send_events`'
-docstring states the rule outright — a 4xx response is a permanent rejection
-raised without retry — and the ingestion server this talks to is the local Bir
-server, which does not rate-limit. Worth revisiting if the SDK ever sends to a
-hosted endpoint.
+docstring states the rule outright and the ingestion server this talks to is the
+local Bir server, which does not rate-limit. Worth revisiting if the SDK ever
+sends to a hosted endpoint — and item 1 is the first evidence that the transport
+is exposed to more than that one server.
 
 **A naive timestamp shifts on OTLP export.** `_expect_datetime_string`
-(`bir/_storage.py:1419-1425`) accepts any string `datetime.fromisoformat` parses,
-including a timezone-naive one, and `_iso_to_unix_nano` (`bir/integrations/otel.py:610-617`)
-then reads it as local time. Re-measured on this UTC+3 machine:
+(`bir/_storage.py`) accepts any string `datetime.fromisoformat` parses, including
+a timezone-naive one, and `_iso_to_unix_nano` (`bir/integrations/otel.py`) then
+reads it as local time — 10,800,000,000,000 ns apart on this UTC+3 machine. Still
+declined because Bir's own writer always records an offset, so only a store
+written by another tool or edited by hand can produce it.
 
-```
-2026-08-10T12:00:00+00:00  ->  1786363200000000000
-2026-08-10T12:00:00        ->  1786352400000000000
-difference                      10800000000000 ns
-```
+**A currency code is stored and grouped exactly as given**, so six recordings
+that all meant dollars report as five lines in `bir stats`. Still declined:
+case-folding or trimming would make the stored value differ from what the
+application passed, which is the opposite of the boundary this codebase drew for
+identity fields, and validating an ISO-4217 shape would reject calls that work
+today. The rule that matters — costs are never summed across currencies — holds
+exactly.
 
-Still declined because Bir's own writer always records an offset —
-`_now()` is `datetime.now(timezone.utc).isoformat()` (`bir/_sdk.py:2289-2290`) —
-so only a store written by another tool or edited by hand can produce it, and the
-docstring at `otel.py:613-615` scopes its claim to what Bir records. Noted again
-because the loader's acceptance is wider than the exporter's assumption.
+**A non-UTF-8 byte in a store cannot be skipped**, because
+`_iter_trace_events_from_file` decodes strictly and iterates outside the `try`,
+so the failure escapes past `--skip-invalid`. Still declined because Bir cannot
+produce that store: every writer goes through `json.dumps` with the default
+`ensure_ascii=True`, so a torn write cuts between ASCII characters.
 
-The next two were driven for the first time by this audit.
+Two more were driven for the first time here and left off.
 
-**A currency code is stored and grouped exactly as given.** `_validate_currency`
-(`bir/_config.py:298-303`) accepts any non-empty string with no normalization and
-no length bound, and `_UsageTotals.add` (`bir/cli.py:257-273`) buckets by that
-exact string. Six recordings that all meant dollars:
+**`install_trace_id_filter()` attaches a new filter every call.** Three calls
+left three filters on the root handler, each doing the same two contextvar reads
+per record. Declined because it is a documented decision, not an oversight: the
+function's own docstring says "Calling this more than once attaches independent
+filters; each stamps the same attributes, so the duplication is harmless but you
+can avoid it by reusing the returned instance." The stamping itself was driven
+and is correct — `None` outside a trace, the trace id inside it, a distinct span
+id inside a nested span, `None` again in a plain thread — so the only cost is
+work proportional to how many times an application calls it, which the docstring
+already tells it not to do.
 
-```
-$ bir stats --json
-   ' USD'          total=2.0
-   'US Dollars'    total=2.0
-   'USD'           total=4.0
-   'Usd'           total=2.0
-   'usd'           total=2.0
-```
-
-A 5,000-character currency is also accepted. Declined because the alternatives
-are worse than the symptom. Case-folding or trimming would make the stored value
-differ from what the application passed, which is the opposite of the boundary
-this codebase just wrote down for identity fields — a `model` and an event `name`
-are recorded as given for the same reason. Validating an ISO-4217 shape would
-reject `set_cost(currency=...)` calls that work today, for a field whose only
-consumer is a grouping key in one table. The rule that matters — costs are never
-summed across currencies — holds exactly, and it is the rule that would be unsafe
-to break.
-
-**A non-UTF-8 byte in a store cannot be skipped.** `_iter_trace_events_from_file`
-(`bir/_storage.py:225-248`) decodes strictly and iterates the file inside the
-`with`, but outside the `try`, so a decode failure escapes past the `on_invalid`
-callback that `--skip-invalid` installs. One byte flipped to `0xFF` inside a JSON
-string on line 2 of a 3-line store:
-
-```
-bir traces                 exit 1  bir: 'utf-8' codec can't decode byte 0xff in position 470
-bir traces --skip-invalid  exit 1  bir: 'utf-8' codec can't decode byte 0xff in position 470
-bir stats / show / export-otel     the same, 0 of 3 traces readable
-bir prune                  exit 1  the same; the store was left at its 990 bytes
-```
-
-The message also names neither the file nor the line, where every other read
-error names both. Declined because Bir cannot produce this store. Every writer
-goes through `json.dumps` with the default `ensure_ascii=True`, so what lands on
-disk is pure ASCII whatever was recorded — measured with a name of
-`"grüße 日本語 🙂"`, which round-tripped byte-identical from an 845-byte store that
-`raw.isascii()` reports as True, with no Unicode normalization applied. A torn
-write therefore cuts between ASCII characters and cannot leave a partial
-multi-byte sequence, which is the one damage mode `--skip-invalid` exists for. A
-store that fails to decode came from another tool, an editor, or the disk, and
-none of those is a case the flag advertises.
+**A trace does not follow work handed to a plain thread.** Recording inside a
+`threading.Thread` or a `ThreadPoolExecutor` worker started from within a trace
+finds no active trace, and `bir.span()` raises
+`RuntimeError: bir.span() requires an active trace`. Declined because it is
+correct contextvar behaviour, it is consistent — the accessors and `span()` agree
+in every case measured — and the error names the fix. `docs/site/stability.md`
+already says per-trace state lives in context variables, which are per-thread.
+The full table is under "Checked and found sound"; a docs example showing
+`contextvars.copy_context()` around a submitted job would help, and is a docs
+sentence rather than an item.
 
 Windows-specific paths were **not** driven. `_InterProcessFileLock`
 (`bir/_storage.py:125-171`) takes a different branch there — `msvcrt.locking` with
@@ -275,101 +472,80 @@ sustained contention. Nothing here can measure that, so nothing is claimed about
 it either way; CI's Windows leg is the only evidence this audit has. The
 free-threaded build was likewise not driven: no free-threaded interpreter is
 installed on this machine (`sysconfig.get_config_var("Py_GIL_DISABLED")` is `0`),
-so `tests/test_free_threading.py` ran on the GIL build, where it proves the
-uninteresting half by its own docstring's admission at `:10-12`. A clock that
-steps backwards was not driven either: `_now()` reads the wall clock at an
-event's start and again at its end with no monotonic guard, and the loader
-rejects the result outright — `Trace file … line 1 has end_time before
-start_time` (`bir/_storage.py:1329`) makes the whole store unreadable — but no
-means of stepping the system clock was available here, so whether the writer can
-be made to produce that event is untested and nothing is claimed about it.
-`scripts/verify_release.py` was run and passed; its one historical
-no-output failure did not reproduce, and no cause is invented for it here.
+so `tests/test_free_threading.py` ran on the GIL build. A clock that steps
+backwards was not driven either, for the reason the previous audit recorded: no
+means of stepping the system clock was available. `scripts/verify_release.py` was
+run and passed; its one historical no-output failure did not reproduce, and no
+cause is invented for it here. TLS was not driven: every server stood up for this
+audit was plain `http` on `127.0.0.1`, so nothing is claimed about certificate
+verification, which `urllib` would perform with the default context.
 
 ## Checked and found sound
 
-Seven areas were driven and need no item. The numbers are here so the next audit
+Six areas were driven and need no item. The numbers are here so the next audit
 can see what this one's coverage actually was.
 
-**The trace store filling a real disk.** A 1 MB HFS+ volume, the default
-unbounded single-file configuration, and 4,000 traces recorded until
-`f_bavail` reached 0. All 4,000 calls returned normally, no exception reached the
-caller, 2,709 traces were written, and one `ERROR bir:` line named `[Errno 28]`
-and said recording was paused — one message for the outage, not one per dropped
-event. This is the "reporting rather than raising a failed trace-store write"
-feature doing exactly what it says. Pruning the store it leaves behind, and
-repairing it on the next append, both shipped from this audit. What remains is
-that prune stages the survivors before replacing the original, so it needs free
-space to free space: on a volume with literally no bytes left it fails at the
-staging file with a clear `[Errno 28]`, while `--dry-run` still reports what is
-reclaimable. 57 KB of headroom was enough to reclaim 876 KB. That is a property
-of staging, which is what makes an interrupted prune safe, rather than a
-defect.
+**`@observe` against every callable shape its hints permit.** Thirteen shapes, all
+recording exactly one trace root and propagating what they should: a plain
+function, a generator consumed whole, a generator abandoned after two of five, an
+async generator, a `functools.partial`, a callable object, a bound method, a
+`staticmethod`, a `classmethod`, a function decorated twice (which records
+`span+trace`), a recursive function at depth 5 (`span×5 + trace` under one root),
+a function returning a context manager, and a function that raises (recorded
+`error`, exception propagated). None raised at the caller, and none failed to
+record.
 
-**The experiment summary under the same pressure.** With the volume padded to
-zero free space, re-running an experiment onto an existing summary raised
-`OSError: [Errno 28]` from the staging file, and the previous summary was still
-318 bytes, still parsed, byte-identical. `_write_experiment_summary`
-(`bir/_eval_persistence.py:330-351`) stages and replaces, and it holds.
+**Where the trace context is visible, and whether the primitives agree about it.**
 
-**Experiment concurrency at eight workers.** 200 examples with randomized
-per-example sleeps, run at `max_workers=1` and `max_workers=8`. Both produced 200
-results in dataset order, identical aggregates, and JSONL rows in identical
-order: `rows_serial == rows_parallel`, 200 and 200. Ordering, aggregation, and
-persistence do not depend on completion order.
+```
+where                    trace_id seen  span_id seen  bir.span() works
+inline                   True           True          True
+threading.Thread         False          False         RuntimeError
+ThreadPoolExecutor       False          False         RuntimeError
+coroutine                True           True          True
+asyncio.to_thread        True           True          True
+```
 
-**Sampling and the kill switch under contention.** Eight recorder threads against
-one flipper calling `configure(enabled=…)` every 0.5 ms for 3 s: 149,377 traces
-attempted, 0 exceptions escaped to a caller, 7,009 lines written, 0 unparseable,
-7,009 distinct event ids. 579 child events were left without a root, which is the
-documented semantic of a per-event kill switch — `bir/_sdk.py:257-261` and
-`docs/site/sampling-service-metadata.md:113-114` both say a trace already in
-flight when recording is disabled stops writing immediately, so an operator who
-disables mid-trace keeps the part already written — and the read commands
-already report those events. Sampling, decided once per trace root, produced none: 4,000
-traces at `sample_rate=0.25` gave 1,020 roots (25.5%), 1,020 child events, 0
-children whose root was sampled out, and 0 roots with no child. Flipped
-deterministically inside a live trace, both behave as their docstrings say: a
-trace in flight when recording is disabled writes nothing at all, a trace started
-while disabled stays off after re-enabling, and a sampling rate changed mid-trace
-does not alter the decision already made.
+The accessors and `span()` agree in every row: there is no case where
+`get_current_trace_id()` reports a trace that `span()` then refuses. The
+`RuntimeError` names the fix. The log-correlation filter matches the same table
+exactly — `None` outside, the ids inside, `None` again in a plain thread.
 
-**Unicode end to end.** A name of `"grüße 日本語 🙂"` produced an 845-byte store
-that is pure ASCII, round-tripped byte-identical through `load_traces`, and was
-not normalized. A surrogate-escaped string of the kind `os.fsdecode` returns
-(`'report-\udcff.pdf'`) was recorded through `trace`, `generation`, `retrieval`,
-`span` metadata, and a dataset `example_id` without raising; the store stayed
-ASCII; `load_events`, `load_traces`, `bir traces`, `bir show`, `bir stats`, and
-all three `--json` forms exited 0 with valid UTF-8 on stdout. The human-rendered
-tables write the escaped byte back out unchanged, which round-trips the filename
-rather than losing it, and was identical under an unset locale, `LANG=en_US.UTF-8`,
-and `LC_ALL=C`. Every file the SDK opens passes `encoding="utf-8"` explicitly —
-10 of 10 text opens across `_storage.py`, `_eval_persistence.py`, and
-`_eval_models.py` — so no read or write depends on the locale. The one command that could not survive it was
-`experiment-report --output`, which this audit fixed: surrogates are escaped
-where every other experiment-derived string is escaped for its format.
+**What a long-lived process accumulates.** 10,000 traces of two events each with
+rotation at 32 KB: file descriptors 4 → 4, threads 1 → 1, four rotated files as
+configured. Fifty `prune` runs over a 200-trace store: descriptors 4 → 4, and
+zero leftover `bir-prune-index-*` temporary directories. The only place anything
+accumulated is item 3.
 
-**Very large usage figures.** `set_usage(input_tokens=2**63)` and
-`set_usage(input_tokens=10**30)` were both accepted, and `bir stats --json`
-reported their exact sum, `{'input': 1000000000009223372036854775808, ...}`,
-which re-parsed to the same integer: Python ints throughout, no float rounding
-anywhere in the accumulation (`bir/cli.py:257-273`).
+**`BIR_*` environment parsing.** Eleven values driven through a fresh
+interpreter. Every malformed one is rejected before the process can record
+anything, with a message naming the variable: `BIR_SAMPLE_RATE=abc`,
+`BIR_DISABLED=maybe`, `BIR_MAX_VALUE_LENGTH=-1`, and `BIR_MAX_VALUE_LENGTH=1e3`
+all exit 1. `BIR_CAPTURE_INPUTS=TRUE` is accepted case-insensitively, and an empty
+value is treated as unset. One cosmetic inconsistency, too small to carry an
+item: `BIR_SAMPLE_RATE=2` raises `bir sample_rate must be between 0.0 and 1.0`,
+which is the only one of the eleven that does not name the variable.
 
-**A read-only store directory.** With the trace directory at mode `0o500` and the
-store file already present, recording continued normally and both traces were
-readable afterwards — the append re-opens an existing file, which POSIX permits.
-`bir prune` raised `[Errno 13] Permission denied` on the staging file it could
-not create there, which is the documented behavior for a command invoked for its
-effect.
+**The `prompt` and `score` primitives on the value axis.** `score` rejects a
+`bool`, a `NaN`, and a call outside any trace, and accepts `1e308`. A prompt
+records only the template's SHA-256 unless capture is asked for, redacts a
+credential inside a captured `rendered` string
+(`{"rendered": "Hi [redacted]"}`), guards a variable whose `__repr__` raises
+(`"<unrepresentable X>"`), and rejects a non-mapping `variables`. Only the two
+identity fields are unguarded, which is item 4.
+
+**A server that answers slowly or not at all.** A 200 that sends its headers, a
+`Content-Length` of 1,000,000, and then one byte every 30 s was cut off by the
+socket timeout after exactly 2.0 s and reported as a transient send failure with
+the endpoint named. The timeout reaches the body read, not only the connect.
 
 The previously declined memory profile of the loaders was re-measured and has not
 moved: `load_events` peaks at 22,761 KiB and `load_traces` at 24,162 KiB for
-5,000 events, identical to the last five audits.
+5,000 events, identical to the last six audits.
 
 The OTLP dual-spelling transition is unchanged: the extra still installs
-`opentelemetry-sdk` 1.44.0 with `opentelemetry-semantic-conventions` 0.65b0, the
-same release the last audit measured against, so the superseded
-`deployment.environment` and `gen_ai.system` spellings pinned by
-`tests/test_otel_integration.py:231-281` still have a live consumer and stay.
+`opentelemetry-sdk` 1.44.0 with `opentelemetry-semantic-conventions` 0.65b0, so
+the superseded `deployment.environment` and `gen_ai.system` spellings pinned by
+`tests/test_otel_integration.py` still have a live consumer and stay.
 
 `grep -rn "TODO\|FIXME\|XXX" src/` is still empty; it stays a dead end.
