@@ -68,6 +68,34 @@ result = send_events(
 The delay is `backoff * 2**attempt`. Defaults are two retries, a 0.5-second
 backoff, and a 10-second timeout. A healthy send makes one request attempt.
 
+## Redirects are refused, not followed
+
+A 3xx answer is reported and nothing is sent:
+
+```
+bir: bir server at http://127.0.0.1:9000/v1/events/batch answered HTTP 302 with a
+redirect to http://elsewhere/v1/events; bir does not follow redirects, so nothing
+was sent. Point the server URL at the address that serves the API.
+```
+
+This is deliberate and it is not what `urllib` does by default. Its redirect
+handler answers a 301, 302, or 303 on a POST by reissuing the request as a **GET
+with no body** at whatever host the `Location` names — so the events would reach
+nobody, and the reply of a host you never configured would be parsed as the
+upload result. Bir sends through an opener with that handler replaced, so a
+redirect is a refusal like any other, on every one of 301, 302, 303, 307, and
+308, for both `send_events()` and `send_experiment()`.
+
+If you see this, the server URL is the thing to fix: a reverse proxy that
+redirects to a canonical host, a trailing path, or `http` where the server wants
+`https`. Point `--server` (or `server_url=`) at the address that serves the API
+directly.
+
+Every other default handler is kept, so proxies configured through the usual
+environment variables still apply. One consequence is worth naming: an opener
+installed globally with `urllib.request.install_opener()` no longer affects where
+Bir sends, because Bir uses its own.
+
 ## Mark accepted events locally
 
 Pass `mark_sent=True` to avoid requesting already accepted events on later

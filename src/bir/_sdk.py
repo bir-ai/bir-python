@@ -143,6 +143,11 @@ _TransientSendError = _sending_helpers._TransientSendError
 _events_endpoint = _sending_helpers._events_endpoint
 _is_retryable_status = _sending_helpers._is_retryable_status
 _read_http_error_body = _sending_helpers._read_http_error_body
+_is_redirect_status = _sending_helpers._is_redirect_status
+_redirect_refusal = _sending_helpers._redirect_refusal
+# Named for what it is at this layer: the opener every send goes through, which
+# refuses redirects rather than following them to a host nobody configured.
+_send_opener = _sending_helpers._opener
 _post_event_batch = _sending_helpers._post_event_batch
 _batch_result_from_response = _sending_helpers._batch_result_from_response
 _post_event = _sending_helpers._post_event

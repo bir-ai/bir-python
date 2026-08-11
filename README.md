@@ -419,7 +419,10 @@ and opt-in sent-ID set still grow with their ID counts. Both `send_events()`/`bi
 send` and `send_experiment()`/`bir send-experiment` retry transient failures
 (network errors, timeouts, and HTTP 5xx) with bounded exponential backoff via
 `retries` and `backoff`, while HTTP 4xx and malformed inputs fail immediately;
-`bir send` exposes these as `--retries`, `--backoff`, and `--timeout`. See
+`bir send` exposes these as `--retries`, `--backoff`, and `--timeout`. A 3xx is
+refused rather than followed — `urllib` would reissue a redirected POST as a
+bodyless GET at whatever host the `Location` names, which would report a
+successful upload of events that reached nobody. See
 [server uploads](docs/site/sending.md).
 
 ## Testing your instrumentation

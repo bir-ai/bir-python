@@ -1550,7 +1550,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
 
             self.assertEqual(code, 0)
@@ -1563,7 +1563,7 @@ class SendCommandTests(CliBaseTest):
             trace_path = workdir / "traces.jsonl"
             write_two_traces(trace_path)
 
-            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            with patch("bir._sending._opener.open", side_effect=urllib.error.URLError("connection refused")):
                 code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
 
             self.assertEqual(code, 1)
@@ -1581,7 +1581,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
 
             self.assertEqual(code, 0)
@@ -1602,7 +1602,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 code, out, err = run_cli(
                     "send",
                     "--path",
@@ -1631,7 +1631,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 first_code, first_out, first_err = run_cli(
                     "send", "--path", str(trace_path), "--server", "http://server.test", "--mark-sent"
                 )
@@ -1667,7 +1667,7 @@ class SendCommandTests(CliBaseTest):
                 return FakeHttpResponse(body.encode("utf-8"))
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     code, out, err = run_cli(
                         "send",
                         "--path",
@@ -1701,7 +1701,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 # Omitting --timeout leaves the library default (10.0) in force.
                 run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
                 # An explicit --timeout reaches the HTTP layer for the batch send.
@@ -1722,7 +1722,7 @@ class SendCommandTests(CliBaseTest):
                 body = json.dumps({"accepted": len(events), "event_ids": [event["id"] for event in events]})
                 return FakeHttpResponse(body.encode("utf-8"))
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 code, out, err = run_cli(
                     "send",
                     "--path",
@@ -1746,7 +1746,7 @@ class SendCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid --retries must be rejected before any request")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send", "--path", str(trace_path), "--retries", "-1")
             self.assertEqual(raised.exception.code, 2)
@@ -1759,7 +1759,7 @@ class SendCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid --timeout must be rejected before any request")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send", "--path", str(trace_path), "--timeout", "-1")
             self.assertEqual(raised.exception.code, 2)
@@ -1772,7 +1772,7 @@ class SendCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid --batch-size must be rejected before any request")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 for batch_size in ("0", "-1"):
                     with self.subTest(batch_size=batch_size), self.assertRaises(SystemExit) as raised:
                         run_cli("send", "--path", str(trace_path), "--batch-size", batch_size)
@@ -1793,7 +1793,7 @@ class AutomationJsonOutputTests(CliBaseTest):
             write_two_traces(trace_path)
             response = FakeHttpResponse(json.dumps({"accepted": 2, "event_ids": ["a", "b"]}).encode("utf-8"))
 
-            with patch("urllib.request.urlopen", return_value=response):
+            with patch("bir._sending._opener.open", return_value=response):
                 code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test", "--json")
 
             self.assertEqual(code, 0)
@@ -1810,7 +1810,7 @@ class AutomationJsonOutputTests(CliBaseTest):
             run_faq_experiment(workdir)
             response = FakeHttpResponse(json.dumps({"accepted": 1, "id": "experiment-1"}).encode("utf-8"))
 
-            with patch("urllib.request.urlopen", return_value=response):
+            with patch("bir._sending._opener.open", return_value=response):
                 code, out, err = run_cli(
                     "send-experiment",
                     str(workdir / "faq.jsonl"),
@@ -1921,7 +1921,7 @@ class SendExperimentCommandTests(CliBaseTest):
             experiment_file = workdir / "faq.jsonl"
             response = FakeHttpResponse(json.dumps({"accepted": 1, "id": "experiment-1"}).encode("utf-8"))
 
-            with patch("urllib.request.urlopen", return_value=response):
+            with patch("bir._sending._opener.open", return_value=response):
                 code, out, err = run_cli("send-experiment", str(experiment_file), "--server", "http://server.test")
 
             self.assertEqual(code, 0)
@@ -1935,7 +1935,7 @@ class SendExperimentCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("send-experiment must not reach the network for a missing file")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 code, out, err = run_cli("send-experiment", str(missing))
 
             self.assertEqual(code, 1)
@@ -1957,7 +1957,7 @@ class SendExperimentCommandTests(CliBaseTest):
                 return success
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     code, out, err = run_cli(
                         "send-experiment",
                         str(experiment_file),
@@ -1985,7 +1985,7 @@ class SendExperimentCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid --retries must be rejected before any request")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send-experiment", str(experiment_file), "--retries", "-1")
             self.assertEqual(raised.exception.code, 2)
@@ -1998,7 +1998,7 @@ class SendExperimentCommandTests(CliBaseTest):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid --backoff must be rejected before any request")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 with self.assertRaises(SystemExit) as raised:
                     run_cli("send-experiment", str(experiment_file), "--backoff", "inf")
             self.assertEqual(raised.exception.code, 2)
@@ -2696,7 +2696,7 @@ class ErrorChannelRenderingTests(CliBaseTest):
                     fp=io.BytesIO(body.encode("utf-8")),
                 )
 
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 return run_cli("send", "--path", str(trace_path), "--server", "http://server.test")
 
     def test_a_rejected_send_cannot_repaint_the_terminal(self) -> None:

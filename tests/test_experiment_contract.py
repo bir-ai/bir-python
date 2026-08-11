@@ -80,7 +80,7 @@ def capture_upload_payload(fixture: dict[str, Any]) -> dict[str, Any]:
         summary_path.write_text(json.dumps(fixture["summary"]), encoding="utf-8")
 
         response = FakeHttpResponse(b'{"accepted":1,"id":"experiment-contract-1"}')
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("bir._sending._opener.open", return_value=response) as urlopen:
             send_experiment(result_path, "http://127.0.0.1:8000")
 
         request = urlopen.call_args.args[0]

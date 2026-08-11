@@ -41,8 +41,9 @@ behind, and what the gate decides under partial failure. All of them treated the
 server as a fixture. This one pointed the other way and asked what the SDK
 *believes*: the transport was driven against real local HTTP servers that answer
 in ways the Bir server would not — a redirect, a body larger than the store, a
-response whose own numbers are impossible — and that produced two items. The
-third came from asking what a long-lived process accumulates, driven by counting
+response whose own numbers are impossible — and that produced two items, the
+first of which has since shipped. The third came from asking what a long-lived
+process accumulates, driven by counting
 descriptors and threads across 20,000 events, 50 prunes, and a run whose examples
 all time out. The fourth came from the public API surface as a contract: what a
 caller can pass that the type hints permit and the implementation writes into the
@@ -72,82 +73,11 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A redirect turns `bir send` into a report of a delivery that never happened | P1 | S | A send that reports success has posted the events | — |
-| 2 | The batch response is believed about its own size and its own numbers | P2 | M | A server cannot make the CLI print impossible arithmetic or read a store's worth of body | 1 |
-| 3 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
-| 4 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
+| 1 | The batch response is believed about its own size and its own numbers | P2 | M | A server cannot make the CLI print impossible arithmetic or read a store's worth of body | — |
+| 2 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
+| 3 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
 
-### 1. A redirect turns `bir send` into a report of a delivery that never happened
-
-**Why.** `_post_event_batch` (`bir/_sending.py:117-153`) and `_post_event`
-(`:176-202`) call `urllib.request.urlopen`, which uses the default opener and so
-includes `HTTPRedirectHandler`. For a POST, that handler follows 301, 302, and
-303 by reissuing the request as a **GET with no body**, at whatever host the
-`Location` header names. The events are never sent, and the redirect target's
-answer is parsed as the batch result.
-
-Driven with two local HTTP servers — the one the operator configured, which
-answers every POST with a redirect, and a second one it points at:
-
-```
-$ bir send --path traces.jsonl --server http://127.0.0.1:50891 --mark-sent
-exit 0
-accepted=99 attempted=3 skipped=0
-
-the other host saw:                    ['GET /v1/events/batch']
-event bytes delivered to either host:  0
-traces.jsonl.sent now holds:           {"event_ids":["not-a-real-id"]}
-```
-
-A second `bir send` prints the same thing. Nothing on stdout, stderr, or the exit
-code distinguishes this from a successful upload of every event in the store.
-
-The status matters and 307/308 behave differently, which is worth pinning
-because it is the handler's rule rather than Bir's:
-
-```
-301 Moved      accepted=1 attempted=2   elsewhere saw GET /v1/events
-302 Found      accepted=1 attempted=2   elsewhere saw GET /v1/events
-303 See Other  accepted=1 attempted=2   elsewhere saw GET /v1/events
-307 Temporary  RuntimeError: … HTTP 307  elsewhere saw nothing
-308 Permanent  RuntimeError: … HTTP 308  elsewhere saw nothing
-```
-
-`send_experiment` (`bir/_eval_persistence.py:483`) opens the same way and is
-saved only by a stricter response check: the redirect target's answer failed on
-`bir server experiment response field 'id' must be a non-empty string`. It is one
-validator away from the same silence.
-
-Nothing in the SDK asked for redirects. `--server URL` is documented as the
-address of the local Bir server and `_events_endpoint` (`bir/_sending.py:68-72`)
-appends a fixed path to it; a cross-origin hop is a policy no one chose, and it
-also silently downgrades `https` to `http` if the `Location` says so.
-
-No test pins the current behavior, and none could: the suite patches
-`urllib.request.urlopen` with a fake in all 33 places it exercises sending, and
-`grep -rn "HTTPServer\|socketserver" tests/` finds nothing, so the real opener
-has never run against a real server and a redirect never reaches the code under
-test.
-
-**Scope.**
-
-- Send through an opener built without `HTTPRedirectHandler`, so a 3xx is
-  reported like any other refusal rather than followed.
-- Decide and record what the message says. A redirect is not a server error and
-  the operator's likely cause is a misconfigured `--server` (a proxy, a trailing
-  path, `http` where the server wants `https`), so the message should name the
-  status and the `Location` it declined to follow — bounded and escaped like
-  every other body the error channel prints.
-- Apply it to `send_experiment` as well, which shares the shape and is currently
-  protected only by a field check.
-- Add a test that drives a real local HTTP server rather than a patched
-  `urlopen`. That is what would have caught this, and the suite has no such test
-  today.
-
-**Done when** a `bir send` whose server answers 301, 302, 303, 307, or 308 exits
-non-zero, names the status, and posts nothing to the redirect target.
-
-### 2. The batch response is believed about its own size and its own numbers
+### 1. The batch response is believed about its own size and its own numbers
 
 **Why.** `_batch_result_from_response` (`bir/_sending.py:156-173`) checks that
 `accepted` is an `int` and that `event_ids` is a list of `str`, and nothing else.
@@ -207,7 +137,7 @@ sends a well-formed response whose numbers or size are impossible.
 carrying more bytes than those events' ids could occupy, is refused instead of
 reported.
 
-### 3. A serial run with a timeout holds one thread per timed-out example
+### 2. A serial run with a timeout holds one thread per timed-out example
 
 **Why.** `_run_example_capturing_sync` (`bir/evals.py:1549-1592`) gives every
 example its own `ThreadPoolExecutor(max_workers=1)` when `timeout` is set, and
@@ -252,7 +182,7 @@ excluded; none counts threads, and none uses a dataset large enough to notice.
 **Done when** a serial run over a dataset of any size, all of whose examples time
 out, holds a bounded number of live threads.
 
-### 4. A prompt's `name` and `version` are written with whatever type they were given
+### 3. A prompt's `name` and `version` are written with whatever type they were given
 
 **Why.** `prompt()` (`bir/_sdk.py:1128-1161`) validates `template` and `rendered`
 with `isinstance` and rejects an empty `name` or `version`, but never checks that
@@ -311,14 +241,14 @@ strings throughout and assert the recorded shape; nothing passes a non-string.
 
 ## Sequencing
 
-Items 1 and 2 are the same surface and should be taken together, 1 first: both
-land in `bir/_sending.py`, both need the same new test scaffolding — a real local
-HTTP server instead of a patched `urlopen` — and item 2's bound is easier to
-reason about once a response is known to have come from the host that was asked.
-Item 2 depends on 1 only in that order, not in mechanism.
+Item 1 should be taken next. Its dependency has already shipped — a response is
+now known to have come from the host that was asked — and the scaffolding it
+needs shipped with it: `tests/test_send_over_http.py` stands up loopback servers,
+so a response whose numbers or size are impossible can be driven the same way
+rather than through a stub.
 
-Items 3 and 4 are independent of those and of each other. Item 4 is the smallest
-piece of work here; item 3 is the only one that needs a decision about which of
+Items 2 and 3 are independent of it and of each other. Item 3 is the smallest
+piece of work here; item 2 is the only one that needs a decision about which of
 two properties to keep.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
@@ -362,25 +292,26 @@ gate on a candidate run whose examples failed, pruning a store whose final line
 an interrupted write never finished, repairing that line on the next append
 instead of writing the following event onto it, writing a report through a
 staged file so a failed render keeps the previous one, and refusing an evaluator
-list that names the same evaluator twice.
+list that names the same evaluator twice, and refusing a redirect instead of
+following it to a host nobody configured.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-Items 1 and 2 sit beside "escaping and bounding what the CLI prints on its error
-channel" and reopen none of it. That work asked what a server's *error* body may
+Item 1 sits beside "escaping and bounding what the CLI prints on its error
+channel" and does not reopen it. That work asked what a server's *error* body may
 do to the operator's terminal, and it holds: the error path escapes and stops at
-500 characters. These ask what the SDK does with a response it treats as a
-*success* — a redirect it follows and a 200 body it reads whole and believes —
-which that work explicitly scoped out, saying the bound is on what a message
-shows rather than on what is parsed.
+500 characters. This asks what the SDK does with a response it treats as a
+*success* — a 200 body it reads whole and believes — which that work explicitly
+scoped out, saying the bound is on what a message shows rather than on what is
+parsed.
 
-Item 2 also sits beside "reporting a failed OTLP export instead of counting the
+Item 1 also sits beside "reporting a failed OTLP export instead of counting the
 spans it built" without reopening it. Both are the same failure in shape — a
 count reported that no delivery backs — but that one was about a number the SDK
 computed itself before the export ran, and this is about a number the server
 chose.
 
-Item 3 sits beside "experiment timeouts" and does not reopen them. The timeout
+Item 2 sits beside "experiment timeouts" and does not reopen them. The timeout
 mechanism works exactly as documented: 400 of 400 examples timed out, were
 recorded as error rows, kept dataset order, and the run returned in 2.70 s. This
 is about what the mechanism leaves running behind it, which that work named as a
@@ -417,8 +348,8 @@ docs sentence is too small to carry an item.
 immediately and `Retry-After` is ignored. Still declined because `send_events`'
 docstring states the rule outright and the ingestion server this talks to is the
 local Bir server, which does not rate-limit. Worth revisiting if the SDK ever
-sends to a hosted endpoint — and item 1 is the first evidence that the transport
-is exposed to more than that one server.
+sends to a hosted endpoint — and the redirect that shipped from this audit is
+the first evidence that the transport is exposed to more than that one server.
 
 **A naive timestamp shifts on OTLP export.** `_expect_datetime_string`
 (`bir/_storage.py`) accepts any string `datetime.fromisoformat` parses, including
@@ -515,7 +446,7 @@ exactly — `None` outside, the ids inside, `None` again in a plain thread.
 rotation at 32 KB: file descriptors 4 → 4, threads 1 → 1, four rotated files as
 configured. Fifty `prune` runs over a 200-trace store: descriptors 4 → 4, and
 zero leftover `bir-prune-index-*` temporary directories. The only place anything
-accumulated is item 3.
+accumulated is item 2.
 
 **`BIR_*` environment parsing.** Eleven values driven through a fresh
 interpreter. Every malformed one is rejected before the process can record
@@ -532,7 +463,7 @@ records only the template's SHA-256 unless capture is asked for, redacts a
 credential inside a captured `rendered` string
 (`{"rendered": "Hi [redacted]"}`), guards a variable whose `__repr__` raises
 (`"<unrepresentable X>"`), and rejects a non-mapping `variables`. Only the two
-identity fields are unguarded, which is item 4.
+identity fields are unguarded, which is item 3.
 
 **A server that answers slowly or not at all.** A 200 that sends its headers, a
 `Content-Length` of 1,000,000, and then one byte every 30 s was cut off by the

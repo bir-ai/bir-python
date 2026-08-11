@@ -110,7 +110,7 @@ class _Server:
 def serving(server: _Server) -> Iterator[None]:
     # ``time.sleep`` is stubbed so a retry test costs nothing; the backoff
     # arithmetic itself is covered where it is computed.
-    with patch("urllib.request.urlopen", side_effect=server), patch("bir._sending.time.sleep"):
+    with patch("bir._sending._opener.open", side_effect=server), patch("bir._sending.time.sleep"):
         yield
 
 
@@ -323,7 +323,7 @@ class EndpointTests(unittest.TestCase):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("no request should be made for an empty server URL")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 for server_url in ("", "/", "///"):
                     with self.subTest(server_url=server_url):
                         with self.assertRaises(ValueError) as raised:

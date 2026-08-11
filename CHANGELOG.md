@@ -169,6 +169,63 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A redirect no longer turns `bir send` into a report of a delivery that never
+  happened. `urlopen` uses an opener carrying `HTTPRedirectHandler`, which
+  answers a 301, 302, or 303 on a POST by reissuing the request as a **GET with
+  no body** at whatever host the `Location` names. The events reached nobody,
+  and the unconfigured host's reply was parsed as the batch result. Driven with
+  two loopback servers, the configured one answering every POST with a 302:
+
+  ```
+                                          before                   after
+  bir send --mark-sent                    exit 0                   exit 1
+                                          accepted=99 attempted=3  bir: … HTTP 302 …
+  the redirect target received            GET /v1/events/batch     nothing
+  event bytes delivered anywhere          0                        0 (and it says so)
+  traces.jsonl.sent recorded              ["not-a-real-id"]        unchanged
+  ```
+
+  A second `bir send` printed the same success, and nothing on stdout, stderr,
+  or the exit code separated it from a real upload of every event in the store.
+  307 and 308 already raised, because urllib's handler refuses to convert those
+  — that was the handler's rule rather than a decision Bir had made, and all
+  five now behave the same way.
+
+  Sends go through an opener built with that handler replaced by one that
+  follows nothing, so a 3xx falls through to the default error handler and
+  arrives as an `HTTPError` with its status and headers intact. The message
+  names the status and the `Location` it declined, bounded to 500 characters
+  like every other server-chosen string an error carries, and says what to fix:
+
+  ```
+  bir: bir server at http://127.0.0.1:9000/v1/events/batch answered HTTP 302 with
+  a redirect to http://elsewhere/v1/events; bir does not follow redirects, so
+  nothing was sent. Point the server URL at the address that serves the API.
+  ```
+
+  A redirect is not retried: it is a configuration problem, not a transient one,
+  so it raises immediately like a 4xx. `send_experiment()` shares the opener and
+  the refusal; it was previously saved only by a stricter response check that
+  happened to reject the redirect target's reply.
+
+  `build_opener` keeps every other default handler, so proxies configured through
+  the usual environment variables still apply. One consequence is documented
+  rather than hidden: an opener installed globally with
+  `urllib.request.install_opener()` no longer steers where Bir sends, because
+  Bir now uses its own rather than urllib's process-wide one.
+
+  No test could have caught this. The suite stubbed `urllib.request.urlopen` in
+  all 67 places it exercised sending, and `grep -rn "HTTPServer" tests/` found
+  nothing — the real opener had never run against a real server. Those stubs now
+  patch Bir's own transport seam (the opener's `open`) rather than a standard
+  library function the code no longer calls, and a new
+  `tests/test_send_over_http.py` stands up loopback servers and drives the real
+  thing: every redirect status refused with nothing reaching the target, a
+  redirect with no `Location` header, an over-long `Location` bounded in the
+  message, `send_experiment` refusing the same way, a successful batch whose
+  bytes really cross a socket, a 4xx raised once against a 5xx retried three
+  times, and a 404 batch endpoint falling back to one request per event.
+
 - A run no longer accepts two evaluators with the same name. Every score is
   filed under its evaluator's name and nothing else, so two sharing one were
   averaged together into a number no example was given by anything — and the

@@ -1532,7 +1532,7 @@ class EvalTests(unittest.TestCase):
             )
 
             with patch(
-                "urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
+                "bir._sending._opener.open", return_value=FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
             ) as urlopen:
                 send_result = send_experiment(experiment_path, "http://127.0.0.1:8000/")
 
@@ -1560,7 +1560,9 @@ class EvalTests(unittest.TestCase):
                 path=experiment_path,
             )
 
-            with patch("urllib.request.urlopen", return_value=FakeHttpResponse(b'{"accepted":0,"id":"experiment-1"}')):
+            with patch(
+                "bir._sending._opener.open", return_value=FakeHttpResponse(b'{"accepted":0,"id":"experiment-1"}')
+            ):
                 send_result = send_experiment(experiment_path)
 
             self.assertEqual(send_result.accepted, 0)
@@ -1601,11 +1603,11 @@ class EvalTests(unittest.TestCase):
             )
             # retries=0 keeps this a single-attempt check (the retry paths are
             # covered by the dedicated tests below) so it stays fast and never sleeps.
-            with patch("urllib.request.urlopen", side_effect=http_error):
+            with patch("bir._sending._opener.open", side_effect=http_error):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
                     send_experiment(experiment_path, retries=0)
 
-            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            with patch("bir._sending._opener.open", side_effect=urllib.error.URLError("connection refused")):
                 with self.assertRaisesRegex(RuntimeError, "could not send experiment"):
                     send_experiment(experiment_path, retries=0)
 
@@ -1621,7 +1623,7 @@ class EvalTests(unittest.TestCase):
                 return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_experiment(experiment_path)
 
             # A healthy send is one request with no backoff sleep.
@@ -1644,7 +1646,7 @@ class EvalTests(unittest.TestCase):
                 return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_experiment(experiment_path)
 
             self.assertEqual(len(attempts), 2)
@@ -1666,7 +1668,7 @@ class EvalTests(unittest.TestCase):
                 return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_experiment(experiment_path)
 
             self.assertEqual(len(attempts), 2)
@@ -1687,7 +1689,7 @@ class EvalTests(unittest.TestCase):
                 return FakeHttpResponse(b'{"accepted":1,"id":"experiment-1"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_experiment(experiment_path)
 
             self.assertEqual(len(attempts), 2)
@@ -1706,7 +1708,7 @@ class EvalTests(unittest.TestCase):
                 raise urllib.error.URLError("network down")
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     with self.assertRaisesRegex(RuntimeError, "could not send experiment"):
                         send_experiment(experiment_path, retries=2, backoff=0.5)
 
@@ -1726,7 +1728,7 @@ class EvalTests(unittest.TestCase):
                 raise http_error(422, b'{"detail":"rejected"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
                         send_experiment(experiment_path)
 
@@ -1745,7 +1747,7 @@ class EvalTests(unittest.TestCase):
                 return FakeHttpResponse(b"not json")
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     with self.assertRaisesRegex(RuntimeError, "invalid experiment response"):
                         send_experiment(experiment_path)
 
@@ -1766,7 +1768,7 @@ class EvalTests(unittest.TestCase):
                 raise AssertionError("a malformed local file must fail before any request")
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("urllib.request.urlopen", side_effect=must_not_send):
+                with patch("bir._sending._opener.open", side_effect=must_not_send):
                     with self.assertRaisesRegex(ValueError, "Invalid JSON in experiment"):
                         send_experiment(experiment_path)
 
@@ -1780,7 +1782,7 @@ class EvalTests(unittest.TestCase):
             def must_not_send(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid timeout/retry/backoff must fail before any request")
 
-            with patch("urllib.request.urlopen", side_effect=must_not_send):
+            with patch("bir._sending._opener.open", side_effect=must_not_send):
                 with self.assertRaisesRegex(ValueError, "timeout"):
                     send_experiment(experiment_path, timeout=-1)
                 with self.assertRaises(ValueError):

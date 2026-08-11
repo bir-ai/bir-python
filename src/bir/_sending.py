@@ -78,6 +78,64 @@ def _is_retryable_status(status: int) -> bool:
     return 500 <= status < 600
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that follows nothing, replacing the default one.
+
+    ``urlopen`` uses an opener carrying :class:`urllib.request.HTTPRedirectHandler`,
+    which answers a 301, 302, or 303 on a POST by reissuing the request as a GET
+    *with no body*, at whatever host the ``Location`` header names. For a send
+    that means the events are never posted anywhere, the unconfigured host's
+    reply is parsed as the result, and the caller is told the upload succeeded.
+
+    Returning ``None`` from :meth:`redirect_request` leaves the status
+    unhandled, so the opener falls through to its default error handler and
+    raises :class:`urllib.error.HTTPError` with the status and headers intact —
+    which is what lets the send report the redirect it declined.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
+# Built once, and used instead of ``urlopen``. ``build_opener`` keeps every other
+# default handler -- proxy support included -- and drops only the one this
+# subclass replaces. It also means a globally installed opener (from
+# ``urllib.request.install_opener``) does not steer where Bir sends, which is
+# ambient state no caller asked Bir to obey.
+_opener = urllib.request.build_opener(_RefuseRedirects)
+
+
+def _is_redirect_status(status: int) -> bool:
+    """Return True for the 3xx statuses a send declines to follow."""
+
+    return 300 <= status < 400
+
+
+def _redirect_refusal(endpoint: str, exc: urllib.error.HTTPError) -> str:
+    """Return the message for a redirect Bir did not follow, and close the response.
+
+    The ``Location`` is the server's to choose, so it is bounded like every other
+    body an error message shows; the CLI escapes it where it prints.
+    """
+
+    location = exc.headers.get("Location")
+    exc.close()
+    target = _reported_body(location) if location else "a Location header it did not send"
+    return (
+        f"bir server at {endpoint} answered HTTP {exc.code} with a redirect to {target}; "
+        "bir does not follow redirects, so nothing was sent. Point the server URL at the "
+        "address that serves the API."
+    )
+
+
 # A response body reaches a person only inside an error message, and enough of it
 # to show why the server refused is enough. Bounding it keeps a ``--server`` URL
 # pointed at the wrong host from putting that host's whole document on the
@@ -130,13 +188,15 @@ def _post_event_batch(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             exc.close()
             return None
+        if _is_redirect_status(exc.code):
+            raise RuntimeError(_redirect_refusal(endpoint, exc)) from exc
         body = _read_http_error_body(exc)
         message = f"bir server rejected event batch with HTTP {exc.code}: {_reported_body(body)}"
         if _is_retryable_status(exc.code):
@@ -182,10 +242,12 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        if _is_redirect_status(exc.code):
+            raise RuntimeError(_redirect_refusal(endpoint, exc)) from exc
         body = _read_http_error_body(exc)
         message = f"bir server rejected event with HTTP {exc.code}: {_reported_body(body)}"
         if _is_retryable_status(exc.code):

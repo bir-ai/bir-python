@@ -2619,7 +2619,7 @@ class SdkTests(unittest.TestCase):
                     "bir._sdk._UploadEventSpool",
                     side_effect=AssertionError("the default send path must not create an upload spool"),
                 ),
-                patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen),
+                patch("bir._sending._opener.open", side_effect=fake_urlopen),
             ):
                 result = send_events("http://server.test")
 
@@ -2656,7 +2656,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 5)
@@ -2688,7 +2688,7 @@ class SdkTests(unittest.TestCase):
                 posted_events.append(posted_request_body(request))
                 return FakeHttpResponse()
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 2)
@@ -2711,7 +2711,7 @@ class SdkTests(unittest.TestCase):
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 raise AssertionError("send_events must not post when there are no events")
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 0)
@@ -2733,7 +2733,7 @@ class SdkTests(unittest.TestCase):
                 posted_urls.append(request_url(request))
                 raise http_error(request, 422, b'{"detail":"rejected"}')
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
                     send_events("http://server.test")
             self.assertEqual(posted_urls, ["http://server.test/v1/events/batch"])
@@ -2750,7 +2750,7 @@ class SdkTests(unittest.TestCase):
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 return FakeHttpResponse(b'{"accepted":1}')
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 with self.assertRaisesRegex(RuntimeError, "invalid batch response"):
                     send_events("http://server.test")
 
@@ -2766,7 +2766,7 @@ class SdkTests(unittest.TestCase):
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 return FakeHttpResponse(b'{"accepted":0,"event_ids":[]}')
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 0)
@@ -2788,7 +2788,7 @@ class SdkTests(unittest.TestCase):
                     raise http_error(request, 404, b'{"detail":"Not Found"}')
                 return FakeHttpResponse(b'{"accepted":0,"id":"already-seen"}')
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 0)
@@ -2814,7 +2814,7 @@ class SdkTests(unittest.TestCase):
                 return batch_response_accepting(posted_request_batch(request))
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_events("http://server.test")
 
             self.assertEqual(len(batch_attempts), 2)
@@ -2840,7 +2840,7 @@ class SdkTests(unittest.TestCase):
                 return batch_response_accepting(posted_request_batch(request))
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_events("http://server.test")
 
             self.assertEqual(len(batch_attempts), 2)
@@ -2863,7 +2863,7 @@ class SdkTests(unittest.TestCase):
                 raise urllib.error.URLError("network down")
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     with self.assertRaisesRegex(RuntimeError, "could not send events"):
                         send_events("http://server.test", retries=2, backoff=0.5)
 
@@ -2877,7 +2877,7 @@ class SdkTests(unittest.TestCase):
             def must_not_send(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("invalid timeout must fail before any request")
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=must_not_send):
+            with patch("bir._sending._opener.open", side_effect=must_not_send):
                 with self.assertRaisesRegex(ValueError, "timeout"):
                     send_events("http://server.test", timeout=-1)
                 with self.assertRaises(ValueError):
@@ -2905,7 +2905,7 @@ class SdkTests(unittest.TestCase):
                 raise http_error(request, 422, b'{"detail":"rejected"}')
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
                         send_events("http://server.test")
 
@@ -2932,7 +2932,7 @@ class SdkTests(unittest.TestCase):
                 return FakeHttpResponse()
 
             with patch("bir._sdk.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+                with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                     result = send_events("http://server.test")
 
             self.assertEqual(len(per_event_attempts), 2)
@@ -2954,7 +2954,7 @@ class SdkTests(unittest.TestCase):
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 return batch_response_accepting(posted_request_batch(request))
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 first = send_events("http://server.test", mark_sent=True)
 
             self.assertEqual(first.accepted, 2)
@@ -2970,7 +2970,7 @@ class SdkTests(unittest.TestCase):
             def must_not_post(request: object, timeout: float) -> FakeHttpResponse:
                 raise AssertionError("a re-send must not post already-sent events")
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=must_not_post):
+            with patch("bir._sending._opener.open", side_effect=must_not_post):
                 second = send_events("http://server.test", mark_sent=True)
 
             self.assertEqual(second.accepted, 0)
@@ -2993,13 +2993,13 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 first = send_events("http://server.test", mark_sent=True)
             self.assertEqual(first.attempted, 1)
 
             # A new trace is recorded; only it should be posted on the next send.
             answer("second")
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 second = send_events("http://server.test", mark_sent=True)
 
             self.assertEqual(second.attempted, 1)
@@ -3021,7 +3021,7 @@ class SdkTests(unittest.TestCase):
             def fake_urlopen(request: object, timeout: float) -> FakeHttpResponse:
                 return batch_response_accepting(posted_request_batch(request))
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             self.assertEqual(result.accepted, 1)
@@ -3049,7 +3049,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test")
 
             posted_ids = {event["id"] for event in posted_batches[0]}
@@ -3076,7 +3076,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test", include_rotated=True)
 
             posted_names = [event["name"] for event in posted_batches[0]]
@@ -3108,7 +3108,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test", include_rotated=True)
 
             posted = posted_batches[0]
@@ -3134,7 +3134,7 @@ class SdkTests(unittest.TestCase):
 
             with (
                 patch("bir._sdk._iter_trace_events", wraps=_iter_trace_events) as iter_trace_events,
-                patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen),
+                patch("bir._sending._opener.open", side_effect=fake_urlopen),
             ):
                 result = send_events("http://server.test")
 
@@ -3158,7 +3158,7 @@ class SdkTests(unittest.TestCase):
                 posted_names.extend(str(event["name"]) for event in batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test", batch_size=1000)
 
             self.assertEqual(posted_batch_sizes, [1000, 1000, 5])
@@ -3208,7 +3208,7 @@ class SdkTests(unittest.TestCase):
             spool = _UploadEventSpool()
             with (
                 patch("bir._sdk._UploadEventSpool", return_value=spool),
-                patch("bir._sdk.urllib.request.urlopen", side_effect=fail_second_batch),
+                patch("bir._sending._opener.open", side_effect=fail_second_batch),
             ):
                 with self.assertRaisesRegex(RuntimeError, "second batch failed"):
                     send_events(
@@ -3234,7 +3234,7 @@ class SdkTests(unittest.TestCase):
                 resumed_batches.append([str(event["id"]) for event in batch])
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=accept_remaining):
+            with patch("bir._sending._opener.open", side_effect=accept_remaining):
                 result = send_events(
                     "http://server.test",
                     batch_size=2,
@@ -3272,7 +3272,7 @@ class SdkTests(unittest.TestCase):
                 # Install the function directly: a Mock would retain every
                 # Request (and therefore every batch body), creating memory
                 # growth that the real urllib call path does not have.
-                with patch("bir._sdk.urllib.request.urlopen", new=fake_urlopen):
+                with patch("bir._sending._opener.open", new=fake_urlopen):
                     result = send_events("http://server.test", batch_size=8)
                 _, peak = tracemalloc.get_traced_memory()
             finally:
@@ -4057,7 +4057,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 result = send_events("http://server.test", include_rotated=True)
 
             posted = posted_batches[0]
@@ -4089,7 +4089,7 @@ class SdkTests(unittest.TestCase):
                 posted_batches.append(batch)
                 return batch_response_accepting(batch)
 
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 first = send_events("http://server.test", include_rotated=True, mark_sent=True)
 
             self.assertEqual(first.attempted, 1)
@@ -4099,7 +4099,7 @@ class SdkTests(unittest.TestCase):
 
             # A new trace is appended only to the active file.
             answer("second")
-            with patch("bir._sdk.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("bir._sending._opener.open", side_effect=fake_urlopen):
                 second = send_events("http://server.test", include_rotated=True, mark_sent=True)
 
             self.assertEqual(second.attempted, 1)

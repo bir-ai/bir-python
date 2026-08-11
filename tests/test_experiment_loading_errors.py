@@ -347,7 +347,7 @@ class SendExperimentErrorTests(unittest.TestCase):
                 raise answer
             return answer
 
-        with patch("urllib.request.urlopen", side_effect=respond), patch("bir._sending.time.sleep"):
+        with patch("bir._sending._opener.open", side_effect=respond), patch("bir._sending.time.sleep"):
             yield attempts
 
     def send(self, workdir: Path) -> Any:
@@ -424,7 +424,7 @@ class SendExperimentErrorTests(unittest.TestCase):
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise AssertionError("no request should be made for an empty server URL")
 
-            with patch("urllib.request.urlopen", side_effect=fail):
+            with patch("bir._sending._opener.open", side_effect=fail):
                 for server_url in ("", "/", "///"):
                     with self.subTest(server_url=server_url):
                         with self.assertRaises(ValueError) as raised:

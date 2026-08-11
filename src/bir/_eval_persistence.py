@@ -29,14 +29,19 @@ from ._eval_models import (
     _json_line,
 )
 from ._sdk import (
+    _is_redirect_status,
     _is_retryable_status,
     _read_http_error_body,
+    _redirect_refusal,
     _safe_capture,
     _safe_error,
     _send_with_retry,
     _TransientSendError,
     _validate_non_negative_int,
     _validate_non_negative_number,
+)
+from ._sdk import (
+    _send_opener as _opener,
 )
 
 
@@ -480,10 +485,12 @@ def _post_experiment(endpoint: str, experiment: Mapping[str, Any], *, timeout: f
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        if _is_redirect_status(exc.code):
+            raise RuntimeError(_redirect_refusal(endpoint, exc)) from exc
         body = _read_http_error_body(exc)
         message = f"bir server rejected experiment with HTTP {exc.code}: {body}"
         if _is_retryable_status(exc.code):
