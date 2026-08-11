@@ -46,6 +46,7 @@ from ._sdk import (
     send_events,
 )
 from .evals import (
+    _FAILED_EXAMPLES_POLICIES,  # shared failed-example vocabulary
     _MISSING_SCORE_POLICIES,  # shared missing-score vocabulary
     _REPORT_FORMATS,  # shared report-format vocabulary
     ExperimentSummary,
@@ -134,6 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default_experiment_dir=_DEFAULT_EXPERIMENT_DIR,
         report_formats=_REPORT_FORMATS,
         missing_score_policies=_MISSING_SCORE_POLICIES,
+        failed_example_policies=_FAILED_EXAMPLES_POLICIES,
         handlers={
             "traces": _cmd_traces,
             "show": _cmd_show,
@@ -867,6 +869,7 @@ def _cmd_eval_gate(args: argparse.Namespace) -> int:
         tolerance=args.tolerance,
         score_tolerances=_collect_score_tolerances(args.score_tolerances),
         missing_score=args.missing_score,
+        failed_examples=args.failed_examples,
         per_example=args.per_example,
     )
     _dump_json(diff.to_dict(), sys.stdout)

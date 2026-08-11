@@ -25,6 +25,8 @@ from uuid import uuid4
 from . import _eval_persistence as _eval_persistence_helpers
 from . import _eval_reports as _eval_report_helpers
 from ._eval_models import (
+    _FAILED_EXAMPLES_IGNORE,
+    _FAILED_EXAMPLES_REGRESS,
     _MISSING_SCORE_IGNORE,
     _MISSING_SCORE_REGRESS,
     Dataset,
@@ -92,6 +94,14 @@ _send_experiment_result_from_response = _eval_persistence_helpers._send_experime
 # gate); ``regress`` treats a baseline-only evaluator as a regression because a
 # removed evaluator silently drops coverage.
 _MISSING_SCORE_POLICIES = (_MISSING_SCORE_IGNORE, _MISSING_SCORE_REGRESS)
+
+# Failed-example policy vocabulary for compare_experiments(). ``regress`` is the
+# default: an example whose task raised is scored by nobody, so it leaves the
+# aggregate mean's denominator instead of lowering it, and a candidate that broke
+# on half its dataset can report a higher mean than the baseline that answered
+# every example badly. ``ignore`` restores the pre-0.4.0 behavior of deciding the
+# gate on aggregate means alone.
+_FAILED_EXAMPLES_POLICIES = (_FAILED_EXAMPLES_IGNORE, _FAILED_EXAMPLES_REGRESS)
 
 # Machine-readable explanations recorded in ExperimentDiff.regression_reasons.
 _REGRESSION_REASON_DELTA = "delta_below_tolerance"
@@ -915,6 +925,7 @@ def compare_experiments(
     tolerance: float = 0.0,
     score_tolerances: Mapping[str, float] | None = None,
     missing_score: str = _MISSING_SCORE_IGNORE,
+    failed_examples: str = _FAILED_EXAMPLES_REGRESS,
     per_example: bool = False,
 ) -> ExperimentDiff:
     """Compare shared aggregate evaluator scores from two experiment runs.
@@ -934,6 +945,22 @@ def compare_experiments(
     coverage even though no aggregate delta can be computed. Evaluators found
     only in the candidate are always reported but never counted as regressions.
 
+    ``failed_examples`` selects how examples that failed are treated. An
+    aggregate score is a mean over the examples an evaluator actually scored, and
+    a failed example carries no scores, so failures leave that denominator rather
+    than lowering it: a candidate that broke on half its dataset reports a
+    *higher* mean than a baseline that answered every example badly.
+    ``"regress"`` (the default) fails the gate when the candidate failed a larger
+    share of its examples than the baseline did, compared exactly and as a share
+    so datasets of different sizes stay comparable. ``"ignore"`` reports the
+    counts without failing on them, which is how the gate behaved before 0.4.0.
+    Either way the diff records ``baseline_example_count``,
+    ``baseline_error_count``, ``candidate_example_count``, and
+    ``candidate_error_count``, and ``failed_example_regression`` states the
+    comparison. A run that scored nothing at all -- an empty dataset, or every
+    example failing -- has no shared evaluator to compare and is the
+    ``missing_score`` policy's case rather than this one.
+
     ``per_example`` is opt-in reporting detail and never changes the aggregate
     comparison or the gate decision. When True, the returned diff's
     ``example_deltas`` records, for each shared evaluator, the
@@ -945,6 +972,7 @@ def compare_experiments(
 
     validated_tolerance = _validate_non_negative_float(tolerance, "tolerance")
     validated_missing_score = _validate_missing_score(missing_score)
+    validated_failed_examples = _validate_failed_examples(failed_examples)
 
     baseline_result = baseline if isinstance(baseline, ExperimentResult) else load_experiment(baseline)
     candidate_result = candidate if isinstance(candidate, ExperimentResult) else load_experiment(candidate)
@@ -990,6 +1018,11 @@ def compare_experiments(
         missing_score=validated_missing_score,
         regression_reasons=dict(sorted(regression_reasons.items())),
         example_deltas=example_deltas,
+        failed_examples=validated_failed_examples,
+        baseline_example_count=baseline_result.example_count,
+        baseline_error_count=baseline_result.error_count,
+        candidate_example_count=candidate_result.example_count,
+        candidate_error_count=candidate_result.error_count,
     )
 
 
@@ -1654,6 +1687,13 @@ def _validate_missing_score(missing_score: Any) -> str:
         valid = ", ".join(_MISSING_SCORE_POLICIES)
         raise ValueError(f"missing_score must be one of: {valid}")
     return missing_score
+
+
+def _validate_failed_examples(failed_examples: Any) -> str:
+    if failed_examples not in _FAILED_EXAMPLES_POLICIES:
+        valid = ", ".join(_FAILED_EXAMPLES_POLICIES)
+        raise ValueError(f"failed_examples must be one of: {valid}")
+    return failed_examples
 
 
 def _validate_score_tolerances(

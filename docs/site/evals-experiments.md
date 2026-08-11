@@ -46,6 +46,14 @@ Results are written to `.bir/experiments/*.jsonl`, one row per example. A
 sibling `.summary.json` stores the experiment status, counts, aggregate scores,
 and result path.
 
+`aggregate_scores` is the mean of each evaluator over the examples that
+evaluator scored. An example whose task raised is recorded with `status="error"`
+and no scores at all, so it is absent from every mean rather than counted as a
+zero. `result.example_count` and `result.error_count` are how many examples the
+run held and how many of them failed; read them alongside the means, and see
+[the failed-example policy](#failed-example-policy) for what the gate does with
+them.
+
 Each row is flushed as its example finishes, so a run that is stopped part-way
 keeps the work it had already done. If the process is killed without unwinding —
 `SIGTERM` from a pod eviction, `docker stop`, or a cancelled CI job — the rows
@@ -349,7 +357,8 @@ report = render_experiment_report(load_experiment(result.path), format="html")
 
 ## Compare experiments
 
-Compare aggregate evaluator means against a persisted baseline:
+Compare aggregate evaluator means, and how many examples failed, against a
+persisted baseline:
 
 ```python
 from bir.evals import compare_experiments
@@ -406,6 +415,53 @@ Delta-based regressions of shared evaluators use the reason
 `"delta_below_tolerance"`. Evaluators that appear only in the candidate add
 coverage and are never treated as regressions.
 
+### Failed-example policy
+
+An aggregate score is a **mean over the examples an evaluator actually scored**.
+An example whose task raised is scored by nobody, so it leaves that denominator
+instead of lowering the mean — and a run that broke on half its dataset can
+report a *higher* mean than one that answered every example badly:
+
+```
+baseline   20 examples,  0 failed   aggregate exact_match = 0.50
+candidate  20 examples, 10 failed   aggregate exact_match = 1.00
+```
+
+Every aggregate delta in that comparison points the wrong way, so the diff also
+carries the counts:
+
+| Field | Meaning |
+| --- | --- |
+| `baseline_example_count` / `candidate_example_count` | Examples the run held |
+| `baseline_error_count` / `candidate_error_count` | How many of them failed |
+| `failed_example_regression` | Whether the candidate failed a larger *share* |
+
+`failed_examples="regress"` is the **default**: the gate fails when
+`failed_example_regression` is true. The comparison is a share rather than a
+count, so runs over datasets of different sizes stay comparable, and it is exact
+rather than floating-point, so 10 of 100 and 1 of 10 are equal and neither
+regresses against the other.
+
+Pass `"ignore"` to decide the gate on aggregate means alone, which is how it
+behaved before `0.4.0`:
+
+```python
+diff = compare_experiments(
+    "baseline.jsonl",
+    "candidate.jsonl",
+    failed_examples="ignore",
+)
+```
+
+The counts and `failed_example_regression` are reported under either policy;
+only the decision changes.
+
+A run that scored *nothing* — an empty dataset, or every example failing — has no
+shared evaluator, so there is no delta to fail on. The failed-example rule
+catches the second case (a larger share failed) but not the first (a run of zero
+examples has no share). `missing_score="regress"` is the policy for a candidate
+that produced no scores at all.
+
 ### Per-example detail
 
 Aggregate means tell you *which* evaluator regressed, not *which examples* drove
@@ -436,23 +492,25 @@ changes the aggregate comparison, `has_regressions`, or the gate exit code. When
 ### CLI gate
 
 The CLI exposes the same gate and exits `1` exactly when the configured policy
-reports a regression. `--score-tolerance NAME=VALUE` is repeatable and
-`--missing-score` selects the policy:
+reports a regression. `--score-tolerance NAME=VALUE` is repeatable, and
+`--missing-score` and `--failed-examples` select the two policies:
 
 ```console
 bir eval-gate baseline.jsonl candidate.jsonl \
   --tolerance 0.01 \
   --score-tolerance latency_under=0.05 \
-  --missing-score regress
+  --missing-score regress \
+  --failed-examples ignore
 ```
 
 Repeating `--score-tolerance` for the same evaluator with the same value is
 allowed; conflicting values, malformed `NAME=VALUE` assignments, and unknown
 evaluator names are rejected with a clear error. The emitted JSON includes
-`effective_tolerances`, `missing_score`, and `regression_reasons` so the gate
-decision is fully machine-readable. Add `--per-example` to also emit
-`example_deltas` (the same per-example detail as `per_example=True` above);
-without the flag the output is unchanged.
+`effective_tolerances`, `missing_score`, `regression_reasons`, the four example
+and error counts, and `failed_example_regression`, so the gate decision is fully
+machine-readable. Add `--per-example` to also emit `example_deltas` (the same
+per-example detail as `per_example=True` above); without the flag the output
+carries no per-example entries.
 
 ## Link results to traces
 

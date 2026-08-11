@@ -23,6 +23,7 @@ def build_parser(
     default_experiment_dir: str,
     report_formats: tuple[str, ...],
     missing_score_policies: tuple[str, ...],
+    failed_example_policies: tuple[str, ...],
     handlers: Mapping[str, _Handler],
 ) -> argparse.ArgumentParser:
     """Build the CLI parser from explicit public data and command handlers."""
@@ -285,7 +286,7 @@ def build_parser(
 
     eval_gate = subparsers.add_parser(
         "eval-gate",
-        help="Compare two experiments and fail if an aggregate score regressed.",
+        help="Compare two experiments and fail if a score regressed or more examples failed.",
     )
     eval_gate.add_argument("baseline", help="Baseline experiment result JSONL file.")
     eval_gate.add_argument("candidate", help="Candidate experiment result JSONL file.")
@@ -314,6 +315,19 @@ def build_parser(
         help=(
             "Policy for evaluators present only in the baseline: 'ignore' reports "
             "them without failing (default), 'regress' treats them as regressions."
+        ),
+    )
+    eval_gate.add_argument(
+        "--failed-examples",
+        dest="failed_examples",
+        choices=failed_example_policies,
+        default="regress",
+        help=(
+            "Policy for examples that failed: 'regress' fails the gate when the "
+            "candidate failed a larger share of its examples than the baseline "
+            "(default), 'ignore' reports the counts without failing on them. An "
+            "aggregate score is a mean over scored examples, so a failed example "
+            "leaves that mean rather than lowering it."
         ),
     )
     eval_gate.add_argument(

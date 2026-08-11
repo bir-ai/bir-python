@@ -93,6 +93,7 @@ def cli_commands() -> set[str]:
         default_experiment_dir="experiments",
         report_formats=("markdown",),
         missing_score_policies=("error",),
+        failed_example_policies=("regress",),
         handlers=handlers,
     )
     for action in parser._actions:

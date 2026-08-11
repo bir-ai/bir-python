@@ -40,9 +40,10 @@ names mean against the release the extra installs, and which fields redaction is
 aimed at. This one went where they did not. The evaluation and experiment half
 was driven as a product — the gate's decision under partial failure, the
 evaluator-name contract, concurrency at eight workers, report rendering — and it
-produced three of the four items. Storage pressure was driven for real rather
-than simulated: a 1 MB HFS+ volume filled by an actual recording workload, which
-produced the fourth. The remaining axes — Unicode and encoding end to end
+produced three of the four items it raised, including the P1, which has since
+shipped. Storage pressure was driven for real rather than simulated: a 1 MB HFS+
+volume filled by an actual recording workload, which produced the fourth. The
+remaining axes — Unicode and encoding end to end
 (what the store accepts, what survives a locale, what each renderer can encode),
 cost, usage and clock arithmetic, and sampling and the kill switch under
 contention — produced no item and are recorded below with their numbers.
@@ -69,93 +70,11 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | `eval-gate` scores only the examples that survived | P1 | M | A run whose examples crashed cannot pass the gate silently | — |
-| 2 | A store the disk filled cannot be pruned | P1 | M | The documented way to reclaim space works on the store the documented failure produces | — |
-| 3 | `experiment-report --output` destroys the file it cannot finish | P2 | S | A failed render leaves the previous report intact | — |
-| 4 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
+| 1 | A store the disk filled cannot be pruned | P1 | M | The documented way to reclaim space works on the store the documented failure produces | — |
+| 2 | `experiment-report --output` destroys the file it cannot finish | P2 | S | A failed render leaves the previous report intact | — |
+| 3 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
 
-### 1. `eval-gate` scores only the examples that survived
-
-**Why.** `ExperimentResult.aggregate_scores` (`bir/_eval_models.py:268-277`) is a
-mean over the scores that exist, and an errored example has none — the error row
-is built with `scores=[]` at `bir/evals.py:1198-1217`. Errored examples therefore
-leave the denominator rather than the numerator, so a candidate run that broke
-gets a *higher* mean than the baseline that worked. `compare_experiments`
-(`bir/evals.py:956`) subtracts those two means and `_cmd_eval_gate`
-(`bir/cli.py:863-873`) returns the result as the build's exit code.
-
-Driven with a 20-example dataset the baseline answers correctly on the 10 easy
-examples and wrongly on the 10 hard ones; the candidate is a change that makes
-the hard examples raise instead of answering:
-
-```
-baseline   examples=20 scored=20  errors=0   status=success  aggregate={'exact_match': 0.5}
-candidate  examples=20 scored=10  errors=10  status=error    aggregate={'exact_match': 1.0}
-
-$ bir eval-gate b.jsonl c.jsonl
-exit code: 0
-  "deltas":          {"exact_match": 0.5}
-  "improved":        ["exact_match"]
-  "regressed":       []
-  "has_regressions": false
-
---missing-score ignore   -> exit 0
---missing-score regress  -> exit 0
-```
-
-Half the run crashed and the gate calls it an improvement. The documented escape
-hatch does not reach it: `--missing-score regress` fires on `baseline_only`
-(`bir/_eval_models.py:322-333`), which is empty here because the evaluator ran in
-both runs. It covers only total failure — with *every* example errored the
-candidate's `aggregate_scores` is `{}`, `baseline_only` is `{'exact_match'}`, and
-`regress` exits 1 — and the realistic case, partial failure, is invisible at any
-setting. The milder shape is just as quiet: 18 of 20 examples crashing while the
-surviving 2 stay correct gives `deltas {'exact_match': 0.0}`, `unchanged`,
-exit 0.
-
-Nothing in the payload lets the build notice on its own. The whole `to_dict`
-(`bir/_eval_models.py:334-358`) is:
-
-```
-keys in the eval-gate payload: ['baseline_only', 'candidate_only', 'deltas',
-  'effective_tolerances', 'has_regressions', 'improved', 'missing_score',
-  'regressed', 'regression_reasons', 'tolerance', 'unchanged']
-any key mentioning errors/examples/counts: []
-```
-
-The counts exist and are already persisted — `example_count` and `error_count`
-are fields of `ExperimentSummary` (`bir/_eval_models.py:371-372`) and the run
-above wrote `example_count=20 error_count=10` — but `compare_experiments` loads
-the result file, not the summary, and never looks at either.
-
-No test pins the current behavior. Every `compare_experiments` case in
-`tests/test_evals.py:57-285` and every `eval-gate` case in
-`tests/test_cli.py:1188-1361` builds both sides from successful examples;
-nothing compares a run that errored.
-
-**Scope.**
-
-- Make the gate see the failures. `compare_experiments` should read each side's
-  example count and error count and carry them in `ExperimentDiff`, so
-  `eval-gate --json` reports them whatever the policy decides.
-- Decide and record what fails the gate. The options are a candidate error rate
-  above the baseline's, an absolute allowance (`--max-errors N` /
-  `--max-error-rate R`), or a `missing_score`-style policy argument; the
-  reasoning belongs next to the existing `missing_score` reasoning in
-  `docs/site/evals-experiments.md`.
-- Decide and record whether the default changes. Failing by default on a
-  candidate that errored more than its baseline is the behavior a gate is for,
-  and it is a breaking change to an exit code that CI reads — either it lands as
-  a versioned deprecation or the strict policy is opt-in and the payload change
-  is what ships by default.
-- Say in the docs that an aggregate is a mean over scored examples, wherever the
-  aggregate is described.
-
-**Done when** a candidate run whose examples errored more than its baseline's
-cannot exit 0 under the documented default, and `eval-gate --json` carries both
-runs' example and error counts.
-
-### 2. A store the disk filled cannot be pruned
+### 1. A store the disk filled cannot be pruned
 
 **Why.** `docs/site/core-api.md:292-309` names a full disk as a failure the store
 handles: the append fails, the traced call is unaffected, and one `ERROR bir:`
@@ -229,7 +148,7 @@ was ever recorded by it. Every other line remains strictly validated.
 unparseable final line of the active file, removes exactly the traces its
 selection names, and still refuses a store damaged anywhere else.
 
-### 3. `bir experiment-report --output` destroys the file it cannot finish
+### 2. `bir experiment-report --output` destroys the file it cannot finish
 
 **Why.** `_cmd_experiment_report` writes with `output_path.write_text(report,
 encoding="utf-8")` (`bir/cli.py:664`). That opens the destination for truncating
@@ -297,7 +216,7 @@ writes over an existing report and nothing fails a write.
 **Done when** a `bir experiment-report --output PATH` that fails for any reason
 leaves the previous contents of PATH byte-identical.
 
-### 4. Two evaluators may share one name and one aggregate
+### 3. Two evaluators may share one name and one aggregate
 
 **Why.** Thirteen of the fourteen evaluator factories in `bir/evals.py` take
 `name` as a keyword-only argument with a fixed default — `exact_match` at
@@ -364,15 +283,13 @@ evaluators with the same name.
 
 ## Sequencing
 
-Items 1 and 4 both concern how much an aggregate score can be trusted and touch
-the same three files (`bir/evals.py`, `bir/_eval_models.py`, `bir/cli.py`); take
-them together, 4 first because it is smaller and because a run with duplicate
-names makes item 1's counts harder to reason about. Item 1's payload change and
-its default-behavior change can ship separately: the counts are additive and
-carry no deprecation, the exit-code change does.
-
-Items 2 and 3 are independent of those and of each other. Item 3 is the smallest
-piece of work here and touches one line plus its tests.
+The three remaining items are independent of each other and of the gate work that
+shipped from this audit. Item 3 is closest to that work — it lands in the same
+three files (`bir/evals.py`, `bir/_eval_models.py`, `bir/cli.py`) — and is worth
+taking next while that code is fresh: a run with duplicate evaluator names now
+also reports counts against an aggregate that merged two evaluators, so the two
+are easier to reason about once names are unique. Item 2 is the smallest piece of
+work here and touches one line plus its tests.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -410,11 +327,12 @@ guarding the bridges' reads of a provider's response, creating the store's own
 files readable only by their owner, guarding the event bridges' reads of a
 framework object, following the store across a rotation in `bir tail`, escaping
 and bounding what the CLI prints on its error channel, refreshing the OTLP
-attribute spellings, and recording where the redaction boundary stops.
+attribute spellings, recording where the redaction boundary stops, and failing
+the gate on a candidate run whose examples failed.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-Item 2 sits beside "reading a damaged trace store with `--skip-invalid`" and does
+Item 1 sits beside "reading a damaged trace store with `--skip-invalid`" and does
 not reopen it. That item asked what the *read* commands do with a store they
 cannot parse whole, and answered it: `bir traces --skip-invalid` listed 2,709 of
 the 2,709 intact traces in the store the disk filled, and `bir stats
@@ -423,25 +341,25 @@ deliberate decision, and it asks for a strictly narrower opening than that flag 
 the final line of the active file, not any line — because that is the only line
 a write can leave behind unfinished.
 
-Item 2 also sits beside "reporting rather than raising a failed trace-store
+Item 1 also sits beside "reporting rather than raising a failed trace-store
 write", and confirms rather than reopens it. The ENOSPC run is that feature
 working: all 4,000 traced calls returned normally, no exception reached the
 caller, and one `ERROR bir:` line named the errno and said recording was paused.
 The item is about what is left on disk afterwards, which that work did not cover.
 
-Item 3 sits beside "escaping control characters when the CLI renders recorded
+Item 2 sits beside "escaping control characters when the CLI renders recorded
 text for a person" and does not reopen it. That covered what a rendered *string*
 may contain when a terminal reads it; this is about a *file* being truncated
 before anything is rendered into it, and it fails identically when nothing is
 wrong with the text at all — the ENOSPC case renders pure ASCII.
 
-Item 1 sits beside the declined "A failing evaluator discards the example's
-output and the other evaluators' scores" below and does not reopen it. That asks
-whether an evaluator that raises should void the example; this asks whether the
-gate should notice a voided example at all, and the answer does not depend on
-what voided it. The two compose in one direction only: while that decision
-stands, an evaluator failure also silently shrinks the gate's denominator, so
-item 1 reduces its cost without settling it.
+The gate that shipped from this audit sits beside the declined "A failing
+evaluator discards the example's output and the other evaluators' scores" below
+and does not reopen it. That asks whether an evaluator that raises should void
+the example; the gate work asked whether the gate should notice a voided example
+at all, and the answer does not depend on what voided it. The two compose in one
+direction only: while that decision stands, an evaluator failure also shrinks the
+gate's denominator, and it is no longer silent when it does.
 
 ## Declined
 
@@ -590,7 +508,7 @@ unbounded single-file configuration, and 4,000 traces recorded until
 caller, 2,709 traces were written, and one `ERROR bir:` line named `[Errno 28]`
 and said recording was paused — one message for the outage, not one per dropped
 event. This is the "reporting rather than raising a failed trace-store write"
-feature doing exactly what it says. What it leaves behind is item 2.
+feature doing exactly what it says. What it leaves behind is item 1.
 
 **The experiment summary under the same pressure.** With the volume padded to
 zero free space, re-running an experiment onto an existing summary raised
@@ -632,7 +550,7 @@ rather than losing it, and was identical under an unset locale, `LANG=en_US.UTF-
 and `LC_ALL=C`. Every file the SDK opens passes `encoding="utf-8"` explicitly —
 10 of 10 text opens across `_storage.py`, `_eval_persistence.py`, and
 `_eval_models.py` — so no read or write depends on the locale. The one command
-that cannot survive it is `experiment-report --output`, which is item 3.
+that cannot survive it is `experiment-report --output`, which is item 2.
 
 **Very large usage figures.** `set_usage(input_tokens=2**63)` and
 `set_usage(input_tokens=10**30)` were both accepted, and `bir stats --json`

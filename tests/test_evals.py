@@ -1808,6 +1808,206 @@ class EvalTests(unittest.TestCase):
                     send_experiment(experiment_path, backoff="fast")  # type: ignore[arg-type]
 
 
+class CompareExperimentsFailedExampleTests(unittest.TestCase):
+    """An aggregate mean cannot express an example nobody scored.
+
+    ``aggregate_scores`` divides by how many examples an evaluator scored, and a
+    failed example carries no scores, so failures leave that denominator instead
+    of lowering the mean. A run that broke on half its dataset therefore reports
+    a *higher* mean than one that answered every example badly, and until 0.4.0
+    the gate read only those means. These pin the counts the diff now carries and
+    the decision the default policy makes with them.
+    """
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    @staticmethod
+    def _run(path: Path, *, examples: int, failing: int, wrong: int = 0) -> ExperimentResult:
+        """Run ``examples`` examples: the last ``failing`` raise, ``wrong`` miss.
+
+        A raised example is scored by nobody and leaves the mean's denominator; a
+        wrong one scores 0.0 and lowers it. Setting them on the two sides of a
+        comparison is what produces the shape this class exists for.
+        """
+
+        def task(index: int) -> str:
+            if index >= examples - failing:
+                raise RuntimeError("model backend unavailable")
+            if index >= examples - failing - wrong:
+                return "not the expected answer"
+            return "ok"
+
+        return run_experiment(
+            path.stem,
+            dataset=Dataset([DatasetExample(id=f"e{index}", input=index, expected="ok") for index in range(examples)]),
+            task=task,
+            evaluators=[exact_match()],
+            path=path,
+            raise_on_error=False,
+        )
+
+    def test_a_candidate_that_failed_a_larger_share_regresses_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # The baseline answers half its examples badly; the candidate is a
+            # change that makes those same examples raise instead of answering.
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=0, wrong=10)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=10)
+
+            diff = compare_experiments(baseline, candidate)
+
+            # The means say the run got better: every example the candidate still
+            # scored was correct, and the ten it lost left the denominator.
+            self.assertEqual(baseline.aggregate_scores, {"exact_match": 0.5})
+            self.assertEqual(candidate.aggregate_scores, {"exact_match": 1.0})
+            self.assertEqual(diff.improved, {"exact_match"})
+            self.assertEqual(diff.regressed, set())
+
+            self.assertTrue(diff.failed_example_regression)
+            self.assertTrue(diff.has_regressions)
+
+    def test_ignore_restores_the_pre_0_4_0_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=0, wrong=10)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=10)
+
+            ignored = compare_experiments(baseline, candidate, failed_examples="ignore")
+
+            self.assertFalse(ignored.has_regressions)
+            # The measurement is still reported; only the decision changed.
+            self.assertTrue(ignored.failed_example_regression)
+            self.assertEqual(ignored.candidate_error_count, 10)
+
+    def test_an_equal_share_of_failures_is_not_a_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=5)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=5)
+
+            diff = compare_experiments(baseline, candidate)
+
+            self.assertFalse(diff.failed_example_regression)
+            self.assertFalse(diff.has_regressions)
+
+    def test_fewer_failures_is_not_a_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=10)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=2)
+
+            diff = compare_experiments(baseline, candidate)
+
+            self.assertFalse(diff.failed_example_regression)
+            self.assertFalse(diff.has_regressions)
+
+    def test_the_comparison_is_a_share_not_a_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Ten of a hundred against three of ten: the candidate failed fewer
+            # examples and a larger share of them, and the share is what decides.
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=100, failing=10)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=10, failing=3)
+
+            diff = compare_experiments(baseline, candidate)
+
+            self.assertLess(diff.candidate_error_count, diff.baseline_error_count)
+            self.assertTrue(diff.failed_example_regression)
+            self.assertTrue(diff.has_regressions)
+
+    def test_an_equal_share_over_different_dataset_sizes_is_not_a_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=100, failing=10)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=10, failing=1)
+
+            diff = compare_experiments(baseline, candidate)
+
+            # 10/100 and 1/10 are the same share; compared exactly, not as floats.
+            self.assertFalse(diff.failed_example_regression)
+            self.assertFalse(diff.has_regressions)
+
+    def test_a_run_of_no_examples_has_no_share_and_is_the_missing_score_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=0)
+            empty = run_experiment(
+                "empty",
+                dataset=Dataset([]),
+                task=lambda value: value,
+                evaluators=[exact_match()],
+                path=Path(directory) / "empty.jsonl",
+            )
+
+            diff = compare_experiments(baseline, empty)
+
+            self.assertEqual(diff.candidate_example_count, 0)
+            self.assertFalse(diff.failed_example_regression)
+            self.assertFalse(diff.has_regressions)
+            # It has no scores at all, so the evaluator is baseline-only and the
+            # missing-score policy is what answers for it.
+            self.assertEqual(diff.baseline_only, {"exact_match"})
+            self.assertTrue(compare_experiments(baseline, empty, missing_score="regress").has_regressions)
+
+    def test_every_example_failing_regresses_at_the_default_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=0)
+            dead = self._run(Path(directory) / "dead.jsonl", examples=20, failing=20)
+
+            diff = compare_experiments(baseline, dead)
+
+            # No shared evaluator, so no delta exists to fail on, and the default
+            # missing-score policy is ``ignore``: the failure counts are the only
+            # thing left that can see this run at all.
+            self.assertEqual(diff.deltas, {})
+            self.assertEqual(diff.missing_score, "ignore")
+            self.assertTrue(diff.has_regressions)
+
+    def test_the_counts_are_reported_under_either_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._run(Path(directory) / "baseline.jsonl", examples=20, failing=3)
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=7)
+
+            for policy in ("regress", "ignore"):
+                with self.subTest(failed_examples=policy):
+                    payload = compare_experiments(baseline, candidate, failed_examples=policy).to_dict()
+
+                    self.assertEqual(payload["baseline_example_count"], 20)
+                    self.assertEqual(payload["baseline_error_count"], 3)
+                    self.assertEqual(payload["candidate_example_count"], 20)
+                    self.assertEqual(payload["candidate_error_count"], 7)
+                    self.assertEqual(payload["failed_examples"], policy)
+                    self.assertTrue(payload["failed_example_regression"])
+                    self.assertEqual(payload["has_regressions"], policy == "regress")
+
+    def test_the_counts_match_the_persisted_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = self._run(Path(directory) / "candidate.jsonl", examples=20, failing=7)
+            summary = load_experiment_summary(Path(directory) / "candidate.summary.json")
+
+            diff = compare_experiments(candidate, candidate)
+
+            self.assertEqual(diff.candidate_example_count, summary.example_count)
+            self.assertEqual(diff.candidate_error_count, summary.error_count)
+
+    def test_rejects_an_invalid_failed_examples_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            experiment = self._run(Path(directory) / "experiment.jsonl", examples=2, failing=0)
+
+            with self.assertRaisesRegex(ValueError, "failed_examples must be one of: ignore, regress"):
+                compare_experiments(experiment, experiment, failed_examples="fail")
+
+    def test_a_hand_built_diff_reports_no_failed_example_regression(self) -> None:
+        # The counts default to zero, so a diff constructed without them decides
+        # exactly as it did before the fields existed.
+        diff = ExperimentDiff(
+            deltas={},
+            regressed=frozenset(),
+            improved=frozenset(),
+            unchanged=frozenset(),
+            baseline_only=frozenset(),
+            candidate_only=frozenset(),
+            tolerance=0.0,
+        )
+
+        self.assertFalse(diff.failed_example_regression)
+        self.assertFalse(diff.has_regressions)
+
+
 class RunExperimentAsyncTests(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_config_for_tests()

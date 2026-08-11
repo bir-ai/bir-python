@@ -320,8 +320,8 @@ def _summary_from_result(result: ExperimentResult) -> ExperimentSummary:
         start_time=result.start_time,
         end_time=result.end_time,
         status=result.status,
-        example_count=len(result.results),
-        error_count=sum(1 for example_result in result.results if example_result.status == "error"),
+        example_count=result.example_count,
+        error_count=result.error_count,
         aggregate_scores=result.aggregate_scores,
         result_path=result.path or "",
     )

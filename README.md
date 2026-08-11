@@ -603,13 +603,24 @@ bir eval-gate baseline.jsonl candidate.jsonl \
   --tolerance 0.01 --score-tolerance latency_under=0.05 --missing-score regress
 ```
 
+An aggregate score is a mean over the examples an evaluator actually scored, so
+an example whose task raised leaves that denominator instead of lowering the
+mean — a run that broke on half its dataset can report a *higher* mean than one
+that answered every example badly. The gate therefore also compares how large a
+share of each run's examples failed, and fails when the candidate's share is
+larger. The diff carries `baseline_example_count`, `baseline_error_count`,
+`candidate_example_count`, `candidate_error_count`, and
+`failed_example_regression`; `failed_examples="ignore"`
+(`--failed-examples ignore`) decides on aggregate means alone.
+
 The command exits `1` exactly when the policy reports a regression and prints a
-machine-readable diff with `effective_tolerances`, `missing_score`, and
-`regression_reasons`. Add `--per-example` (or `compare_experiments(...,
-per_example=True)`) to also include `example_deltas`: for each shared evaluator,
-the candidate-minus-baseline delta of every example scored in both runs, so a
-failing gate points at the examples that moved. It is reporting detail only — the
-gate decision and the rest of the output are unchanged.
+machine-readable diff with `effective_tolerances`, `missing_score`,
+`failed_examples`, and `regression_reasons`. Add `--per-example` (or
+`compare_experiments(..., per_example=True)`) to also include `example_deltas`:
+for each shared evaluator, the candidate-minus-baseline delta of every example
+scored in both runs, so a failing gate points at the examples that moved. It is
+reporting detail only — the gate decision and the rest of the output are
+unchanged.
 
 ## Documentation
 

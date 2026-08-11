@@ -22,6 +22,8 @@ from ._sdk import _safe_capture, _safe_metadata
 _EXPERIMENT_SCHEMA_VERSION = "1.0"
 _MISSING_SCORE_IGNORE = "ignore"
 _MISSING_SCORE_REGRESS = "regress"
+_FAILED_EXAMPLES_IGNORE = "ignore"
+_FAILED_EXAMPLES_REGRESS = "regress"
 
 __all__ = [
     "Dataset",
@@ -265,8 +267,28 @@ class ExperimentResult:
     path: str | None
 
     @property
+    def example_count(self) -> int:
+        """Return how many examples the run held."""
+
+        return len(self.results)
+
+    @property
+    def error_count(self) -> int:
+        """Return how many of those examples failed and produced no scores."""
+
+        return sum(1 for result in self.results if result.status == "error")
+
+    @property
     def aggregate_scores(self) -> dict[str, float]:
-        """Return the mean score for each evaluator name."""
+        """Return the mean score for each evaluator name, over scored examples.
+
+        The denominator is how many examples that evaluator actually scored, not
+        :attr:`example_count`. A failed example carries no scores at all, so it
+        leaves the mean rather than lowering it, and a run that broke on half its
+        dataset can therefore report a *higher* mean than one that answered every
+        example badly. :func:`bir.evals.compare_experiments` reads
+        :attr:`error_count` alongside these means for exactly that reason.
+        """
 
         totals: dict[str, float] = {}
         counts: dict[str, int] = {}
@@ -304,6 +326,12 @@ class ExperimentDiff:
     both runs to the candidate-minus-baseline delta for that example, and is empty
     unless :func:`compare_experiments` was called with ``per_example=True``. All
     mappings are ordered by key so the diff serializes deterministically.
+
+    The four ``*_count`` fields record how many examples each run held and how
+    many of them failed, because an aggregate mean is taken over scored examples
+    only and so cannot express a failure. ``failed_examples`` is the configured
+    policy for those failures and ``failed_example_regression`` reports the
+    comparison itself, whatever the policy does with it.
     """
 
     deltas: dict[str, float]
@@ -317,6 +345,29 @@ class ExperimentDiff:
     missing_score: str = _MISSING_SCORE_IGNORE
     regression_reasons: dict[str, str] = field(default_factory=dict)
     example_deltas: dict[str, dict[str, float]] = field(default_factory=dict)
+    failed_examples: str = _FAILED_EXAMPLES_REGRESS
+    baseline_example_count: int = 0
+    baseline_error_count: int = 0
+    candidate_example_count: int = 0
+    candidate_error_count: int = 0
+
+    @property
+    def failed_example_regression(self) -> bool:
+        """Return whether the candidate failed a larger share of its examples.
+
+        Compared as a share rather than a count, so two runs over datasets of
+        different sizes stay comparable, and by cross-multiplication rather than
+        division, so the comparison is exact and a run of zero examples needs no
+        special case: it has no share that can be larger than another's.
+
+        This reports what was measured, not what the gate decided with it. Like
+        ``baseline_only``, it is filled in whatever ``failed_examples`` is set to.
+        """
+
+        return (
+            self.candidate_error_count * self.baseline_example_count
+            > self.baseline_error_count * self.candidate_example_count
+        )
 
     @property
     def has_regressions(self) -> bool:
@@ -325,19 +376,25 @@ class ExperimentDiff:
         A shared evaluator that dropped beyond its effective tolerance always
         counts. When the missing-score policy is ``regress``, evaluators present
         only in the baseline also count: a removed evaluator drops coverage even
-        though no aggregate delta can be computed.
+        though no aggregate delta can be computed. When the failed-examples
+        policy is ``regress`` -- the default -- a candidate that failed a larger
+        share of its examples than the baseline counts too, for the same reason
+        pointed the other way: nobody scored those examples, so no aggregate
+        delta can express them either.
         """
 
         if self.regressed:
             return True
-        return self.missing_score == _MISSING_SCORE_REGRESS and bool(self.baseline_only)
+        if self.missing_score == _MISSING_SCORE_REGRESS and self.baseline_only:
+            return True
+        return self.failed_examples == _FAILED_EXAMPLES_REGRESS and self.failed_example_regression
 
     def to_dict(self) -> dict[str, Any]:
         """Return a deterministic JSON-serializable representation of the diff.
 
         ``example_deltas`` is included only when populated (it is empty unless
-        per-example detail was requested), so the default aggregate-only output is
-        byte-for-byte unchanged from before the field existed.
+        per-example detail was requested), so a run that asked for no per-example
+        detail still emits the aggregate-only shape.
         """
 
         payload: dict[str, Any] = {
@@ -351,6 +408,12 @@ class ExperimentDiff:
             "effective_tolerances": self.effective_tolerances,
             "missing_score": self.missing_score,
             "regression_reasons": self.regression_reasons,
+            "failed_examples": self.failed_examples,
+            "failed_example_regression": self.failed_example_regression,
+            "baseline_example_count": self.baseline_example_count,
+            "baseline_error_count": self.baseline_error_count,
+            "candidate_example_count": self.candidate_example_count,
+            "candidate_error_count": self.candidate_error_count,
             "has_regressions": self.has_regressions,
         }
         if self.example_deltas:

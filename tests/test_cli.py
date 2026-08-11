@@ -1360,6 +1360,94 @@ class EvalGateCommandTests(CliBaseTest):
             self.assertFalse(payload["has_regressions"])
             self.assertEqual(payload["example_deltas"], {"quality": {"a": -1.0, "b": 1.0}})
 
+    @staticmethod
+    def _run_with_failures(path: Path, *, examples: int, failing: int, wrong: int = 0) -> None:
+        """Run ``examples`` examples: the last ``failing`` raise, ``wrong`` miss."""
+
+        def task(index: int) -> str:
+            if index >= examples - failing:
+                raise RuntimeError("model backend unavailable")
+            if index >= examples - failing - wrong:
+                return "not the expected answer"
+            return "ok"
+
+        run_experiment(
+            path.stem,
+            dataset=Dataset([DatasetExample(id=f"e{index}", input=index, expected="ok") for index in range(examples)]),
+            task=task,
+            evaluators=[exact_match()],
+            path=path,
+            raise_on_error=False,
+        )
+
+    def test_a_candidate_whose_examples_failed_exits_nonzero(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            # The baseline answers half its examples badly; the candidate raises on
+            # those same ten, so its mean over what it still scored is higher.
+            self._run_with_failures(baseline, examples=20, failing=0, wrong=10)
+            self._run_with_failures(candidate, examples=20, failing=10)
+
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate))
+
+            self.assertEqual(code, 1)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertTrue(payload["has_regressions"])
+            self.assertTrue(payload["failed_example_regression"])
+            self.assertEqual(payload["failed_examples"], "regress")
+            # The aggregate delta says the opposite, which is the whole point.
+            self.assertEqual(payload["improved"], ["exact_match"])
+            self.assertEqual(payload["regressed"], [])
+
+    def test_failed_examples_ignore_exits_zero(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_with_failures(baseline, examples=20, failing=0, wrong=10)
+            self._run_with_failures(candidate, examples=20, failing=10)
+
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate), "--failed-examples", "ignore")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertFalse(payload["has_regressions"])
+            # Still measured and still reported; only the decision changed.
+            self.assertTrue(payload["failed_example_regression"])
+            self.assertEqual(payload["failed_examples"], "ignore")
+
+    def test_the_payload_carries_both_runs_example_and_error_counts(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_with_failures(baseline, examples=8, failing=1)
+            self._run_with_failures(candidate, examples=8, failing=1)
+
+            code, out, err = run_cli("eval-gate", str(baseline), str(candidate))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            payload = json.loads(out)
+            self.assertEqual(payload["baseline_example_count"], 8)
+            self.assertEqual(payload["baseline_error_count"], 1)
+            self.assertEqual(payload["candidate_example_count"], 8)
+            self.assertEqual(payload["candidate_error_count"], 1)
+            self.assertFalse(payload["failed_example_regression"])
+
+    def test_rejects_an_unknown_failed_examples_policy(self) -> None:
+        with temporary_workdir() as workdir:
+            baseline = workdir / "baseline.jsonl"
+            candidate = workdir / "candidate.jsonl"
+            self._run_experiment(baseline, 0.9)
+            self._run_experiment(candidate, 0.9)
+
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("eval-gate", str(baseline), str(candidate), "--failed-examples", "fail")
+
+            self.assertEqual(raised.exception.code, 2)
+
 
 class SendCommandTests(CliBaseTest):
     def test_send_reports_accepted_attempted_skipped(self) -> None:

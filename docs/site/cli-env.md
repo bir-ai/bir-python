@@ -27,7 +27,8 @@ bir send                      # send events to the default local server
 bir send-experiment .bir/experiments/<name>-<id>.jsonl
 bir eval-gate baseline.jsonl candidate.jsonl --tolerance 0.01
 bir eval-gate baseline.jsonl candidate.jsonl \
-  --tolerance 0.01 --score-tolerance latency_under=0.05 --missing-score regress
+  --tolerance 0.01 --score-tolerance latency_under=0.05 \
+  --missing-score regress --failed-examples ignore
 bir export-otel --endpoint http://localhost:4318/v1/traces  # needs the 'otel' extra
 bir prune --keep-last 500 --yes --json   # machine-readable result for a script
 bir config                    # print the effective resolved configuration
@@ -46,7 +47,7 @@ bir config --json             # the same fields as machine-readable JSON
 | `bir experiment-report EXPERIMENT_ID [--dir D] [--format {html,markdown}] [--output PATH] [--skip-invalid]` | Render one experiment to a self-contained HTML or Markdown report. |
 | `bir send [--path P] [--server URL] [--include-rotated] [--mark-sent] [--batch-size N] [--retries N] [--backoff SECONDS] [--timeout SECONDS] [--json]` | Send local events and print the upload result; optionally use bounded groups. |
 | `bir send-experiment PATH [--server URL] [--retries N] [--backoff SECONDS] [--json]` | Send a saved experiment and summary, retrying transient failures. |
-| `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance. |
+| `bir eval-gate BASELINE CANDIDATE [--tolerance N] [--score-tolerance NAME=VALUE] [--missing-score {ignore,regress}] [--failed-examples {ignore,regress}] [--per-example]` | Fail when a shared aggregate evaluator regresses past tolerance, or when more of the candidate's examples failed. |
 | `bir export-otel --endpoint URL [--path P] [--include-rotated] [--skip-invalid] [--header KEY=VALUE] [--service-name NAME] [--environment ENV] [--timeout SECONDS] [--json]` | Export local traces to an OTLP endpoint via the optional `otel` extra. |
 | `bir config [--json]` | Print the effective resolved SDK configuration (read-only). |
 
@@ -260,7 +261,7 @@ and the rest print a human summary by default and JSON with `--json`:
 | `send-experiment` | `{accepted, experiment_id}` |
 | `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, dry_run}` |
 | `export-otel` | `{traces, spans, endpoint}` (only on a delivered export; a failed one writes nothing to stdout and exits non-zero) |
-| `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, ...}` (always) |
+| `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, failed_example_regression, baseline_example_count, baseline_error_count, candidate_example_count, candidate_error_count, ...}` (always) |
 | `config` | The effective configuration |
 
 Two commands have no JSON form. `tail` streams events as they arrive rather than

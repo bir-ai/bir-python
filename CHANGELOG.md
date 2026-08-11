@@ -51,6 +51,79 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- `bir eval-gate` now fails a candidate run whose examples failed. An aggregate
+  score is a mean over the examples an evaluator actually *scored*, and a failed
+  example carries no scores at all, so failures leave that denominator rather
+  than lowering the mean. A candidate that broke therefore reported a *higher*
+  mean than the baseline that worked, and the gate — whose whole job is failing
+  a build on a regression — read only those means. Driven with a 20-example
+  dataset the baseline answers correctly on the 10 easy examples and wrongly on
+  the 10 hard ones, against a candidate that raises on the hard ones instead of
+  answering them:
+
+  ```
+                                              before        after
+  10 of 20 examples crashed                   exit 0        exit 1
+  18 of 20 examples crashed                   exit 0        exit 1
+  20 of 20 examples crashed                   exit 0        exit 1
+  both runs failed the same 5 of 20           exit 0        exit 0
+  candidate repaired the baseline's failures  exit 0        exit 0
+  ```
+
+  The first row is the sharpest: the gate did not merely pass it, it reported
+  `"deltas": {"exact_match": 0.5}` and `"improved": ["exact_match"]` — half the
+  run crashed and the diff called it an improvement.
+
+  The documented escape hatch did not reach any of this. `--missing-score
+  regress` fires on `baseline_only`, which is empty whenever the evaluator ran
+  in both runs, so it covered only the total-failure case and only when asked
+  for. Partial failure, the realistic shape, was invisible at every setting.
+
+  The new rule is that the candidate failed a larger **share** of its examples
+  than the baseline did. A share rather than a count, so two runs over datasets
+  of different sizes stay comparable — 3 of 10 regresses against 10 of 100 even
+  though it is fewer examples — and compared by cross-multiplication rather than
+  division, so it is exact and a run of zero examples needs no special case: it
+  has no share that can be larger than another's. Equal shares do not regress,
+  which is what keeps a suite that fails the same examples on both sides from
+  failing the gate every time.
+
+  `compare_experiments(failed_examples=...)` and `--failed-examples
+  {ignore,regress}` select the policy, in the shape `missing_score` already
+  established. It defaults to `"regress"`. That is a breaking change to an exit
+  code CI reads, which `0.x` permits in a minor release with the migration step
+  named: pass `--failed-examples ignore` (or `failed_examples="ignore"`) to
+  decide the gate on aggregate means alone, exactly as before.
+
+  Strictness rather than a numeric allowance was chosen deliberately. The gate
+  already fails on *any* score drop past `--tolerance`, whose default is `0.0`,
+  so an escape hatch that turns a rule off is the house style; an error is not a
+  score and has no natural tolerance unit to spend. A numeric allowance can be
+  added later without moving anything, because it would narrow a rule that
+  already exists.
+
+  The diff carries the counts whatever the policy decides, because a build could
+  not previously see them at all — the whole `to_dict()` payload had no key
+  mentioning examples, errors, or counts, and `compare_experiments` loads the
+  result file rather than the summary that records them. It now emits
+  `baseline_example_count`, `baseline_error_count`, `candidate_example_count`,
+  `candidate_error_count`, `failed_examples`, and `failed_example_regression`;
+  the last reports the comparison itself, filled in under either policy, the way
+  `baseline_only` is reported whatever `missing_score` says. `ExperimentResult`
+  gained `example_count` and `error_count` properties for the same numbers, and
+  the persisted summary is now built from them, so the two cannot drift.
+
+  No test pinned the old behavior, which is why the whole suite passed against
+  the new default before a line of it was written: every existing
+  `compare_experiments` case in `tests/test_evals.py` and every `eval-gate` case
+  in `tests/test_cli.py` builds both sides from examples that all succeeded, so
+  both error counts were zero and the new term never fired. The new cases drive
+  the shape above, the equal-share and fewer-failures cases that must not fire,
+  a share compared across datasets of different sizes in both directions, the
+  total-failure case, the empty-candidate boundary the `missing_score` policy
+  owns instead, the counts under both policies, and a diff built by hand without
+  the new fields, which decides exactly as it did before they existed.
+
 - The OTLP exporter emits the current spelling of two attribute names alongside
   the ones it already wrote. `otel.py` and `README.md` claimed the exported
   attributes "follow the GenAI semantic conventions where they exist", and two
