@@ -169,6 +169,50 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A serial run with a timeout no longer holds one thread per timed-out example.
+  Python cannot stop a thread, so a task that outran its timeout keeps running
+  until it returns; the serial path gave every example its own worker and
+  abandoned it, with nothing bounding how many piled up and `max_workers=1` the
+  default. A hung backend is exactly what the timeout is for, so the dataset was
+  the only limit. Measured on 400 examples against a task that never returns,
+  with a 5 ms timeout:
+
+  ```
+                                              run time   peak threads
+  before: one worker per example              2.70 s     402
+  bounded, waiting open-endedly for a slot    ~750 s      18
+  after:  bounded, waiting the example's own  2.76 s      18
+  ```
+
+  The middle row is the decision. Bounding the workers means an example can find
+  none free, and waiting open-endedly for one hands back exactly what `timeout`
+  exists to prevent — sixteen tasks have to return before the seventeenth example
+  can start, which took that run from 2.70 s to roughly 750 s. So the wait is
+  bounded by the example's own timeout: it was allowed that much time, and it
+  spends it waiting for a worker instead of running on one.
+
+  What that costs is that an example can be recorded as failed without having
+  run, and it says so rather than claiming its task overran: `no worker was free
+  within Ns; N task(s) from earlier timed-out examples are still running and
+  cannot be stopped`. Sixteen is the bound because it has two jobs — high enough
+  that a run whose examples occasionally overrun never queues behind them, low
+  enough that a run whose examples all hang holds a fixed handful. It is not a
+  knob; a caller who wants more concurrency has `max_workers`, whose pool bounds
+  itself the same way.
+
+  A run that returns with tasks still going says so once on the `bir` logger,
+  with the count, the way a paused store and a rotation gap already report.
+  Nothing changes for a run that meets its timeout: measured on 40 examples that
+  all finish, no extra threads, no warning, and a run with `timeout=None`
+  abandons nothing at all.
+
+  Nothing pinned this. The timeout cases assert the recorded error, the preserved
+  order and the excluded queue time; none counted threads, and none used a
+  dataset large enough to notice. The new cases run four times the bound against
+  a task that hangs and check the thread count, the distinct message for an
+  example that never started, that the run stays inside its own time budget, the
+  single report, and that a healthy run and a mostly-healthy one are untouched.
+
 - Three tests that only Windows could fail now pass there. `os.fsdecode` uses
   `surrogateescape` on POSIX and `surrogatepass` on Windows, and the latter
   refuses an invalid start byte outright, so `os.fsdecode(b"doc-\xff.pdf")`

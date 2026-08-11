@@ -168,8 +168,40 @@ its result is simply discarded. `run_experiment_async()` wraps each example in
 `asyncio.wait_for(...)`, so a timed-out example's task is cancelled and awaited
 cleanly.
 
+### What a run does with the tasks it cannot stop
+
+Those still-running tasks are bounded. A serial run keeps at most sixteen of them
+alive at once, and an example that finds none free waits for one only as long as
+it was itself allowed — its own `timeout`. If none comes free in that time it is
+recorded as an `"error"` too, saying `no worker was free within Ns; N task(s)
+from earlier timed-out examples are still running and cannot be stopped`. That is
+a different message from `task timed out after Ns` on purpose: the task did not
+overrun, it never started.
+
+The bound only ever matters when many examples time out at once, which means the
+thing they call is not answering. A run whose examples occasionally overrun never
+reaches it. Measured on 400 examples against a task that never returns, with a
+5 ms timeout:
+
+| | run time | peak threads |
+| --- | --- | --- |
+| unbounded, one worker per example | 2.70 s | 402 |
+| bounded, waiting open-endedly for a slot | ~750 s | 18 |
+| bounded, waiting only the example's timeout | 2.76 s | 18 |
+
+The third row is what ships: waiting open-endedly bounds the threads but hands
+back exactly what `timeout` exists to prevent.
+
+A run that returns with tasks still going says so once, on the `bir` logger:
+
+```
+WARNING bir: bir experiment 'nightly' returned with 16 task(s) from timed-out
+  examples still running; Python cannot stop a thread, so they end when they
+  return on their own. At most 16 run at once.
+```
+
 The default is `timeout=None` (unlimited), which is byte-for-byte identical to
-the previous behavior.
+the previous behavior — nothing is abandoned, so nothing is bounded or reported.
 
 ## Store datasets as JSONL
 

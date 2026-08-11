@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import bir.evals as evals
 from bir import configure, generation, load_events, load_traces, retrieval, span
 from bir._sdk import _reset_config_for_tests
 from bir.evals import (
@@ -3190,6 +3191,142 @@ class RunExperimentTimeoutTests(unittest.TestCase):
                         timeout=bad_type,  # type: ignore[arg-type]
                     )
                 )
+
+
+class SerialTimeoutWorkerBudgetTests(unittest.TestCase):
+    """A serial timed run holds a bounded number of the threads it abandons.
+
+    Python cannot stop a thread, so a task that outran its timeout keeps running
+    until it returns. The serial path gave each example its own worker and
+    abandoned it, which is one live thread per timed-out example with nothing
+    bounding them: 400 examples against a hanging task held 402 threads.
+
+    The bound waits for a slot only as long as the example was itself allowed,
+    because an open-ended wait hands back the thing ``timeout`` exists to
+    prevent — the same workload took roughly 750 s that way against 2.7 s. An
+    example that never gets a worker is recorded as failed, and says it never
+    ran rather than claiming its task timed out.
+    """
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    def _hanging_run(self, directory: str, *, examples: int) -> ExperimentResult:
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def hangs(_input: object) -> str:
+            # Long enough to still be running when the run ends, and released in
+            # cleanup so no thread outlives the test.
+            release.wait(timeout=30)
+            return "done"
+
+        return run_experiment(
+            "hanging",
+            dataset=Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(examples)]),
+            task=hangs,
+            evaluators=[exact_match("done")],
+            path=Path(directory) / "hanging.jsonl",
+            raise_on_error=False,
+            timeout=0.005,
+        )
+
+    def test_the_threads_a_hanging_run_holds_are_bounded(self) -> None:
+        examples = evals._MAX_LIVE_TIMED_WORKERS * 4
+        with tempfile.TemporaryDirectory() as directory:
+            before = threading.active_count()
+
+            with self.assertLogs("bir", level="WARNING"):
+                result = self._hanging_run(directory, examples=examples)
+
+            # Every example is accounted for, in dataset order, and the threads
+            # left running are the bound rather than one per example.
+            self.assertEqual(len(result.results), examples)
+            self.assertEqual([row.example_id for row in result.results], [f"q{index}" for index in range(examples)])
+            self.assertTrue(all(row.status == "error" for row in result.results))
+            self.assertLessEqual(threading.active_count() - before, evals._MAX_LIVE_TIMED_WORKERS + 1)
+
+    def test_an_example_that_never_ran_says_so(self) -> None:
+        examples = evals._MAX_LIVE_TIMED_WORKERS * 4
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("bir", level="WARNING"):
+                result = self._hanging_run(directory, examples=examples)
+
+            started = [row for row in result.results if "task timed out" in (row.error or "")]
+            never = [row for row in result.results if "no worker was free" in (row.error or "")]
+
+            # The ones that got a worker are the bound; the rest never started,
+            # and are not described as tasks that overran.
+            self.assertEqual(len(started), evals._MAX_LIVE_TIMED_WORKERS)
+            self.assertEqual(len(started) + len(never), examples)
+            self.assertIn("still running and cannot be stopped", never[0].error or "")
+
+    def test_the_run_stays_bounded_by_its_own_timeout(self) -> None:
+        examples = evals._MAX_LIVE_TIMED_WORKERS * 4
+        with tempfile.TemporaryDirectory() as directory:
+            started = time.monotonic()
+            with self.assertLogs("bir", level="WARNING"):
+                self._hanging_run(directory, examples=examples)
+            elapsed = time.monotonic() - started
+
+            # Waiting open-endedly for a slot would take as long as the tasks
+            # hang; waiting only the example's own timeout keeps the run within
+            # examples * timeout, with room for the machine.
+            self.assertLess(elapsed, 5.0)
+
+    def test_the_report_names_what_is_still_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("bir", level="WARNING") as logs:
+                self._hanging_run(directory, examples=evals._MAX_LIVE_TIMED_WORKERS * 2)
+
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("still running", logs.output[0])
+            self.assertIn(str(evals._MAX_LIVE_TIMED_WORKERS), logs.output[0])
+
+    def test_a_run_that_meets_its_timeout_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            before = threading.active_count()
+
+            with self.assertNoLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "healthy",
+                    dataset=Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(40)]),
+                    task=lambda value: value,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "healthy.jsonl",
+                    timeout=5.0,
+                )
+
+            # Nothing is abandoned, so nothing accumulates and nothing is said.
+            self.assertTrue(all(row.status == "success" for row in result.results))
+            self.assertLessEqual(threading.active_count() - before, 1)
+
+    def test_a_few_overruns_never_reach_the_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = threading.Event()
+            self.addCleanup(release.set)
+
+            def occasionally_slow(value: int) -> int:
+                if value % 10 == 0:
+                    release.wait(timeout=30)
+                return value
+
+            with self.assertLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "mixed",
+                    dataset=Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(40)]),
+                    task=occasionally_slow,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "mixed.jsonl",
+                    raise_on_error=False,
+                    timeout=0.05,
+                )
+
+            errors = [row for row in result.results if row.status == "error"]
+            # Four overran; the other thirty-six ran normally and none was
+            # refused a worker, which is what the headroom is for.
+            self.assertEqual(len(errors), 4)
+            self.assertTrue(all("task timed out" in (row.error or "") for row in errors))
 
 
 class RenderExperimentReportTests(unittest.TestCase):

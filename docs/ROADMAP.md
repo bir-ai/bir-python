@@ -72,53 +72,61 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
+| 1 | A concurrent run with a timeout waits out the tasks it timed out | P2 | M | A hung backend cannot make a timed run take as long as if there were no timeout | — |
 | 2 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
 
-### 1. A serial run with a timeout holds one thread per timed-out example
+### 1. A concurrent run with a timeout waits out the tasks it timed out
 
-**Why.** `_run_example_capturing_sync` (`bir/evals.py:1549-1592`) gives every
-example its own `ThreadPoolExecutor(max_workers=1)` when `timeout` is set, and
-abandons it with `shutdown(wait=False)` when the example times out. The
-docstring explains why — a shared executor would make the next example wait
-behind a hung one, defeating the timeout — but nothing bounds how many abandoned
-workers pile up, and `max_workers=1` is the default.
+**Why.** Found while bounding the serial path's threads, and not covered by it.
+`_collect_threaded_results_with_timeout` (`bir/evals.py:1462-1522`) submits every
+example to one pool of `max_workers` and then, for each in dataset order, waits
+*untimed* for that example's task to start:
 
-Driven with 400 examples whose task sleeps 30 s and a 5 ms timeout:
-
-```
-max_workers=1   400 examples, 400 timed out, run took 2.70 s, peak live threads: 402
-                threads still alive when run_experiment returned: 401
-                they drain only as their tasks return, up to 30 s later
+```python
+started_events[index].wait()
+remaining = timeout - (time.monotonic() - started_monotonic[index])
 ```
 
-The threaded path bounds the same workload at `max_workers` — the earlier
-20,000-event and 50-prune sweeps showed no growth in descriptors, threads, or
-temporary directories anywhere else, so this is the one place a long run
-accumulates. A hung network call is exactly what the timeout exists for, so the
-dataset size is the only limit on the thread count.
+That is what keeps queue time out of an example's clock, and it is documented.
+What it also means is that when every worker is stuck on a task that timed out,
+nothing starts until one returns — so the run takes as long as the tasks hang,
+which is what `timeout` exists to prevent. Measured on 60 examples whose task
+sleeps 20 s, with a 5 ms timeout and `max_workers=4`:
 
-Tests pin the surrounding behaviour but not this. `tests/test_evals.py`'s timeout
-cases assert the recorded error, the preserved order, and that queue time is
-excluded; none counts threads, and none uses a dataset large enough to notice.
+```
+                       run time   peak threads   errors
+max_workers=4          280.08 s   9              60 (all "task timed out")
+```
+
+Four workers, twenty seconds each, sixty examples: 60 / 4 x 20 s. The threads are
+bounded — that half is fine and always was — but the run is not. The serial path
+now finishes the same shape of workload in 2.76 s.
+
+Tests pin the untimed wait's *purpose* but not its cost.
+`tests/test_evals.py`'s `test_threaded_timeout_excludes_worker_queue_time` asserts
+that a queued example is not charged for waiting, which is the property that
+makes the wait untimed; nothing measures how long the run takes when every
+worker is stuck.
 
 **Scope.**
 
-- Bound the abandoned workers. The options are a shared executor that grows to a
-  cap, a cap on concurrently abandoned workers after which the run waits, or
-  refusing to start a serial timed run above some dataset size — the first keeps
-  the timeout's meaning, the second trades it for a bound, and the third is
-  honest but unhelpful.
-- Decide and record what happens when the cap is reached. Waiting for a hung task
-  reintroduces exactly what the per-example executor was built to avoid, so
-  whatever is chosen has to say which of the two properties it keeps.
-- Report it rather than only bounding it: a run that abandoned workers should say
-  how many are still running when it returns, the way a rotation gap and a
-  repaired store already report.
-- Add a benchmark or test that counts live threads, since nothing does.
+- Bound the wait for a worker the way the serial path now bounds it: an example
+  waits at most its own `timeout` for a task slot, and is recorded as never
+  having run if none comes free.
+- Reuse the serial path's vocabulary rather than inventing a second one. It
+  already has `_no_worker_exc`, which says the task never started and why, and
+  `_report_live_timed_workers`, which says what is still running when the run
+  returns.
+- Decide and record what this does to the documented queue-time exclusion. An
+  example that waits and then runs must still not be charged for the wait — that
+  part does not change — but an example that waits and never runs now consumes
+  its timeout waiting, which the current docstring does not contemplate.
+- Add a test that measures the run's wall time with every worker stuck, since
+  the existing timeout tests measure only what is recorded.
 
-**Done when** a serial run over a dataset of any size, all of whose examples time
-out, holds a bounded number of live threads.
+**Done when** a run with `max_workers > 1` over a dataset whose tasks all hang
+finishes within roughly `examples * timeout` rather than within the time the
+tasks take.
 
 ### 2. A prompt's `name` and `version` are written with whatever type they were given
 
@@ -179,10 +187,11 @@ strings throughout and assert the recorded shape; nothing passes a non-string.
 
 ## Sequencing
 
-The two remaining items are independent of each other and of the transport work
-that shipped from this audit. Item 2 is the smallest piece of work here; item 1
-is the only one that needs a decision about which of two properties to keep, and
-is the reason it is first.
+The two remaining items are independent of each other. Item 1 finishes the
+timeout story the serial bound started, and can reuse what shipped with it —
+the message for an example that never ran and the report of what is still
+running — so it is worth taking while that code is fresh. Item 2 is the smallest
+piece of work here.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -226,8 +235,9 @@ an interrupted write never finished, repairing that line on the next append
 instead of writing the following event onto it, writing a report through a
 staged file so a failed render keeps the previous one, and refusing an evaluator
 list that names the same evaluator twice, refusing a redirect instead of
-following it to a host nobody configured, and refusing a batch response that
-cannot describe the request it answers.
+following it to a host nobody configured, refusing a batch response that cannot
+describe the request it answers, and bounding the workers a serial timed run
+abandons.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
@@ -240,11 +250,14 @@ saying the bound is on what a message shows rather than on what is parsed. The
 new bound is on the read, and is derived from the request rather than fixed.
 
 Item 1 sits beside "experiment timeouts" and does not reopen them. The timeout
-mechanism works exactly as documented: 400 of 400 examples timed out, were
-recorded as error rows, kept dataset order, and the run returned in 2.70 s. This
-is about what the mechanism leaves running behind it, which that work named as a
-consequence ("a timed-out task keeps running in the background") without bounding
-it.
+mechanism records what it should: 60 of 60 examples timed out, were recorded as
+error rows, and kept dataset order. This is about how long the run takes to say
+so when every worker is stuck, which is the cost of the untimed wait that work
+introduced to keep queue time out of an example's clock.
+
+It also sits beside the serial bound that shipped from this audit and is the half
+that bound does not reach: that one was about how many threads a run holds, this
+one about how long it holds them for.
 
 ## Declined
 
@@ -374,7 +387,7 @@ exactly — `None` outside, the ids inside, `None` again in a plain thread.
 rotation at 32 KB: file descriptors 4 → 4, threads 1 → 1, four rotated files as
 configured. Fifty `prune` runs over a 200-trace store: descriptors 4 → 4, and
 zero leftover `bir-prune-index-*` temporary directories. The only place anything
-accumulated is item 1.
+accumulated was the serial timed run's abandoned workers, which has shipped.
 
 **`BIR_*` environment parsing.** Eleven values driven through a fresh
 interpreter. Every malformed one is rejected before the process can record

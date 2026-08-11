@@ -44,6 +44,7 @@ from ._eval_models import (
 )
 from ._sdk import (
     _duration_ms,
+    _logger,
     _now,
     _record_score_event,
     _safe_capture,
@@ -691,6 +692,9 @@ def run_experiment(
         )
 
     results: list[ExperimentExampleResult] = []
+    # One budget for the whole run, so the bound is on the run rather than on any
+    # one example. Unused when ``timeout`` is None, where nothing is abandoned.
+    budget = _LiveWorkerBudget(_MAX_LIVE_TIMED_WORKERS)
 
     with _ExperimentResultWriter(
         output_path,
@@ -707,6 +711,7 @@ def run_experiment(
                 evaluators=evaluator_list,
                 record_traces=record_traces,
                 timeout=timeout,
+                budget=budget,
             )
             results.append(result)
             writer.write(result, failed=error is not None)
@@ -719,8 +724,10 @@ def run_experiment(
                     end_time=_now(),
                     results=results,
                 )
+                _report_live_timed_workers(name, budget)
                 raise error
 
+    _report_live_timed_workers(name, budget)
     return _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
@@ -1555,6 +1562,7 @@ def _run_example_capturing_sync(
     evaluators: list[DeterministicEvaluator],
     record_traces: bool,
     timeout: float | None,
+    budget: _LiveWorkerBudget | None = None,
 ) -> tuple[ExperimentExampleResult, Exception | None]:
     """Run one example for the serial path, optionally bounded by ``timeout``.
 
@@ -1562,6 +1570,12 @@ def _run_example_capturing_sync(
     runs on a dedicated single-worker executor so a timed-out (still-running)
     worker never blocks the next example; a worker that exceeds ``timeout`` is
     recorded as a failed example and the executor is abandoned without waiting.
+
+    ``budget`` bounds how many of those abandoned workers may be alive at once.
+    Taking a slot blocks while the bound is full, so an example can wait for a
+    worker to return before its own task starts -- the same wait the concurrent
+    path already has. Its timeout still starts when its task starts, so a
+    slot it waited for costs it none of its time.
     """
 
     if timeout is None:
@@ -1573,16 +1587,26 @@ def _run_example_capturing_sync(
             evaluators=evaluators,
             record_traces=record_traces,
         )
+    budget = budget if budget is not None else _LiveWorkerBudget(_MAX_LIVE_TIMED_WORKERS)
+    if not budget.acquire(timeout):
+        exc = _no_worker_exc(timeout, _MAX_LIVE_TIMED_WORKERS)
+        return _error_example_result(example, exc), exc
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(
-        _capture_example,
-        experiment_id=experiment_id,
-        experiment_name=experiment_name,
-        example=example,
-        task=task,
-        evaluators=evaluators,
-        record_traces=record_traces,
-    )
+    try:
+        future = executor.submit(
+            _releasing(budget, _capture_example),
+            experiment_id=experiment_id,
+            experiment_name=experiment_name,
+            example=example,
+            task=task,
+            evaluators=evaluators,
+            record_traces=record_traces,
+        )
+    except BaseException:
+        # Nothing will run, so nothing will hand the slot back.
+        budget.release()
+        executor.shutdown(wait=False)
+        raise
     try:
         return future.result(timeout=timeout)
     except concurrent.futures.TimeoutError:
@@ -1592,10 +1616,116 @@ def _run_example_capturing_sync(
         executor.shutdown(wait=False)
 
 
+# How many workers a serial timed run may have alive at once. Python cannot stop
+# a thread, so a task that outran its timeout keeps running until it returns on
+# its own; the serial path gave each example its own worker and abandoned it,
+# which is one live thread per timed-out example and nothing bounding them. A
+# dataset is the only limit, and a hung backend is exactly what the timeout is
+# for, so the count grew with the dataset: 400 examples against a hanging task
+# held 402 threads, 401 of them still running when the run returned.
+#
+# Sixteen because the number has two jobs. It has to be high enough that a run
+# whose examples occasionally overrun never queues behind them -- sixteen
+# outstanding is far past what an occasional slow example produces -- and low
+# enough that a run whose examples all hang holds a fixed handful rather than one
+# per example. It is not a knob: a caller who wants more concurrency has
+# ``max_workers``, which bounds its own pool the same way.
+_MAX_LIVE_TIMED_WORKERS = 16
+
+
+class _LiveWorkerBudget:
+    """A count of the timed workers alive at once, and a bounded wait for a slot.
+
+    The wait is bounded by the example's own timeout rather than open-ended, and
+    that is the decision this bound turns on. An open-ended wait bounds the
+    threads but hands back the thing ``timeout`` exists to prevent: measured on
+    400 examples against a task that sleeps 30 s, waiting for a slot took the run
+    from 2.70 s to roughly 750 s, because sixteen tasks have to return before the
+    seventeenth example can start. Waiting only as long as the example was
+    allowed keeps the run bounded by ``examples * timeout`` -- 2 s for that same
+    workload -- and keeps the threads bounded too. What it costs is that an
+    example can be recorded as failed without having run, which
+    :func:`_no_worker_exc` says in as many words rather than calling it a task
+    timeout.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._live = 0
+        self._free = threading.Condition()
+
+    def acquire(self, timeout: float) -> bool:
+        """Take a slot, waiting at most ``timeout``; False if none came free."""
+
+        with self._free:
+            if not self._free.wait_for(lambda: self._live < self._limit, timeout=timeout):
+                return False
+            self._live += 1
+            return True
+
+    def release(self) -> None:
+        with self._free:
+            self._live -= 1
+            self._free.notify()
+
+    @property
+    def live(self) -> int:
+        """Return how many workers are alive right now."""
+
+        with self._free:
+            return self._live
+
+
+def _releasing(budget: _LiveWorkerBudget, work: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap ``work`` so its slot is returned when the thread finally leaves it.
+
+    Released by the worker rather than by the caller, because the caller stops
+    waiting at the timeout while the thread keeps running: the slot is occupied
+    until the task returns, which is the thing being counted.
+    """
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return work(*args, **kwargs)
+        finally:
+            budget.release()
+
+    return run
+
+
+def _report_live_timed_workers(name: str, budget: _LiveWorkerBudget) -> None:
+    """Say that a run left tasks running, since its results do not show it."""
+
+    live = budget.live
+    if not live:
+        return
+    _logger.warning(
+        "bir experiment %r returned with %d task(s) from timed-out examples still running; Python "
+        "cannot stop a thread, so they end when they return on their own. At most %d run at once.",
+        name,
+        live,
+        _MAX_LIVE_TIMED_WORKERS,
+    )
+
+
 def _timeout_exc(timeout: float) -> TimeoutError:
     """Return the exception used for a timed-out example's error result."""
 
     return TimeoutError(f"task timed out after {timeout}s")
+
+
+def _no_worker_exc(timeout: float, limit: int) -> TimeoutError:
+    """Return the exception for an example that never got a worker to run on.
+
+    Distinct from :func:`_timeout_exc` because the task did not overrun -- it
+    never started. The message says so, and says why: earlier examples timed out
+    and their tasks are still running, because Python cannot stop a thread.
+    """
+
+    return TimeoutError(
+        f"no worker was free within {timeout}s; {limit} task(s) from earlier timed-out examples "
+        "are still running and cannot be stopped"
+    )
 
 
 def _expected_value(configured_expected: Any, example_expected: Any, evaluator_name: str) -> Any:
