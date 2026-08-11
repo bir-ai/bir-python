@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import tempfile
 import threading
 import time
@@ -3315,9 +3314,12 @@ class RenderExperimentReportTests(unittest.TestCase):
 
     def test_a_report_always_encodes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            # os.fsdecode's surrogate escapes are the only code points a str can
-            # hold that no encoder will take, and a filesystem walk produces them.
-            walked = os.fsdecode(b"doc-\xff.pdf")
+            # Surrogate escapes are the only code points a str can hold that no
+            # encoder will take, and a filesystem walk produces them: this is
+            # what os.fsdecode leaves on POSIX for a non-UTF-8 filename. Written
+            # out rather than decoded, because os.fsdecode uses surrogatepass on
+            # Windows and refuses the byte there.
+            walked = "doc-\udcff.pdf"
             result = run_experiment(
                 walked,
                 dataset=Dataset([DatasetExample(id=walked, input="hi", expected="ok")]),

@@ -1233,9 +1233,11 @@ class ExperimentReportCommandTests(CliBaseTest):
 
     def test_an_example_id_from_a_filesystem_walk_still_renders(self) -> None:
         with temporary_workdir() as workdir:
-            # What os.fsdecode returns for a filename that is not valid UTF-8,
-            # which is what a document-ingestion dataset's ids are.
-            walked = os.fsdecode(b"doc-\xff.pdf")
+            # The lone surrogate os.fsdecode leaves on POSIX for a filename
+            # that is not valid UTF-8, which is what a document-ingestion
+            # dataset's ids are. Written out rather than decoded: os.fsdecode
+            # uses surrogatepass on Windows and refuses the byte there.
+            walked = "doc-\udcff.pdf"
             result = run_experiment(
                 "walk",
                 dataset=Dataset([DatasetExample(id=walked, input="hi", expected="ok")]),

@@ -169,6 +169,21 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- Three tests that only Windows could fail now pass there. `os.fsdecode` uses
+  `surrogateescape` on POSIX and `surrogatepass` on Windows, and the latter
+  refuses an invalid start byte outright, so `os.fsdecode(b"doc-\xff.pdf")`
+  raised `UnicodeDecodeError` on the Windows legs of two report tests. They want
+  the string a filesystem walk leaves, not the decoding, so they now write
+  `"doc-\udcff.pdf"` directly — the same value, on every platform.
+
+  The third asserted that a repaired store no longer contains the truncated
+  fragment, as a *substring*. The fragment is the head of an event line, and
+  every event written in the same clock tick shares that head, so on a platform
+  whose clock is coarse enough for three events to share a timestamp the check
+  failed on the clock rather than on the repair. It now asserts the fragment is
+  not present as a whole line, which is exact, and that the store ends in a
+  terminator.
+
 - `scripts/benchmarks.py --smoke` runs again. Its `send_batched` case stubs the
   transport so the measurement is Bir's batching rather than a server, and it
   stubbed `urllib.request.urlopen` — which sends no longer call. The stub was
@@ -448,11 +463,19 @@ Before publishing, verify the release with the SDK release checklist in
   guard against something rare:
 
   ```
-                       baseline    every append    guarded by size
-  trace_recorded       70.4 µs     86.9 µs (+23%)  72.4 µs (+2.8%)
-  generation_recorded  145.1 µs    176.7 µs (+22%) 146.6 µs (+1.0%)
-  store_rotation       171.1 µs    206.0 µs (+20%) 178.5 µs (+4.3%)
+                       baseline    every append     guarded by size
+  trace_recorded       70.4 µs     86.9 µs (+23%)   74.8 µs
+  generation_recorded  145.1 µs    176.7 µs (+22%)  152.5 µs
+  store_rotation       171.1 µs    206.0 µs (+20%)  191.2 µs
   ```
+
+  The guarded column is best-of-four runs at `--repeat 9`; the same case varied
+  74.5–80.5 µs across consecutive runs on this machine, so read it as "a few
+  percent" rather than as a figure to compare against a later one. The
+  every-append column is far enough outside that band to be the real difference.
+  The size is read from the path rather than the descriptor, so the check does
+  not depend on ``os.fstat``, which a caller may be substituting for reasons of
+  its own.
 
   So the byte is read only when the file is not exactly where this process left
   it: the first append to a store, an append after one that did not finish,

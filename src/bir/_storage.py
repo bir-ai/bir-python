@@ -725,8 +725,11 @@ def _append_event(
             _verified_tail = None
             with open(trace_path, "a", encoding="utf-8", opener=_private_opener) as trace_file:
                 trace_file.write(payload)
-                trace_file.flush()
-                _verified_tail = (trace_path, os.fstat(trace_file.fileno()).st_size)
+            # Measured the same way the check above measures it, and after the
+            # file is closed so the size is the whole write. Asking the path
+            # rather than the descriptor also keeps this off ``os.fstat``, which
+            # a caller may be substituting for reasons of its own.
+            _verified_tail = (trace_path, _file_size(trace_path))
     return dropped
 
 

@@ -186,7 +186,12 @@ class PruneRepairsAnInterruptedWriteTests(unittest.TestCase):
             traces = bir.load_traces()
             self.assertEqual(len(traces), 1)
             self.assertEqual(len(traces[0].events), 2)
-            self.assertNotIn(damaged, TRACE_PATH.read_text(encoding="utf-8"))
+            # As a line, not as a substring: the fragment is the head of an
+            # event, and every event written in the same clock tick shares that
+            # head, so a substring check passes or fails on the clock's
+            # resolution rather than on the repair.
+            self.assertNotIn(damaged, TRACE_PATH.read_text(encoding="utf-8").splitlines())
+            self.assertTrue(TRACE_PATH.read_bytes().endswith(b"\n"))
 
     def test_a_dry_run_previews_the_drop_without_writing(self) -> None:
         with temporary_workdir():
