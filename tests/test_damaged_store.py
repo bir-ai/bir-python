@@ -7,9 +7,17 @@ damaged line into total loss of everything recorded before it.
 
 These tests pin both halves of the answer: the strict default that a program
 building on ``load_events`` / ``load_traces`` relies on, and the opt-in CLI read
-that shows what survived and says what it could not read. The commands that
-write — ``send`` and ``prune`` — must stay strict, because skipping a line there
-would drop or duplicate recorded data rather than hide it from a table.
+that shows what survived and says what it could not read.
+
+The commands that write have no such flag, because skipping a line there would
+drop or duplicate recorded data rather than hide it from a table. ``prune`` has
+one exception, pinned below: a final line the file never terminated. An event is
+appended as one whole line ending in a newline, so a missing terminator proves
+the bytes were never a record and no reader could ever read them — and refusing
+them made the one command that reclaims space unusable on the store a full disk
+produces. That opening is exactly one line wide. A line that was written whole
+and cannot be parsed still refuses, wherever it sits, and ``send`` still refuses
+either one.
 """
 
 from __future__ import annotations
@@ -128,14 +136,15 @@ class StrictReadingTests(unittest.TestCase):
                     self.assertEqual(code, 1)
                     self.assertIn("Invalid JSON in trace file", err)
 
-    def test_writing_commands_stay_strict(self) -> None:
+    def test_send_stays_strict_about_the_interrupted_write(self) -> None:
         with temporary_workdir():
             record_traces(3)
             truncate_last_line()
 
-            # Skipping a line here would delete or re-send data the user still
-            # has, so these have no opt-out and must keep refusing.
-            code, _out, err = run_cli("prune", "--keep-last", "1", "--dry-run")
+            # Sending is not the repair path, and re-sending or dropping a record
+            # is not something a transport may decide on its own, so this refuses
+            # what prune now reads past. The remedy is to prune first.
+            code, _out, err = run_cli("send")
 
             self.assertEqual(code, 1)
             self.assertIn("Invalid JSON in trace file", err)
@@ -148,6 +157,133 @@ class StrictReadingTests(unittest.TestCase):
                 with self.subTest(command=command[0]):
                     with self.assertRaises(SystemExit):
                         run_cli(*command, "--skip-invalid")
+
+
+class PruneRepairsAnInterruptedWriteTests(unittest.TestCase):
+    """``prune`` reads past a final line no write finished, and only that.
+
+    This reverses a decision: prune used to refuse any store with a line it could
+    not parse, which meant the store a full disk produces could not be shrunk at
+    all, not even previewed with ``--dry-run``. The opening is bounded by the
+    file's own bytes rather than by a flag — a line without a terminator — so the
+    tests below pin both what it now reads past and what it still refuses.
+    """
+
+    def test_prune_completes_and_drops_the_unterminated_line(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            damaged = truncate_last_line()
+
+            code, out, err = run_cli("prune", "--keep-last", "1", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=", out)
+            self.assertIn("dropped an incomplete final line", err)
+            self.assertIn(str(len(damaged.encode("utf-8"))), err)
+
+            # The store is readable again, by the strict loaders and not just the
+            # opt-in read, and the surviving trace kept every one of its events.
+            traces = bir.load_traces()
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(len(traces[0].events), 2)
+            self.assertNotIn(damaged, TRACE_PATH.read_text(encoding="utf-8"))
+
+    def test_a_dry_run_previews_the_drop_without_writing(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            truncate_last_line()
+            before = TRACE_PATH.read_bytes()
+
+            code, out, err = run_cli("prune", "--keep-last", "1", "--dry-run")
+
+            self.assertEqual(code, 0)
+            self.assertIn("dry run", out)
+            self.assertIn("would drop an incomplete final line", err)
+            self.assertEqual(TRACE_PATH.read_bytes(), before)
+
+    def test_the_line_goes_even_when_the_selection_removes_nothing(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            truncate_last_line()
+
+            # Keeping more traces than exist selects none for removal. The repair
+            # must not depend on the selection filter happening to match.
+            code, out, err = run_cli("prune", "--keep-last", "100", "--yes")
+
+            self.assertEqual(code, 0)
+            self.assertIn("removed=0", out)
+            self.assertIn("dropped an incomplete final line", err)
+            # Two, not three: the line the write never finished was the third
+            # trace's root, so that trace has no root to be built from. Its child
+            # event survives as an orphan, which is what the store held all along.
+            self.assertEqual(len(bir.load_traces()), 2)
+
+    def test_a_line_written_whole_still_refuses_wherever_it_is(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            append_line("{ half a line")
+            at_end = TRACE_PATH.read_bytes()
+
+            code, _out, err = run_cli("prune", "--keep-last", "1", "--yes")
+            self.assertEqual(code, 1)
+            self.assertIn("Invalid JSON in trace file", err)
+            self.assertEqual(TRACE_PATH.read_bytes(), at_end)
+
+            # The same line one row up, so the refusal is about the terminator
+            # rather than about being last.
+            lines = at_end.split(b"\n")
+            TRACE_PATH.write_bytes(b"\n".join(lines[:2] + [b"{ half a line"] + lines[2:]))
+            in_the_middle = TRACE_PATH.read_bytes()
+
+            code, _out, err = run_cli("prune", "--keep-last", "1", "--yes")
+            self.assertEqual(code, 1)
+            self.assertIn("Invalid JSON in trace file", err)
+            self.assertEqual(TRACE_PATH.read_bytes(), in_the_middle)
+
+    def test_a_rotated_sibling_is_not_read_past(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            rotated = TRACE_PATH.with_name(TRACE_PATH.name + ".1")
+            TRACE_PATH.replace(rotated)
+            # A rotated file is never appended to, so a fragment there is not a
+            # write in progress and prune has no reason to assume anything.
+            with rotated.open("a", encoding="utf-8") as sibling:
+                sibling.write('{"id":"frag')
+            record_traces(1)
+            before = rotated.read_bytes()
+
+            code, _out, err = run_cli("prune", "--keep-last", "1", "--yes", "--include-rotated")
+
+            self.assertEqual(code, 1)
+            self.assertIn("Invalid JSON in trace file", err)
+            self.assertEqual(rotated.read_bytes(), before)
+
+    def test_a_healthy_store_reports_nothing_and_reclaims_the_same_bytes(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+
+            code, out, err = run_cli("prune", "--keep-last", "1", "--yes", "--json")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertEqual(json.loads(out)["incomplete_tail_bytes"], 0)
+
+    def test_the_json_result_carries_the_dropped_byte_count(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            damaged = truncate_last_line()
+
+            code, out, err = run_cli("prune", "--keep-last", "1", "--yes", "--json")
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["incomplete_tail_bytes"], len(damaged.encode("utf-8")))
+            # It is not an event, so it is not counted as one: the two removed
+            # events are the one complete trace that --keep-last 1 dropped.
+            self.assertEqual(payload["removed_events"], 2)
+            self.assertGreater(payload["bytes_reclaimed"], payload["incomplete_tail_bytes"])
+            # The report is on stderr, so --json still writes only JSON to stdout.
+            self.assertIn("dropped an incomplete final line", err)
 
 
 class SkipInvalidTests(unittest.TestCase):

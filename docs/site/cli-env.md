@@ -259,7 +259,7 @@ and the rest print a human summary by default and JSON with `--json`:
 | `experiment-show` | One experiment with its per-example results |
 | `send` | `{accepted, attempted, skipped}` |
 | `send-experiment` | `{accepted, experiment_id}` |
-| `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, dry_run}` |
+| `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, incomplete_tail_bytes, dry_run}` |
 | `export-otel` | `{traces, spans, endpoint}` (only on a delivered export; a failed one writes nothing to stdout and exits non-zero) |
 | `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, failed_example_regression, baseline_example_count, baseline_error_count, candidate_example_count, candidate_error_count, ...}` (always) |
 | `config` | The effective configuration |
@@ -377,6 +377,54 @@ START                             STATUS   DURATION  EVENTS  NAME
 The report goes to stderr, so `--json` still writes only JSON to stdout. The
 flag is available on `traces`, `show`, `stats`, and `export-otel` — the commands
 that only display what they read.
+
+### Recovering after a full disk
+
+`--skip-invalid` lets you *read* a damaged store. Getting the store back to a
+state every reader accepts is `bir prune`'s job, and the case it handles is the
+one a full disk leaves.
+
+An event is appended as one whole line ending in a newline, so a file whose last
+line has no newline ends in a write that never finished: those bytes were never a
+complete event and no reader ever could read them. `bir prune` drops that one
+line as it rewrites the store, and says so:
+
+```
+$ bir prune --keep-last 500 --yes
+bir: dropped an incomplete final line of 133 bytes; a write never finished it, so it was never a readable event
+removed=2704 kept=5 events=2704 bytes=899455
+```
+
+`--dry-run` previews the same thing without writing (`would drop …`), and
+`--json` reports the size as `incomplete_tail_bytes`. It is counted separately
+from `removed_events` because it is not an event — no selection filter named it —
+and it is already inside `bytes_reclaimed`, which measures the file. The line
+goes even when the selection removes no traces, so a repair never depends on
+`--keep-last` happening to match.
+
+That opening is exactly one line wide, and nothing else changed:
+
+- a line that was **written whole** and cannot be parsed still refuses, whether
+  it is the last line or in the middle — only the missing terminator proves
+  nothing was recorded there;
+- a fragment in a **rotated** sibling still refuses, because nothing appends to a
+  rotated file;
+- **`bir send`** still refuses either one. Sending is not the repair path, so
+  prune first, then send.
+
+`prune` writes the surviving lines to a sibling staging file and renames it over
+the original, which is what makes an interrupted prune safe. It therefore needs
+free space for what survives, and on a volume with **no** bytes left it fails
+before it can reclaim any:
+
+```
+$ bir prune --keep-last 5 --yes
+bir: [Errno 28] No space left on device: '.bir/.traces.jsonl.22406.6e808ef2.tmp'
+```
+
+`--dry-run` still works there and tells you what is reclaimable. Free anything at
+all and the real run goes through: measured on a 1 MB volume the store had filled
+completely, 57 KB of headroom was enough to reclaim 876 KB.
 
 An experiment store fails the same way and answers it the same way. An experiment
 is a result JSONL plus a `*.summary.json` beside it, and the listing reads every

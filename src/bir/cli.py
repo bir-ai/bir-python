@@ -784,6 +784,16 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         status=args.status,
         dry_run=not write,
     )
+    # The one thing prune removes that no selection filter named, so it is said
+    # out loud rather than folded into the byte count. On stderr, so a --json run
+    # still writes only JSON to stdout.
+    if result.incomplete_tail_bytes:
+        verb = "would drop" if result.dry_run else "dropped"
+        _report(
+            f"{verb} an incomplete final line of {result.incomplete_tail_bytes} bytes; "
+            "a write never finished it, so it was never a readable event"
+        )
+
     if args.json:
         # ``dry_run`` is a field rather than a suffix on a sentence, so a script
         # can tell a preview from a write without matching English.
@@ -793,6 +803,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
                 "kept_traces": result.kept_traces,
                 "removed_events": result.removed_events,
                 "bytes_reclaimed": result.bytes_reclaimed,
+                "incomplete_tail_bytes": result.incomplete_tail_bytes,
                 "dry_run": result.dry_run,
             },
             sys.stdout,

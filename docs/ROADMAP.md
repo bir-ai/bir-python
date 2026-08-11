@@ -70,83 +70,63 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A store the disk filled cannot be pruned | P1 | M | The documented way to reclaim space works on the store the documented failure produces | — |
+| 1 | An append onto an unterminated file destroys the next event | P1 | S | A store that ends in an interrupted write cannot lose a second event to it | — |
 | 2 | `experiment-report --output` destroys the file it cannot finish | P2 | S | A failed render leaves the previous report intact | — |
 | 3 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
 
-### 1. A store the disk filled cannot be pruned
+### 1. An append onto an unterminated file destroys the next event
 
-**Why.** `docs/site/core-api.md:292-309` names a full disk as a failure the store
-handles: the append fails, the traced call is unaffected, and one `ERROR bir:`
-line says recording is paused. It does exactly that. What it also leaves is a
-half-written final line, and `bir prune` — the command whose job is reclaiming
-that space — refuses to read it.
-
-Driven on a 1 MB HFS+ volume, recording with the default configuration
-(`max_bytes=None`, a single unbounded file, `bir/_config.py:83`) until the
-volume filled:
+**Why.** Found while shipping the prune repair, and not covered by it. When the
+store's active file ends in a write that never finished, the next append does not
+start a new line — `_append_event` (`bir/_storage.py:687-707`) opens the file with
+`"a"` and writes its payload at the byte after the fragment, so the two fuse into
+one line that parses as neither. The event that recovery wrote is destroyed along
+with the one that was interrupted, and the damage stops being a trailing fragment
+and becomes a permanent unreadable line in the middle of the store:
 
 ```
-free before: 901,120 bytes
-4,000 traces attempted, all 4,000 calls returned normally, 0 exceptions reached the caller
-ERROR bir: bir could not write to the trace store at mnt/traces.jsonl:
-  [Errno 28] No space left on device. Recording is paused and events are being dropped
-
-store: 901,120 bytes, 2,710 lines, 2,709 parse, 1 does not, ends with newline: False
-        (the last line is a 133-byte fragment of one event)
+after the interrupted write   6 lines, line 6 unreadable, ends with newline: False
+after 1 more append           6 lines, line 6 unreadable, ends with newline: True
+                              names: t0 t1 t2 t3 t4 <unreadable>
+                              -> 'first-after-recovery' was written whole and is gone
+after 3 more appends          9 lines, line 6 unreadable
+                              names: t0 t1 t2 t3 t4 <unreadable> later-0 later-1 later-2
 ```
 
-Then, against that store:
+This is the ordinary sequence after a full disk when the process keeps running:
+recording is paused and retried per event (`docs/site/core-api.md:292-309`), so
+the first append to succeed after any space frees is the one that gets eaten. It
+also converts the only shape prune can repair into one it refuses by design —
+after the fuse the line ends in a newline, and a terminated line is what proves
+nothing about whether it was written whole.
 
-```
-bir traces                                    exit 1   Invalid JSON in trace file … at line 2710
-bir traces --skip-invalid                     exit 0   2,709 traces listed
-bir stats  --skip-invalid                     exit 0   traces 2709
-bir prune --keep-last 5 --dry-run             exit 1   Invalid JSON in trace file … at line 2710
-bir prune --keep-last 5 --yes                 exit 1   Invalid JSON in trace file … at line 2710
-bir prune --keep-last 5 --yes --skip-invalid  exit 2   error: unrecognized arguments: --skip-invalid
-```
-
-`_prune_trace_store` (`bir/_storage.py:1080-1113`) feeds `_iter_trace_events`
-without an `on_invalid` callback, so the first bad line raises before any
-selection happens — `--dry-run` fails too, so there is not even a preview. The
-user is left with a full disk, a store that reads fine with one flag, and no
-supported way to shrink it.
-
-Tests pin the current behavior, so this reverses a decision rather than fixing an
-oversight. `tests/test_damaged_store.py:130-140` asserts the refusal and
-`:142-149` asserts that the flag does not exist on `prune` or `send`, with the
-reasoning stated in the file's docstring at `:11-12` and repeated in the test
-body: "Skipping a line here would delete or re-send data the user still has, so
-these have no opt-out and must keep refusing."
-`tests/test_sent_sidecar.py:225-238` pins the same refusal through the sidecar.
-
-That reasoning holds for damage in general and does not hold for this line. An
-unparseable *final* line of the active file with no trailing newline is not data
-the user still has: it is the tail of a write that never completed, and no event
-was ever recorded by it. Every other line remains strictly validated.
+No test pins this. `tests/test_damaged_store.py` truncates a store and reads it;
+nothing appends to a truncated store. `tests/test_unwritable_store.py` drives the
+failing-write path but never lets a write succeed afterwards on a file left
+unterminated.
 
 **Scope.**
 
-- Let `prune` complete when the only line it cannot parse is the last line of the
-  active file and that file does not end in a newline; keep raising for anything
-  else, including a bad line anywhere earlier and any bad line in a rotated
-  sibling.
-- Decide and record whether the fragment is dropped silently or reported. It is
-  the one byte range prune removes that no selection filter named, so it should
-  be reported on stderr the way a rotation gap already is, and counted separately
-  from `removed_events` in `--json`.
-- Decide and record whether this is automatic or an explicit opt-in. Automatic
-  keeps the recovery path working for someone who does not know the flag exists;
-  an opt-in (`--repair`) keeps `prune` free of any behavior that removes bytes
-  the user did not select. Whichever is chosen, the tests above are updated to
-  pin the new boundary rather than deleted.
-- Say in `docs/site/cli-env.md`, next to the existing "Reading a damaged store"
-  section, what the recovery path is after a disk fills.
+- Make an append that lands on an unterminated file start a new line, so a
+  fragment stays one line and the incoming event is written whole. The fragment
+  is then exactly the shape `bir prune` already repairs.
+- Decide and record where the check runs. A `seek`/`read` of the last byte on
+  every append is the simple version and costs a syscall pair on the hot path
+  (`trace_recorded` measures 77 µs/event, so it is small but not free). The
+  alternative is to remember that this process's last append failed — the write
+  failure is already tracked to report the pause and the recovery — and pay
+  nothing until it has. Note which cases the cheap version misses: a fragment
+  left by a *different* process, or by a previous run.
+- Decide and record whether a blank line is acceptable when the failure happened
+  before any bytes were written. Every reader already skips blank lines, so
+  writing a leading newline unconditionally after a failed append is the simplest
+  correct rule; the cost is one stray byte.
+- Add a benchmark comparison if the check runs unconditionally, since
+  `scripts/benchmarks.py` already measures `trace_recorded` and `store_rotation`.
 
-**Done when** `bir prune` completes on a store whose only damage is an
-unparseable final line of the active file, removes exactly the traces its
-selection names, and still refuses a store damaged anywhere else.
+**Done when** an event appended after an interrupted write is readable by
+`load_events`, and the interrupted write's fragment is still the only unreadable
+line in the store.
 
 ### 2. `bir experiment-report --output` destroys the file it cannot finish
 
@@ -283,13 +263,13 @@ evaluators with the same name.
 
 ## Sequencing
 
-The three remaining items are independent of each other and of the gate work that
-shipped from this audit. Item 3 is closest to that work — it lands in the same
+The three remaining items are independent of each other. Item 1 completes the
+full-disk story the prune repair started and should be taken first: until it
+lands, the shape prune repairs can turn overnight into one it refuses. Item 3 is
+closest to the gate work that shipped from this audit — it lands in the same
 three files (`bir/evals.py`, `bir/_eval_models.py`, `bir/cli.py`) — and is worth
-taking next while that code is fresh: a run with duplicate evaluator names now
-also reports counts against an aggregate that merged two evaluators, so the two
-are easier to reason about once names are unique. Item 2 is the smallest piece of
-work here and touches one line plus its tests.
+taking while that code is fresh. Item 2 is the smallest piece of work here and
+touches one line plus its tests.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -327,25 +307,21 @@ guarding the bridges' reads of a provider's response, creating the store's own
 files readable only by their owner, guarding the event bridges' reads of a
 framework object, following the store across a rotation in `bir tail`, escaping
 and bounding what the CLI prints on its error channel, refreshing the OTLP
-attribute spellings, recording where the redaction boundary stops, and failing
-the gate on a candidate run whose examples failed.
+attribute spellings, recording where the redaction boundary stops, failing the
+gate on a candidate run whose examples failed, and pruning a store whose final
+line an interrupted write never finished.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-Item 1 sits beside "reading a damaged trace store with `--skip-invalid`" and does
-not reopen it. That item asked what the *read* commands do with a store they
-cannot parse whole, and answered it: `bir traces --skip-invalid` listed 2,709 of
-the 2,709 intact traces in the store the disk filled, and `bir stats
---skip-invalid` agreed. This is about the one command that has no such flag by
-deliberate decision, and it asks for a strictly narrower opening than that flag —
-the final line of the active file, not any line — because that is the only line
-a write can leave behind unfinished.
+Item 1 sits beside "reporting rather than raising a failed trace-store write"
+and does not reopen it. That work decided what happens *while* the store cannot
+be written, and it holds: 4,000 traced calls returned normally, no exception
+reached the caller, and one `ERROR bir:` line named the errno. This is about the
+first append that succeeds *after* it, which that work did not consider.
 
-Item 1 also sits beside "reporting rather than raising a failed trace-store
-write", and confirms rather than reopens it. The ENOSPC run is that feature
-working: all 4,000 traced calls returned normally, no exception reached the
-caller, and one `ERROR bir:` line named the errno and said recording was paused.
-The item is about what is left on disk afterwards, which that work did not cover.
+It also sits beside the prune repair that shipped from this audit, and is the
+half that repair cannot reach: prune drops a fragment that is still a fragment,
+and this is about the fragment stopping being one.
 
 Item 2 sits beside "escaping control characters when the CLI renders recorded
 text for a person" and does not reopen it. That covered what a rendered *string*
@@ -508,7 +484,9 @@ unbounded single-file configuration, and 4,000 traces recorded until
 caller, 2,709 traces were written, and one `ERROR bir:` line named `[Errno 28]`
 and said recording was paused — one message for the outage, not one per dropped
 event. This is the "reporting rather than raising a failed trace-store write"
-feature doing exactly what it says. What it leaves behind is item 1.
+feature doing exactly what it says. Pruning the store it leaves behind is the
+item that shipped from this audit; what a resumed append then does to it is
+item 1.
 
 **The experiment summary under the same pressure.** With the volume padded to
 zero free space, re-running an experiment onto an existing summary raised

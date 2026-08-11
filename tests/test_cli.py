@@ -1746,7 +1746,14 @@ class AutomationJsonOutputTests(CliBaseTest):
             payload = json.loads(out)
             self.assertEqual(
                 set(payload),
-                {"removed_traces", "kept_traces", "removed_events", "bytes_reclaimed", "dry_run"},
+                {
+                    "removed_traces",
+                    "kept_traces",
+                    "removed_events",
+                    "bytes_reclaimed",
+                    "incomplete_tail_bytes",
+                    "dry_run",
+                },
             )
             self.assertEqual(payload["removed_traces"], 1)
             self.assertEqual(payload["kept_traces"], 1)

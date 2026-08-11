@@ -53,7 +53,11 @@ and p95) for a quick cost or health check (and accepts the same `--name`,
 `--keep-last N`, optionally restricted by `--status`); it is destructive but
 safe-by-default — it requires a selection filter and only previews unless you pass
 `--yes`, streaming surviving lines through an atomically replaced staging file
-under the same lock as appends.
+under the same lock as appends. It is also the repair path after a full disk: an
+interrupted write leaves a final line with no newline, which was never a complete
+event, and prune drops that one line as it rewrites (reported on stderr and as
+`incomplete_tail_bytes` in `--json`). A line that was written whole and cannot be
+parsed still refuses, wherever it sits.
 `bir config` prints the effective resolved configuration (trace path, capture
 flags, sampling, service metadata, rotation, and capture-size limits) plus which
 `BIR_*` variables are set, so you can answer "why isn't capture on?" without a

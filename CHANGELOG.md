@@ -169,6 +169,65 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir prune` can now reclaim space on the store a full disk produces. The
+  full-disk path is documented and works — the append fails, the traced call is
+  unaffected, one `ERROR bir:` line says recording is paused — but what it leaves
+  behind is a half-written final line, and prune refused to read a store with a
+  line it could not parse. The one command that reclaims space was unusable on
+  the one store that most needs it, and `--dry-run` refused too, so there was not
+  even a preview. Driven on a 1 MB HFS+ volume, recording with the default
+  unbounded configuration until the volume filled:
+
+  ```
+  4,000 traced calls returned normally, 2,709 traces written
+  store: 901,120 bytes, 2,710 lines, 2,709 parse, 1 does not, ends with newline: False
+
+                                     before                       after
+  bir prune --keep-last 5 --dry-run  exit 1, Invalid JSON …       exit 0, removed=2704 kept=5
+  bir prune --keep-last 5 --yes      exit 1, Invalid JSON …       exit 0, 876 KB reclaimed
+  bir traces (afterwards)            exit 1, Invalid JSON …       exit 0, 5 rows
+  ```
+
+  The opening is one line wide and is decided by the file's own bytes rather than
+  by a flag. An event is appended as one whole line ending in a newline, so a
+  file whose last line has no newline ends in a write that never finished: those
+  bytes were never a complete event, no reader could ever read them, and dropping
+  them loses nothing that was recorded. Iterating a text file yields that
+  fragment as the only line without a terminator, so recognizing it costs no
+  extra read and cannot misfire on a line further up.
+
+  Everything else still refuses, and is pinned that way. A line that was written
+  whole and cannot be parsed refuses whether it is last or in the middle — only
+  the missing terminator proves nothing was recorded there. A fragment in a
+  rotated sibling refuses, because nothing appends to a rotated file. And `bir
+  send` refuses either one: sending is not the repair path, and dropping or
+  re-sending a record is not a decision a transport makes on its own. Prune
+  first, then send.
+
+  Automatic rather than a `--repair` flag, because the recovery has to work for
+  someone who does not already know a flag exists — a full disk is not when you
+  read the manual. It is not silent, which is the other half of that choice:
+  every run that finds the line says so on stderr (`would drop …` under
+  `--dry-run`), and `--json` carries `incomplete_tail_bytes`. That count is
+  separate from `removed_events` because the line is not an event — no selection
+  filter named it — and it is already inside `bytes_reclaimed`, which measures
+  the file. The line goes even when the selection removes no traces, so a repair
+  never depends on `--keep-last` happening to match.
+
+  One limit is documented rather than fixed. Prune stages the surviving lines in
+  a sibling file and renames it over the original, which is what makes an
+  interrupted prune safe, so it needs room for what survives. On a volume with
+  literally no bytes left it fails at the staging file with a clear `[Errno 28]`
+  naming it, and `--dry-run` still reports what is reclaimable. Free anything at
+  all and the real run goes through: on the volume above, 57 KB of headroom was
+  enough to reclaim 876 KB.
+
+  This reverses a decision rather than fixing an oversight, so the tests that
+  pinned it were rewritten rather than deleted: `tests/test_damaged_store.py`
+  now pins the repair, the dry-run preview, the drop that happens even when the
+  selection is empty, the whole-line refusal in both positions, the rotated
+  sibling, `send` staying strict, and the reported byte count.
+
 - A server's response body can no longer repaint the terminal running `bir send`.
   The previous release established that recorded text must not be able to steer
   the terminal reading it and escaped every table cell and header. The CLI's

@@ -200,6 +200,7 @@ def _iter_trace_events(
     include_rotated: bool = False,
     default_path: Path,
     on_invalid: Callable[[ValueError], None] | None = None,
+    on_incomplete_tail: Callable[[str], None] | None = None,
 ) -> Iterator[TraceEvent]:
     """Yield validated local events in their original write order.
 
@@ -214,20 +215,45 @@ def _iter_trace_events(
     tell the user what it could not read. Only callers that merely display
     events pass it: skipping a line while sending or pruning would silently drop
     or duplicate recorded data.
+
+    ``on_incomplete_tail`` is the narrower opening a writing caller may take. It
+    fires only for a final line the file never terminated -- see
+    :func:`_iter_trace_events_from_file` -- and is applied to ``trace_path``
+    alone, never to a rotated sibling, which nothing appends to.
     """
 
     trace_path = Path(path) if path is not None else default_path
     trace_files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
     for file_path in trace_files:
-        yield from _iter_trace_events_from_file(file_path, on_invalid=on_invalid)
+        yield from _iter_trace_events_from_file(
+            file_path,
+            on_invalid=on_invalid,
+            on_incomplete_tail=on_incomplete_tail if file_path == trace_path else None,
+        )
 
 
 def _iter_trace_events_from_file(
     trace_path: Path,
     *,
     on_invalid: Callable[[ValueError], None] | None = None,
+    on_incomplete_tail: Callable[[str], None] | None = None,
 ) -> Iterator[TraceEvent]:
-    """Yield validated events from one JSONL file."""
+    """Yield validated events from one JSONL file.
+
+    ``on_incomplete_tail`` separates the one unreadable line that is provably not
+    a record from every other one. An event is appended as one whole line ending
+    in a newline, so a file whose last line has no newline ends in a write that
+    never finished: those bytes were never a complete event and no reader has
+    ever been able to read them. Iterating a text file yields the trailing
+    fragment as the only line without a terminator, so recognizing it costs
+    nothing and cannot misfire on a line further up.
+
+    Left ``None`` -- the contract every caller has always had -- such a line is
+    just an unreadable line and follows ``on_invalid``. Supplied, it is handed to
+    the callback instead and skipped, which is how ``prune`` can rewrite a store
+    an interrupted write damaged without ever skipping a line that was written
+    whole.
+    """
 
     if not trace_path.exists():
         return
@@ -240,6 +266,9 @@ def _iter_trace_events_from_file(
             try:
                 event = _trace_event_from_line(stripped, trace_path=trace_path, line_number=line_number)
             except ValueError as exc:
+                if on_incomplete_tail is not None and not line.endswith("\n"):
+                    on_incomplete_tail(line)
+                    continue
                 if on_invalid is None:
                     raise
                 on_invalid(exc)
@@ -720,13 +749,21 @@ def _rotate_trace_files(trace_path: Path, backup_count: int) -> None:
 
 @dataclass(frozen=True)
 class _PruneResult:
-    """Outcome of a :func:`_prune_trace_store` call."""
+    """Outcome of a :func:`_prune_trace_store` call.
+
+    ``incomplete_tail_bytes`` is the size of a final line the active file never
+    terminated, which the rewrite drops. It is separate from ``removed_events``
+    because it is not an event -- no selection filter named it and no reader
+    could ever read it -- and it is already inside ``bytes_reclaimed``, which
+    measures the file rather than the selection.
+    """
 
     removed_traces: int
     kept_traces: int
     removed_events: int
     bytes_reclaimed: int
     dry_run: bool
+    incomplete_tail_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -1018,13 +1055,24 @@ def _stream_filtered_trace_file(
     file_path: Path,
     is_removed: Callable[[str], bool],
     destination: IO[bytes] | None,
+    *,
+    drop_incomplete_tail: bool = False,
 ) -> tuple[int, int]:
-    """Stream surviving normalized lines to ``destination`` and return counts."""
+    """Stream surviving normalized lines to ``destination`` and return counts.
+
+    ``drop_incomplete_tail`` leaves out a final line the file never terminated,
+    matching what :func:`_iter_trace_events_from_file` already refused to count
+    as an event. It is passed only for the active file, and only after selection
+    saw the same line, so the rewrite drops exactly the bytes the caller was
+    told about.
+    """
 
     removed_events = 0
     kept_bytes = 0
     with file_path.open("r", encoding="utf-8") as trace_file:
         for line in trace_file:
+            if drop_incomplete_tail and not line.endswith("\n"):
+                continue
             stripped = line.strip()
             if not stripped:
                 continue
@@ -1044,13 +1092,26 @@ def _stage_filtered_trace_file(
     is_removed: Callable[[str], bool],
     *,
     dry_run: bool,
+    drop_incomplete_tail: bool = False,
 ) -> tuple[Path | None, int, int]:
-    """Stage one filtered trace file without accumulating surviving lines."""
+    """Stage one filtered trace file without accumulating surviving lines.
+
+    A file is rewritten when it loses at least one event, and also when it ends
+    in a line no write finished: dropping that line is the only way a store an
+    interrupted write damaged becomes readable again, and leaving it in place
+    because this run happened to select no traces would make the repair depend on
+    the selection filter.
+    """
 
     temp_path = None
     try:
         if dry_run:
-            removed_events, kept_bytes = _stream_filtered_trace_file(file_path, is_removed, None)
+            removed_events, kept_bytes = _stream_filtered_trace_file(
+                file_path,
+                is_removed,
+                None,
+                drop_incomplete_tail=drop_incomplete_tail,
+            )
         else:
             temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
             # Replaces the trace file, so it is created with the store's mode
@@ -1060,8 +1121,9 @@ def _stage_filtered_trace_file(
                     file_path,
                     is_removed,
                     staged_file,
+                    drop_incomplete_tail=drop_incomplete_tail,
                 )
-        if removed_events == 0:
+        if removed_events == 0 and not drop_incomplete_tail:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
             return None, 0, 0
@@ -1092,6 +1154,15 @@ def _prune_trace_store(
     Selection and rewrite remain disk-backed and run under the same in-process
     and advisory locks as append. Every staging file is complete before any
     original is atomically replaced.
+
+    A store the writer was interrupted part-way through -- a full disk, an OOM
+    kill -- ends in a line that has no newline and is not a whole event. Prune
+    used to refuse such a store outright, which left the one command that
+    reclaims space unusable on the store a full disk produces. That single line
+    is now dropped by the rewrite and reported through
+    :attr:`_PruneResult.incomplete_tail_bytes`. Nothing else moved: a line that
+    was written whole and cannot be parsed still raises, wherever it is, because
+    only the missing terminator proves nothing was ever recorded there.
     """
 
     trace_path = Path(path) if path is not None else default_path
@@ -1101,16 +1172,24 @@ def _prune_trace_store(
 
     with _write_lock:
         with _InterProcessFileLock(trace_path):
+            incomplete_tail = ""
+
+            def record_incomplete_tail(line: str) -> None:
+                nonlocal incomplete_tail
+                incomplete_tail = line
+
             with _PruneTraceIndex() as index:
                 index.add_events(
                     _iter_trace_events(
                         trace_path,
                         include_rotated=include_rotated,
                         default_path=default_path,
+                        on_incomplete_tail=record_incomplete_tail,
                     )
                 )
+                incomplete_tail_bytes = len(incomplete_tail.encode("utf-8"))
                 selection = index.select_removed_traces(before=before, keep_last=keep_last, status=status)
-                if selection.removed_traces == 0:
+                if selection.removed_traces == 0 and not incomplete_tail_bytes:
                     return _PruneResult(0, selection.kept_traces, 0, 0, dry_run)
 
                 files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
@@ -1121,12 +1200,14 @@ def _prune_trace_store(
                     for file_path in files:
                         if not file_path.exists():
                             continue
+                        drop_incomplete_tail = bool(incomplete_tail_bytes) and file_path == trace_path
                         temp_path, file_removed_events, reclaimed_bytes = _stage_filtered_trace_file(
                             file_path,
                             index.is_removed,
                             dry_run=dry_run,
+                            drop_incomplete_tail=drop_incomplete_tail,
                         )
-                        if file_removed_events == 0:
+                        if file_removed_events == 0 and not drop_incomplete_tail:
                             continue
                         removed_events += file_removed_events
                         bytes_reclaimed += reclaimed_bytes
@@ -1158,6 +1239,7 @@ def _prune_trace_store(
                     removed_events=removed_events,
                     bytes_reclaimed=bytes_reclaimed,
                     dry_run=dry_run,
+                    incomplete_tail_bytes=incomplete_tail_bytes,
                 )
 
 

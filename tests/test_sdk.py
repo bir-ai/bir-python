@@ -3595,6 +3595,7 @@ class SdkTests(unittest.TestCase):
                 file_path: Path,
                 is_removed: Any,
                 destination: Any,
+                **kwargs: Any,
             ) -> tuple[int, int]:
                 nonlocal calls
                 calls += 1
@@ -3602,7 +3603,7 @@ class SdkTests(unittest.TestCase):
                     assert destination is not None
                     destination.write(b"partial staging output\n")
                     raise OSError("disk full")
-                return _stream_filtered_trace_file(file_path, is_removed, destination)
+                return _stream_filtered_trace_file(file_path, is_removed, destination, **kwargs)
 
             real_unlink = Path.unlink
 
