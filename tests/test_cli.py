@@ -30,7 +30,7 @@ from typing import Any
 from unittest.mock import patch
 
 import bir
-from bir import cli, configure, load_traces
+from bir import cli, configure, load_events, load_traces
 from bir._sdk import LoadedTrace, TraceEvent, _reset_config_for_tests
 from bir.cli import _aggregate_stats, _percentile, _TraceSummary, _UsageTotals
 from bir.evals import (
@@ -77,8 +77,10 @@ class FakeHttpResponse:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, amt: int | None = None) -> bytes:
+        # http.client.HTTPResponse.read takes an optional byte count, and
+        # the transport passes one to bound a success response.
+        return self.body if amt is None else self.body[:amt]
 
 
 @contextmanager
@@ -1192,6 +1194,11 @@ class ExperimentReportCommandTests(CliBaseTest):
                     self.assertEqual(report_path.read_bytes(), before)
                     self.assertEqual(list(workdir.glob(".*.tmp")), [])
 
+    # Windows has no owner/group/other bits: os.chmod there sets only the
+    # read-only flag, so a file asked for 0o600 reports 0o666 and the mode a
+    # rename carries cannot be observed at all. Same guard and same reason as
+    # tests/test_store_permissions.py.
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
     def test_a_new_report_keeps_the_umasks_mode_not_the_stores(self) -> None:
         with temporary_workdir() as workdir:
             experiment_id = run_faq_experiment(workdir)
@@ -1207,6 +1214,7 @@ class ExperimentReportCommandTests(CliBaseTest):
             self.assertNotEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
             self.assertTrue(stat.S_IMODE(report_path.stat().st_mode) & stat.S_IRGRP)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
     def test_re_rendering_keeps_the_mode_the_existing_report_had(self) -> None:
         with temporary_workdir() as workdir:
             experiment_id = run_faq_experiment(workdir)
@@ -1791,7 +1799,10 @@ class AutomationJsonOutputTests(CliBaseTest):
         with temporary_workdir() as workdir:
             trace_path = workdir / "traces.jsonl"
             write_two_traces(trace_path)
-            response = FakeHttpResponse(json.dumps({"accepted": 2, "event_ids": ["a", "b"]}).encode("utf-8"))
+            # A server answers with the ids it was sent; inventing them is
+            # refused, so the fake echoes what is actually in the store.
+            sent = [event.id for event in load_events(str(trace_path))]
+            response = FakeHttpResponse(json.dumps({"accepted": len(sent), "event_ids": sent}).encode("utf-8"))
 
             with patch("bir._sending._opener.open", return_value=response):
                 code, out, err = run_cli("send", "--path", str(trace_path), "--server", "http://server.test", "--json")
@@ -1800,7 +1811,7 @@ class AutomationJsonOutputTests(CliBaseTest):
             self.assertEqual(err, "")
             payload = json.loads(out)
             self.assertEqual(set(payload), {"accepted", "attempted", "skipped"})
-            self.assertEqual(payload["accepted"], 2)
+            self.assertEqual(payload["accepted"], len(sent))
             # ``skipped`` is what the server did not newly accept, so it stays
             # consistent with the counts either side of it.
             self.assertEqual(payload["skipped"], payload["attempted"] - payload["accepted"])

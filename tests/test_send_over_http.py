@@ -80,6 +80,19 @@ class _Recorder(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         """Silence the handler's stderr logging; the tests assert on responses."""
 
+    def handle_one_request(self) -> None:
+        """Serve one request, treating a dropped connection as nothing to report.
+
+        A refused send closes the socket before the reply is finished, and on
+        some platforms that surfaces in the handler thread as a reset rather
+        than a clean close. It is the expected shape here, not a failure.
+        """
+
+        try:
+            super().handle_one_request()
+        except (ConnectionError, BrokenPipeError):
+            self.close_connection = True
+
 
 @contextmanager
 def serving() -> Iterator[tuple[str, list[dict[str, Any]], dict[str, Any]]]:

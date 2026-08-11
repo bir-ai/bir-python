@@ -169,6 +169,71 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- The two report-mode tests added with the staged report write now skip on
+  Windows, where they could not pass. `os.chmod` there sets only the read-only
+  flag, so a file asked for `0o600` still reports `0o666` and the mode a rename
+  carries cannot be observed at all — `assertEqual(S_IMODE(...), 0o600)` failed
+  on the Windows leg of CI and nowhere else. They carry the same
+  `skipIf(sys.platform == "win32", "POSIX permission bits")` guard, and the same
+  reason, that `tests/test_store_permissions.py` has always used. The behaviour
+  they pin is unchanged and still covered on Linux and macOS.
+
+- A batch response is now checked against the request it answers, rather than
+  only for being the right shape. `accepted` is printed by `bir send` and gates
+  pipelines, `skipped` is computed from it, and `event_ids` is what
+  `--mark-sent` writes to the sidecar, so a number or an id a server invented
+  was not cosmetic. Driven against a local server answering a three-event send
+  with a body of its choosing:
+
+  ```
+  server said                                  before                      after
+  {"accepted": 99, "event_ids": ["a"]}         accepted=99 attempted=3  exit 0   refused
+  {"accepted": -5, "event_ids": []}            accepted=-5 skipped=8    exit 0   refused
+  {"accepted": 3, "event_ids": ["x","y","z"]}  accepted=3  exit 0                refused
+  ```
+
+  The second line is arithmetic no store can produce: more events skipped than
+  were attempted, from a negative acceptance. The third recorded three ids that
+  name no event in the store, which `--mark-sent` would have remembered as
+  delivered for good. A reply is now refused when `accepted` is negative or
+  exceeds what was sent, when `event_ids` is longer than the batch, or when it
+  names an id that was not posted; the message says which, and quotes the body.
+
+  The success body is also bounded now, by what the request justifies rather
+  than by a constant. `response.read()` took the whole thing, deliberately — a
+  batch's accepted ids are legitimately longer than any message would carry —
+  but nothing tied "legitimately long" to the batch, so one reply could be any
+  size at all. It was the only value in the SDK that could: the loaders stream,
+  `prune` is disk-backed, and the upload spool is disk-backed. The limit allows
+  an id's worth per event sent plus an envelope, so a proportionate reply is
+  still parsed whole and one that cannot be the ids of what was sent is not read.
+  Measured against a server answering a **one-event** send with a 200 MB body,
+  with the server in a process of its own so the client's cost is its own:
+
+  ```
+                                            peak RSS before   peak RSS after
+  response.read() whole, as before          23 MB             755 MB
+  bir send, bounded by the request          33 MB              34 MB
+  ```
+
+  The per-event fallback got the same treatment, so a 404 on the batch endpoint
+  is not a way round either check: a reply claiming a count outside `0..1` for a
+  single posted event is refused, and its body is bounded the same way.
+
+  A refusal raises, so nothing is reported as accepted. With `batch_size` set,
+  batches are posted in sequence and each one's ids are recorded as it
+  completes, so a refusal part-way leaves the batches that already succeeded
+  marked and raises for the rest, exactly as any other mid-run failure does.
+
+  Two existing tests changed rather than being deleted. The one pinning that a
+  large accepted response is parsed whole pinned the decision this reverses; it
+  now pins both halves of the new boundary — a 500-event reply read whole, and a
+  200 KB reply to a one-event send refused. Two fakes that answered with invented
+  ids (`["a", "b"]`) now echo the ids their store actually holds, which is what a
+  server does. Every fake response's `read()` also takes the optional byte count
+  `http.client.HTTPResponse.read` has always taken, since the transport now
+  passes one.
+
 - A redirect no longer turns `bir send` into a report of a delivery that never
   happened. `urlopen` uses an opener carrying `HTTPRedirectHandler`, which
   answers a 301, 302, or 303 on a POST by reissuing the request as a **GET with

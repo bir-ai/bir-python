@@ -311,8 +311,10 @@ class FakeResponse:
         self.status = status
         self._body = body.encode("utf-8")
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amt: int | None = None) -> bytes:
+        # http.client.HTTPResponse.read takes an optional byte count, and
+        # the transport passes one to bound a success response.
+        return self._body if amt is None else self._body[:amt]
 
     def __enter__(self) -> FakeResponse:
         return self

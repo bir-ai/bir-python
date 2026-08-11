@@ -41,13 +41,12 @@ behind, and what the gate decides under partial failure. All of them treated the
 server as a fixture. This one pointed the other way and asked what the SDK
 *believes*: the transport was driven against real local HTTP servers that answer
 in ways the Bir server would not — a redirect, a body larger than the store, a
-response whose own numbers are impossible — and that produced two items, the
-first of which has since shipped. The third came from asking what a long-lived
-process accumulates, driven by counting
+response whose own numbers are impossible — and that produced two items. The
+third came from asking what a long-lived process accumulates, driven by counting
 descriptors and threads across 20,000 events, 50 prunes, and a run whose examples
 all time out. The fourth came from the public API surface as a contract: what a
 caller can pass that the type hints permit and the implementation writes into the
-schema anyway. Two further axes — `@observe` against every callable shape its
+schema anyway. Both transport items have since shipped. Two further axes — `@observe` against every callable shape its
 hints allow, and where the trace context is and is not visible across threads and
 asyncio — produced no item and are recorded below with their numbers.
 
@@ -73,71 +72,10 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | The batch response is believed about its own size and its own numbers | P2 | M | A server cannot make the CLI print impossible arithmetic or read a store's worth of body | — |
-| 2 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
-| 3 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
+| 1 | A serial run with a timeout holds one thread per timed-out example | P2 | M | A dataset that times out cannot outgrow the process's thread budget | — |
+| 2 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
 
-### 1. The batch response is believed about its own size and its own numbers
-
-**Why.** `_batch_result_from_response` (`bir/_sending.py:156-173`) checks that
-`accepted` is an `int` and that `event_ids` is a list of `str`, and nothing else.
-It never compares either against what was sent. `SendEventsResult.skipped`
-(`bir/_sending.py:30-34`) then computes `max(attempted - accepted, 0)` and the
-CLI prints all three. Driven against a local server that answers each POST with a
-chosen body, for a store holding 3 events:
-
-```
-server said                              bir send printed                exit
-{"accepted": 99,  "event_ids": ["a"]}    accepted=99 attempted=3 skipped=0   0
-{"accepted": -5,  "event_ids": []}       accepted=-5 attempted=3 skipped=8   0
-{"accepted": 3, "event_ids": ["x","y","z"]}  accepted=3 attempted=3 skipped=0   0
-```
-
-The second line is arithmetic no store can produce: more events skipped than were
-attempted, from a negative acceptance. `--json` emits the same numbers, so a
-pipeline gating on `accepted` gets them too.
-
-The body is also read without a bound on the success path. `_post_event_batch`
-does `response.read()` whole, deliberately — the comment at `:157-159` says a
-large batch's accepted ids are legitimately long, which is true — but nothing
-ties "legitimately long" to the batch. A 200 response carrying a 200 MB
-`event_ids` string for a **one-event** send:
-
-```
-peak RSS before:  31 MB
-peak RSS after:  699 MB      (accepted=1, in 0.7 s)
-```
-
-That is the one place in the SDK where a single value's size is unbounded. The
-loaders stream, `prune` is disk-backed, the upload spool is disk-backed, and the
-*error* body was bounded to 500 characters by an earlier audit
-(`_MAX_REPORTED_BODY_CHARS`, `bir/_sending.py:85`) — the success body was left
-out of that work because it has to be parsed.
-
-No test pins any of this. `tests/test_sending_errors.py` covers malformed
-responses that are *rejected* (not JSON, not an object, wrong types); nothing
-sends a well-formed response whose numbers or size are impossible.
-
-**Scope.**
-
-- Reject a batch response whose `accepted` is negative or exceeds `attempted`,
-  and whose `event_ids` holds more ids than events were sent, with the same
-  "invalid batch response" error those checks already raise.
-- Bound the success read by what was sent rather than by a constant: the ids of
-  N events cannot exceed N × (id length + separator) plus a small envelope, so
-  the limit is computable at the call site and never refuses a legitimate batch.
-- Decide and record whether the ids are also checked for being *the* ids sent, or
-  only for their count. Matching them is what makes `--mark-sent` trustworthy;
-  the cost is holding the sent ids for the duration of the request, which the
-  batch path already does.
-- Decide and record what happens to `skipped` when a server is refused mid-run —
-  today the whole send raises, which is probably right, but it should be stated.
-
-**Done when** a batch response claiming more acceptances than the events sent, or
-carrying more bytes than those events' ids could occupy, is refused instead of
-reported.
-
-### 2. A serial run with a timeout holds one thread per timed-out example
+### 1. A serial run with a timeout holds one thread per timed-out example
 
 **Why.** `_run_example_capturing_sync` (`bir/evals.py:1549-1592`) gives every
 example its own `ThreadPoolExecutor(max_workers=1)` when `timeout` is set, and
@@ -182,7 +120,7 @@ excluded; none counts threads, and none uses a dataset large enough to notice.
 **Done when** a serial run over a dataset of any size, all of whose examples time
 out, holds a bounded number of live threads.
 
-### 3. A prompt's `name` and `version` are written with whatever type they were given
+### 2. A prompt's `name` and `version` are written with whatever type they were given
 
 **Why.** `prompt()` (`bir/_sdk.py:1128-1161`) validates `template` and `rendered`
 with `isinstance` and rejects an empty `name` or `version`, but never checks that
@@ -241,15 +179,10 @@ strings throughout and assert the recorded shape; nothing passes a non-string.
 
 ## Sequencing
 
-Item 1 should be taken next. Its dependency has already shipped — a response is
-now known to have come from the host that was asked — and the scaffolding it
-needs shipped with it: `tests/test_send_over_http.py` stands up loopback servers,
-so a response whose numbers or size are impossible can be driven the same way
-rather than through a stub.
-
-Items 2 and 3 are independent of it and of each other. Item 3 is the smallest
-piece of work here; item 2 is the only one that needs a decision about which of
-two properties to keep.
+The two remaining items are independent of each other and of the transport work
+that shipped from this audit. Item 2 is the smallest piece of work here; item 1
+is the only one that needs a decision about which of two properties to keep, and
+is the reason it is first.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -292,26 +225,21 @@ gate on a candidate run whose examples failed, pruning a store whose final line
 an interrupted write never finished, repairing that line on the next append
 instead of writing the following event onto it, writing a report through a
 staged file so a failed render keeps the previous one, and refusing an evaluator
-list that names the same evaluator twice, and refusing a redirect instead of
-following it to a host nobody configured.
+list that names the same evaluator twice, refusing a redirect instead of
+following it to a host nobody configured, and refusing a batch response that
+cannot describe the request it answers.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-Item 1 sits beside "escaping and bounding what the CLI prints on its error
-channel" and does not reopen it. That work asked what a server's *error* body may
-do to the operator's terminal, and it holds: the error path escapes and stops at
-500 characters. This asks what the SDK does with a response it treats as a
-*success* — a 200 body it reads whole and believes — which that work explicitly
-scoped out, saying the bound is on what a message shows rather than on what is
-parsed.
+The bounded batch response that shipped from this audit sits beside "escaping and
+bounding what the CLI prints on its error channel" and reopens none of it. That
+work asked what a server's *error* body may do to the operator's terminal, and it
+holds: the error path still escapes and stops at 500 characters. This was the
+*success* body — read whole and believed — which that work explicitly scoped out,
+saying the bound is on what a message shows rather than on what is parsed. The
+new bound is on the read, and is derived from the request rather than fixed.
 
-Item 1 also sits beside "reporting a failed OTLP export instead of counting the
-spans it built" without reopening it. Both are the same failure in shape — a
-count reported that no delivery backs — but that one was about a number the SDK
-computed itself before the export ran, and this is about a number the server
-chose.
-
-Item 2 sits beside "experiment timeouts" and does not reopen them. The timeout
+Item 1 sits beside "experiment timeouts" and does not reopen them. The timeout
 mechanism works exactly as documented: 400 of 400 examples timed out, were
 recorded as error rows, kept dataset order, and the run returned in 2.70 s. This
 is about what the mechanism leaves running behind it, which that work named as a
@@ -446,7 +374,7 @@ exactly — `None` outside, the ids inside, `None` again in a plain thread.
 rotation at 32 KB: file descriptors 4 → 4, threads 1 → 1, four rotated files as
 configured. Fifty `prune` runs over a 200-trace store: descriptors 4 → 4, and
 zero leftover `bir-prune-index-*` temporary directories. The only place anything
-accumulated is item 2.
+accumulated is item 1.
 
 **`BIR_*` environment parsing.** Eleven values driven through a fresh
 interpreter. Every malformed one is rejected before the process can record
@@ -463,7 +391,7 @@ records only the template's SHA-256 unless capture is asked for, redacts a
 credential inside a captured `rendered` string
 (`{"rendered": "Hi [redacted]"}`), guards a variable whose `__repr__` raises
 (`"<unrepresentable X>"`), and rejects a non-mapping `variables`. Only the two
-identity fields are unguarded, which is item 3.
+identity fields are unguarded, which is item 2.
 
 **A server that answers slowly or not at all.** A 200 that sends its headers, a
 `Content-Length` of 1,000,000, and then one byte every 30 s was cut off by the

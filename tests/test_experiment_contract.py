@@ -58,8 +58,10 @@ class FakeHttpResponse:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, amt: int | None = None) -> bytes:
+        # http.client.HTTPResponse.read takes an optional byte count, and
+        # the transport passes one to bound a success response.
+        return self.body if amt is None else self.body[:amt]
 
 
 def capture_upload_payload(fixture: dict[str, Any]) -> dict[str, Any]:

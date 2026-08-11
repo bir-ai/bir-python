@@ -156,6 +156,41 @@ def _reported_body(body: str) -> str:
     return body[:_MAX_REPORTED_BODY_CHARS] + _TRUNCATED
 
 
+# What a success response may weigh, derived from the request rather than fixed.
+# Its whole job is to carry an acceptance count and the ids of the events that
+# were sent, so an id's worth per event plus room for the envelope is the most
+# any honest reply needs. Generous on both: an id is a 36-character UUID, and
+# a server free to spell ids its own way still has room to. Without a bound tied
+# to the request, a single reply could be any size at all -- the loaders stream,
+# prune is disk-backed, and the upload spool is disk-backed, so this was the one
+# value in the SDK that could grow without limit.
+_RESPONSE_ENVELOPE_BYTES = 4096
+_RESPONSE_BYTES_PER_EVENT = 256
+
+
+def _max_response_bytes(attempted: int) -> int:
+    """Return the largest response the events sent could justify."""
+
+    return _RESPONSE_ENVELOPE_BYTES + attempted * _RESPONSE_BYTES_PER_EVENT
+
+
+def _read_bounded_response(response: Any, *, attempted: int, endpoint: str) -> str:
+    """Read a success response, refusing one larger than the request justifies.
+
+    One byte past the limit is read so a reply that just fits is told from one
+    that was cut, the same way :func:`_read_http_error_body` does it.
+    """
+
+    limit = _max_response_bytes(attempted)
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise RuntimeError(
+            f"bir server at {endpoint} answered with more than {limit} bytes for {attempted} event(s); "
+            "a reply that large cannot be the ids of what was sent, so it was not read"
+        )
+    return raw.decode("utf-8", errors="replace")
+
+
 def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
     """Read as much of an HTTP error response as a message carries, and close it.
 
@@ -190,7 +225,7 @@ def _post_event_batch(
     try:
         with _opener.open(request, timeout=timeout) as response:
             status = response.status
-            body = response.read().decode("utf-8", errors="replace")
+            body = _read_bounded_response(response, attempted=len(events), endpoint=endpoint)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             exc.close()
@@ -210,13 +245,24 @@ def _post_event_batch(
 
     if status < 200 or status >= 300:
         raise RuntimeError(f"bir server rejected event batch with HTTP {status}: {_reported_body(body)}")
-    return _batch_result_from_response(body, attempted=len(events))
+    sent_ids = {event["id"] for event in events if isinstance(event.get("id"), str)}
+    return _batch_result_from_response(body, attempted=len(events), sent_ids=sent_ids)
 
 
-def _batch_result_from_response(body: str, *, attempted: int) -> SendEventsResult:
-    # A success body is read whole because it has to be parsed -- a large batch's
-    # accepted ids are legitimately long -- so the bound is applied to what the
-    # message shows rather than to what was read.
+def _batch_result_from_response(body: str, *, attempted: int, sent_ids: set[str] | None = None) -> SendEventsResult:
+    """Parse a batch response, refusing one that cannot describe the request.
+
+    The shape checks say the reply is the right kind of object. These say it is a
+    reply to *this* request: a count no larger than what was sent and no smaller
+    than none of it, and ids naming events that were actually posted. Both are
+    reported figures a caller acts on — ``accepted`` and ``skipped`` are printed
+    and gate pipelines, and ``event_ids`` is what ``--mark-sent`` records as
+    delivered, so an id the server invented would be remembered as sent forever.
+
+    ``sent_ids`` is optional so the shape checks can still be exercised on their
+    own; the send path always passes it.
+    """
+
     refused = f"bir server returned an invalid batch response: {_reported_body(body)}"
     try:
         payload = json.loads(body)
@@ -230,6 +276,22 @@ def _batch_result_from_response(body: str, *, attempted: int) -> SendEventsResul
         raise RuntimeError(refused)
     if not isinstance(event_ids, list) or not all(isinstance(event_id, str) for event_id in event_ids):
         raise RuntimeError(refused)
+    if accepted < 0 or accepted > attempted:
+        raise RuntimeError(
+            f"bir server claimed {accepted} of {attempted} event(s) accepted, which is not a count of "
+            f"what was sent: {_reported_body(body)}"
+        )
+    if len(event_ids) > attempted:
+        raise RuntimeError(
+            f"bir server returned {len(event_ids)} id(s) for {attempted} event(s) sent: {_reported_body(body)}"
+        )
+    if sent_ids is not None:
+        unknown = [event_id for event_id in event_ids if event_id not in sent_ids]
+        if unknown:
+            raise RuntimeError(
+                f"bir server returned {len(unknown)} id(s) naming events that were not sent, "
+                f"first {unknown[0]!r}: {_reported_body(body)}"
+            )
     return SendEventsResult(accepted=accepted, event_ids=list(event_ids), attempted=attempted)
 
 
@@ -244,7 +306,7 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
     try:
         with _opener.open(request, timeout=timeout) as response:
             status = response.status
-            body = response.read().decode("utf-8", errors="replace")
+            body = _read_bounded_response(response, attempted=1, endpoint=endpoint)
     except urllib.error.HTTPError as exc:
         if _is_redirect_status(exc.code):
             raise RuntimeError(_redirect_refusal(endpoint, exc)) from exc
@@ -265,6 +327,14 @@ def _post_event(endpoint: str, event: Mapping[str, Any], *, timeout: float) -> i
 
 
 def _accepted_count_from_response(body: str) -> int:
+    """Return how many of the one posted event the server accepted.
+
+    A body it cannot read means the event was posted and answered with 2xx, which
+    is the only thing this path has to decide, so an unreadable reply still counts
+    as one. A *readable* count outside ``0..1`` is different: the request carried
+    one event, so the server is describing something other than what was sent.
+    """
+
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
@@ -273,6 +343,11 @@ def _accepted_count_from_response(body: str) -> int:
         return 1
     accepted = payload.get("accepted")
     if isinstance(accepted, int) and not isinstance(accepted, bool):
+        if accepted < 0 or accepted > 1:
+            raise RuntimeError(
+                f"bir server claimed {accepted} of 1 event accepted, which is not a count of "
+                f"what was sent: {_reported_body(body)}"
+            )
         return accepted
     return 1
 

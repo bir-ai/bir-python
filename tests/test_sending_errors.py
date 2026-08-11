@@ -52,6 +52,15 @@ def record_one_trace() -> None:
             generation.set_usage(input_tokens=11, output_tokens=4)
 
 
+def record_traces(count: int) -> None:
+    """Record ``count`` traces, each carrying one generation."""
+
+    for index in range(count):
+        with bir.trace(f"request-{index}"):
+            with bir.generation("llm", model="gpt-4o-mini") as generation:
+                generation.set_usage(input_tokens=11, output_tokens=4)
+
+
 class FakeResponse:
     """A 2xx response carrying ``body``."""
 
@@ -59,8 +68,10 @@ class FakeResponse:
         self.status = status
         self._body = body.encode("utf-8")
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amt: int | None = None) -> bytes:
+        # http.client.HTTPResponse.read takes an optional byte count, and
+        # the transport passes one to bound a success response.
+        return self._body if amt is None else self._body[:amt]
 
     def __enter__(self) -> FakeResponse:
         return self
@@ -172,14 +183,15 @@ class BatchErrorTests(unittest.TestCase):
     def test_a_recovered_server_succeeds_after_a_retry(self) -> None:
         with temporary_workdir():
             record_one_trace()
-            body = json.dumps({"accepted": 2, "event_ids": ["a", "b"]})
+            sent = [event.id for event in bir.load_events()]
+            body = json.dumps({"accepted": len(sent), "event_ids": sent})
             server = _Server(lambda: http_error(500, "restarting"), lambda: FakeResponse(body))
 
             with serving(server):
                 result = bir.send_events(SERVER, retries=2)
 
             self.assertEqual(server.attempts, 2)
-            self.assertEqual(result.accepted, 2)
+            self.assertEqual(result.accepted, len(sent))
 
     def test_a_non_2xx_success_response_is_refused(self) -> None:
         with temporary_workdir():
@@ -392,22 +404,120 @@ class ResponseBodyBoundTests(unittest.TestCase):
             self.assertIn("…[truncated]", message)
             self.assertLess(len(message), 1_000)
 
-    def test_a_large_accepted_response_is_still_parsed_whole(self) -> None:
-        # The bound is on what a message shows, not on what is parsed: a batch's
-        # accepted ids are legitimately longer than any message would carry, and
-        # cutting the body before json.loads would refuse a good response.
+    def test_a_success_body_the_batch_justifies_is_read_whole(self) -> None:
+        # The message bound is not the read bound: a batch's accepted ids are
+        # legitimately longer than any message would carry, so a reply in
+        # proportion to the request is still parsed whole.
         with temporary_workdir():
-            record_one_trace()
-            event_ids = [f"{index:032x}" for index in range(1_000)]
-            body = json.dumps({"accepted": len(event_ids), "event_ids": event_ids})
+            record_traces(500)
+            sent = [event.id for event in bir.load_events()]
+            body = json.dumps({"accepted": len(sent), "event_ids": sent})
             self.assertGreater(len(body), _sending._MAX_REPORTED_BODY_CHARS)
+            self.assertLessEqual(len(body), _sending._max_response_bytes(len(sent)))
             server = _Server(lambda: FakeResponse(body))
 
             with serving(server):
                 result = bir.send_events(SERVER)
 
-            self.assertEqual(result.accepted, 1_000)
-            self.assertEqual(len(result.event_ids), 1_000)
+            self.assertEqual(result.accepted, len(sent))
+            self.assertEqual(len(result.event_ids), len(sent))
+
+    def test_a_success_body_the_batch_cannot_justify_is_not_read(self) -> None:
+        # The one value in the SDK that could otherwise grow without limit: the
+        # loaders stream, prune is disk-backed, and the upload spool is
+        # disk-backed, but a single reply used to be read whatever its size.
+        with temporary_workdir():
+            record_one_trace()
+            sent = [event.id for event in bir.load_events()]
+            oversized = json.dumps({"accepted": len(sent), "event_ids": sent, "note": "x" * 200_000})
+            self.assertGreater(len(oversized), _sending._max_response_bytes(len(sent)))
+            server = _Server(lambda: FakeResponse(oversized))
+
+            with serving(server), self.assertRaises(RuntimeError) as raised:
+                bir.send_events(SERVER)
+
+            message = str(raised.exception)
+            self.assertIn("answered with more than", message)
+            self.assertIn(f"{len(sent)} event(s)", message)
+            # The message itself stays small; it does not carry what it refused.
+            self.assertLess(len(message), 1_000)
+
+
+class ResponseCountsMustDescribeTheRequestTests(unittest.TestCase):
+    """A reply is refused when it cannot be a reply to what was sent.
+
+    ``accepted`` is printed by ``bir send`` and gates pipelines, ``skipped`` is
+    computed from it, and ``event_ids`` is what ``--mark-sent`` records as
+    delivered — so a number or an id the server invented is not a cosmetic
+    problem. Before these checks a server could make the CLI print
+    ``accepted=-5 attempted=3 skipped=8``.
+    """
+
+    def setUp(self) -> None:
+        _reset_config_for_tests()
+
+    def _send_with_reply(self, reply: dict[str, object], *, traces: int = 3) -> str:
+        with temporary_workdir():
+            record_traces(traces)
+            server = _Server(lambda: FakeResponse(json.dumps(reply)))
+            with serving(server), self.assertRaises(RuntimeError) as raised:
+                bir.send_events(SERVER)
+            return str(raised.exception)
+
+    def test_more_accepted_than_attempted_is_refused(self) -> None:
+        message = self._send_with_reply({"accepted": 99, "event_ids": []})
+
+        self.assertIn("claimed 99 of", message)
+        self.assertIn("not a count of what was sent", message)
+
+    def test_a_negative_acceptance_is_refused(self) -> None:
+        # This one used to reach the terminal as "accepted=-5 ... skipped=8":
+        # more events skipped than were ever attempted.
+        message = self._send_with_reply({"accepted": -5, "event_ids": []})
+
+        self.assertIn("claimed -5 of", message)
+
+    def test_more_ids_than_events_sent_is_refused(self) -> None:
+        message = self._send_with_reply({"accepted": 1, "event_ids": ["a", "b", "c", "d", "e", "f", "g"]})
+
+        self.assertIn("id(s) for", message)
+
+    def test_ids_naming_events_that_were_not_sent_are_refused(self) -> None:
+        # --mark-sent records these, so an invented id would be remembered as
+        # delivered for good.
+        message = self._send_with_reply({"accepted": 1, "event_ids": ["not-a-real-id"]})
+
+        self.assertIn("naming events that were not sent", message)
+        self.assertIn("not-a-real-id", message)
+
+    def test_a_reply_that_describes_the_request_is_accepted(self) -> None:
+        with temporary_workdir():
+            record_traces(3)
+            sent = [event.id for event in bir.load_events()]
+            # Fewer accepted than attempted is ordinary: the rest are duplicates.
+            reply = json.dumps({"accepted": len(sent) - 1, "event_ids": sent[:-1]})
+            server = _Server(lambda: FakeResponse(reply))
+
+            with serving(server):
+                result = bir.send_events(SERVER)
+
+            self.assertEqual(result.accepted, len(sent) - 1)
+            self.assertEqual(result.skipped, 1)
+
+    def test_the_per_event_fallback_checks_its_count_too(self) -> None:
+        # A 404 on the batch endpoint must not be a way round the check.
+        with temporary_workdir():
+            record_one_trace()
+            responses = [
+                lambda: http_error(404, "no batch endpoint"),
+                lambda: FakeResponse(json.dumps({"accepted": 7})),
+            ]
+            server = _Server(*responses)
+
+            with serving(server), self.assertRaises(RuntimeError) as raised:
+                bir.send_events(SERVER)
+
+            self.assertIn("claimed 7 of 1 event accepted", str(raised.exception))
 
 
 if __name__ == "__main__":

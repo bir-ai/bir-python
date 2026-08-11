@@ -96,6 +96,35 @@ environment variables still apply. One consequence is worth naming: an opener
 installed globally with `urllib.request.install_opener()` no longer affects where
 Bir sends, because Bir uses its own.
 
+## A response has to describe the request
+
+A success response is checked against what was actually posted, not just for
+being the right shape. A reply is refused when:
+
+- `accepted` is negative, or larger than the number of events sent;
+- `event_ids` holds more ids than events were sent;
+- `event_ids` names an id that was not in the request;
+- the body is larger than the ids of those events could occupy.
+
+These are reported figures a caller acts on. `bir send` prints `accepted` and
+`skipped` and a pipeline gates on them, so a server answering `{"accepted": -5}`
+to a three-event send used to print `accepted=-5 attempted=3 skipped=8` — more
+skipped than attempted — and exit `0`. And `event_ids` is exactly what
+`--mark-sent` writes to the sidecar, so an id the server invented would be
+remembered as delivered for good.
+
+The size limit is derived from the request rather than fixed, because a batch's
+accepted ids are legitimately long: it allows an id's worth per event sent plus
+room for the envelope. A reply in proportion is still read and parsed whole; one
+that cannot be the ids of what was sent is not read at all. Measured against a
+server answering a one-event send with a 200 MB body, in a client process of its
+own: peak RSS 755 MB before, 34 MB after.
+
+A refusal raises, so nothing is reported as accepted. With `batch_size` set,
+batches are posted in sequence and each one's accepted ids are recorded as it
+completes, so a refusal part-way leaves the batches that already succeeded marked
+and raises for the rest — the same as any other mid-run failure.
+
 ## Mark accepted events locally
 
 Pass `mark_sent=True` to avoid requesting already accepted events on later
