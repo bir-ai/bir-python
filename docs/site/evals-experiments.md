@@ -347,7 +347,21 @@ document. Like `experiment-show` it accepts `--dir` and exits non-zero (printing
 nothing to stdout) for an unknown id. Output is deterministic — evaluators are
 ordered by name and examples follow dataset order — and every experiment-derived
 string is escaped for the chosen format, so already-redacted example text cannot
-inject markup. The same rendering is available in Python:
+inject markup.
+
+A rendered report always encodes. `os.fsdecode` returns surrogate-escaped text
+for a filename that is not valid UTF-8, so an `example_id` taken from a
+filesystem walk holds code points no encoder accepts; those are escaped as
+`\udcff` rather than dropped, so the odd id stays visible and the report can be
+written at all.
+
+`--output PATH` writes through a temporary sibling file and renames it into
+place, so a write that cannot finish — a full disk, a volume that went away —
+leaves the report that was there byte-identical instead of an empty file. A new
+report is created with the umask's mode; re-rendering over an existing one keeps
+the mode that file already had.
+
+The same rendering is available in Python:
 
 ```python
 from bir.evals import load_experiment, render_experiment_report

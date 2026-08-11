@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import tempfile
 import threading
 import time
@@ -3165,6 +3166,47 @@ class RenderExperimentReportTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "format must be one of"):
                 render_experiment_report(result, format="pdf")
+
+    def test_a_report_always_encodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # os.fsdecode's surrogate escapes are the only code points a str can
+            # hold that no encoder will take, and a filesystem walk produces them.
+            walked = os.fsdecode(b"doc-\xff.pdf")
+            result = run_experiment(
+                walked,
+                dataset=Dataset([DatasetExample(id=walked, input="hi", expected="ok")]),
+                task=lambda _question: "ok",
+                evaluators=[exact_match()],
+                path=Path(directory) / "walk.jsonl",
+            )
+
+            for report_format in ("html", "markdown"):
+                with self.subTest(format=report_format):
+                    report = render_experiment_report(result, format=report_format)
+
+                    # Encodes at all, which is what a file write and stdout both
+                    # need, and names the code point rather than hiding it.
+                    report.encode("utf-8")
+                    self.assertIn("doc-\\udcff.pdf", report)
+                    self.assertNotIn("\udcff", report)
+
+    def test_ordinary_non_ascii_text_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_experiment(
+                "günlük",
+                dataset=Dataset([DatasetExample(id="日本語", input="hi", expected="ok")]),
+                task=lambda _question: "ok",
+                evaluators=[exact_match()],
+                path=Path(directory) / "utf8.jsonl",
+            )
+
+            for report_format in ("html", "markdown"):
+                with self.subTest(format=report_format):
+                    report = render_experiment_report(result, format=report_format)
+
+                    self.assertIn("günlük", report)
+                    self.assertIn("日本語", report)
+                    self.assertNotIn("\\u", report)
 
 
 class FakeHttpResponse:

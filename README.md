@@ -592,7 +592,9 @@ Share or archive a result as a single file with
 aggregate means, and the per-example table to a self-contained, stdlib-only
 report. `--format` selects `html` (default; a standalone document with no
 external assets) or `markdown`, and `--output PATH` writes to a file instead of
-stdout. The same rendering is available in Python as
+stdout — through a temporary sibling that is renamed into place, so a write that
+cannot finish leaves the previous report byte-identical rather than empty. The
+same rendering is available in Python as
 `bir.evals.render_experiment_report(load_experiment(path), format="html")`.
 
 Compare a candidate against a baseline and gate CI on regressions with

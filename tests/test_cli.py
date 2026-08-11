@@ -15,6 +15,7 @@ import itertools
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1165,6 +1166,94 @@ class ExperimentReportCommandTests(CliBaseTest):
             self.assertEqual(out, "")
             self.assertIn("bir:", err)
             self.assertIn("not found", err)
+
+    def test_a_write_that_fails_leaves_the_previous_report_untouched(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+            report_path = workdir / "report.html"
+            code, _out, _err = run_cli(
+                "experiment-report", experiment_id, "--dir", str(workdir), "--output", str(report_path)
+            )
+            self.assertEqual(code, 0)
+            before = report_path.read_bytes()
+
+            # A plain write truncates before a byte reaches the disk, so it is
+            # the staging that has to fail for this to prove anything.
+            for stage, target in (("write", "pathlib.Path.write_text"), ("replace", "pathlib.Path.replace")):
+                with self.subTest(fails=stage):
+                    with patch(target, side_effect=OSError(28, "No space left on device")):
+                        code, out, err = run_cli(
+                            "experiment-report", experiment_id, "--dir", str(workdir), "--output", str(report_path)
+                        )
+
+                    self.assertEqual(code, 1)
+                    self.assertEqual(out, "")
+                    self.assertIn("No space left on device", err)
+                    self.assertEqual(report_path.read_bytes(), before)
+                    self.assertEqual(list(workdir.glob(".*.tmp")), [])
+
+    def test_a_new_report_keeps_the_umasks_mode_not_the_stores(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+            report_path = workdir / "report.html"
+
+            code, _out, _err = run_cli(
+                "experiment-report", experiment_id, "--dir", str(workdir), "--output", str(report_path)
+            )
+
+            self.assertEqual(code, 0)
+            # A report is a deliberate handoff, not Bir's own bookkeeping, so it
+            # must not arrive with the store's owner-only mode.
+            self.assertNotEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+            self.assertTrue(stat.S_IMODE(report_path.stat().st_mode) & stat.S_IRGRP)
+
+    def test_re_rendering_keeps_the_mode_the_existing_report_had(self) -> None:
+        with temporary_workdir() as workdir:
+            experiment_id = run_faq_experiment(workdir)
+            report_path = workdir / "report.html"
+            run_cli("experiment-report", experiment_id, "--dir", str(workdir), "--output", str(report_path))
+            os.chmod(report_path, 0o600)
+
+            code, _out, _err = run_cli(
+                "experiment-report", experiment_id, "--dir", str(workdir), "--output", str(report_path)
+            )
+
+            # A rename carries the staged file's mode, so a narrowed report would
+            # silently widen again without this.
+            self.assertEqual(code, 0)
+            self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+
+    def test_an_example_id_from_a_filesystem_walk_still_renders(self) -> None:
+        with temporary_workdir() as workdir:
+            # What os.fsdecode returns for a filename that is not valid UTF-8,
+            # which is what a document-ingestion dataset's ids are.
+            walked = os.fsdecode(b"doc-\xff.pdf")
+            result = run_experiment(
+                "walk",
+                dataset=Dataset([DatasetExample(id=walked, input="hi", expected="ok")]),
+                task=lambda _question: "ok",
+                evaluators=[exact_match()],
+                path=workdir / "walk.jsonl",
+            )
+            report_path = workdir / "report.html"
+
+            for report_format in ("html", "markdown"):
+                with self.subTest(format=report_format):
+                    code, _out, err = run_cli(
+                        "experiment-report",
+                        result.id,
+                        "--dir",
+                        str(workdir),
+                        "--format",
+                        report_format,
+                        "--output",
+                        str(report_path),
+                    )
+
+                    self.assertEqual(code, 0)
+                    self.assertEqual(err, "")
+                    # Escaped rather than dropped, so the odd id stays visible.
+                    self.assertIn("doc-\\udcff.pdf", report_path.read_text(encoding="utf-8"))
 
 
 class EvalGateCommandTests(CliBaseTest):

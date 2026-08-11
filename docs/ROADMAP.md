@@ -70,78 +70,9 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | `experiment-report --output` destroys the file it cannot finish | P2 | S | A failed render leaves the previous report intact | — |
-| 2 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
+| 1 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
 
-### 1. `bir experiment-report --output` destroys the file it cannot finish
-
-**Why.** `_cmd_experiment_report` writes with `output_path.write_text(report,
-encoding="utf-8")` (`bir/cli.py:664`). That opens the destination for truncating
-write before the content is encoded or a byte reaches the disk, so any failure
-leaves a zero-byte file where a good report was.
-
-Driven with a real volume running out of space — the 5-example report rendered
-first, then the volume padded to 98 KB free, then the 451 KB report rendered over
-it:
-
-```
-1. render the 5-example report (volume empty)   exit=0  report.html=  1,540 bytes
-   padded; free = 98,304 bytes, report.html still 1,540 bytes
-2. re-render the 451 KB report over it          exit=1  report.html=      0 bytes
-      stderr: bir: [Errno 28] No space left on device
-```
-
-An encode failure does the same on an ordinary filesystem. `os.fsdecode` returns
-a surrogate-escaped string for a filename that is not valid UTF-8, which is what
-a document-ingestion dataset's `example_id` is when it comes from a filesystem
-walk, and `write_text` encodes strictly:
-
-```
-1. render the clean experiment       exit=0  report.html=4,821 bytes
-2. re-render, ids from a walk        exit=1  report.html=    0 bytes
-      stderr: bir: 'utf-8' codec can't encode character '\udcff' in position 4734
-```
-
-`render_experiment_report` itself is fine in both cases — it returned 4,835
-chars for the same experiment, and `bir experiment-report` without `--output`
-wrote all 4,835 to stdout and exited 0. Only the file write is destructive.
-
-It is also the only file-producing path in the SDK that writes in place. The
-experiment summary already stages and replaces, and says why:
-`_write_experiment_summary` (`bir/_eval_persistence.py:330-351`) — "A plain write
-truncates in place, so a process killed part-way through leaves a summary that
-parses as nothing … either the new summary is there whole, or the previous one
-still is." Measured under the same pressure, that holds: after a failed
-re-run on the full volume the previous summary was still 318 bytes, still parsed,
-byte-identical. `prune` (`bir/_storage.py:1042-1078`) and the sent-ID sidecar
-(`bir/_storage.py:1195-1212`) stage the same way.
-
-No test pins the current behavior. `tests/test_cli.py:1136-1156` writes a report
-to a path that does not exist yet and `:1100-1134` writes to stdout; nothing
-writes over an existing report and nothing fails a write.
-
-**Scope.**
-
-- Write the report through a sibling temp file and `Path.replace` it, matching
-  `_write_experiment_summary`, so the destination is replaced whole or not
-  touched.
-- Decide and record what happens to the report content when the experiment holds
-  a string Python cannot encode. Staging fixes the destructive half; the render
-  still fails. Either the renderer escapes an unencodable code point the way
-  `_visible` escapes a control character (`bir/_cli_present.py:301-326`), or the
-  command reports which example it could not render — silently substituting is
-  not an option for a report of what a run produced.
-- Create the staged file with the umask's mode, not the `_private_opener` the
-  other staged writes use. A rename carries the staged file's mode to the
-  destination, and `docs/site/capture-privacy.md:133-136` promises the opposite
-  of what that opener would give: `bir experiment-report --output ...` writes "to
-  a path you named and keeps the umask's mode, because those are deliberate
-  handoffs rather than Bir's own store".
-
-**Done when** a `bir experiment-report --output PATH` that fails for any reason
-leaves the previous contents of PATH byte-identical.
-
-### 2. Two evaluators may share one name and one aggregate
+### 1. Two evaluators may share one name and one aggregate
 
 **Why.** Thirteen of the fourteen evaluator factories in `bir/evals.py` take
 `name` as a keyword-only argument with a fixed default — `exact_match` at
@@ -208,11 +139,11 @@ evaluators with the same name.
 
 ## Sequencing
 
-The two remaining items are independent of each other and of everything that
-shipped from this audit. Item 2 is closest to the gate work — it lands in the
-same three files (`bir/evals.py`, `bir/_eval_models.py`, `bir/cli.py`) — and is
-worth taking while that code is fresh. Item 1 is the smallest piece of work here
-and touches one line plus its tests.
+One item is left and nothing blocks it. It lands in the same three files as the
+gate work that shipped from this audit (`bir/evals.py`, `bir/_eval_models.py`,
+`bir/cli.py`), so it is worth taking while that code is fresh: the gate now
+reports counts against an aggregate that a duplicate evaluator name can still
+silently merge.
 
 The full-disk story is finished: the store's own writer repairs an interrupted
 write on its next append, and `bir prune` repairs one nothing is recording into
@@ -258,16 +189,11 @@ framework object, following the store across a rotation in `bir tail`, escaping
 and bounding what the CLI prints on its error channel, refreshing the OTLP
 attribute spellings, recording where the redaction boundary stops, failing the
 gate on a candidate run whose examples failed, pruning a store whose final line
-an interrupted write never finished, and repairing that line on the next append
-instead of writing the following event onto it.
+an interrupted write never finished, repairing that line on the next append
+instead of writing the following event onto it, and writing a report through a
+staged file so a failed render keeps the previous one.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
-
-Item 1 sits beside "escaping control characters when the CLI renders recorded
-text for a person" and does not reopen it. That covered what a rendered *string*
-may contain when a terminal reads it; this is about a *file* being truncated
-before anything is rendered into it, and it fails identically when nothing is
-wrong with the text at all — the ENOSPC case renders pure ASCII.
 
 The gate that shipped from this audit sits beside the declined "A failing
 evaluator discards the example's output and the other evaluators' scores" below
@@ -472,8 +398,9 @@ tables write the escaped byte back out unchanged, which round-trips the filename
 rather than losing it, and was identical under an unset locale, `LANG=en_US.UTF-8`,
 and `LC_ALL=C`. Every file the SDK opens passes `encoding="utf-8"` explicitly —
 10 of 10 text opens across `_storage.py`, `_eval_persistence.py`, and
-`_eval_models.py` — so no read or write depends on the locale. The one command
-that cannot survive it is `experiment-report --output`, which is item 1.
+`_eval_models.py` — so no read or write depends on the locale. The one command that could not survive it was
+`experiment-report --output`, which this audit fixed: surrogates are escaped
+where every other experiment-derived string is escaped for its format.
 
 **Very large usage figures.** `set_usage(input_tokens=2**63)` and
 `set_usage(input_tokens=10**30)` were both accepted, and `bir stats --json`

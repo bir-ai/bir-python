@@ -7,6 +7,7 @@ or the public :mod:`bir.evals` compatibility surface.
 
 from __future__ import annotations
 
+import re
 from html import escape as _html_escape
 
 from ._eval_models import EvalResult, ExperimentResult
@@ -14,6 +15,11 @@ from ._eval_models import EvalResult, ExperimentResult
 # Self-contained report formats supported by render_experiment_report() and the
 # ``bir experiment-report`` CLI command.
 _REPORT_FORMATS = ("html", "markdown")
+
+# The only code points no UTF-8 encoder will accept, and the only ones a report
+# can hold: ``os.fsdecode`` returns surrogate-escaped text for a filename that is
+# not valid UTF-8, so an ``example_id`` taken from a directory walk carries them.
+_SURROGATES = re.compile(r"[\ud800-\udfff]")
 
 _REPORT_CSS = (
     "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
@@ -42,8 +48,10 @@ def render_experiment_report(result: ExperimentResult, *, format: str = "html") 
     name and examples follow their persisted dataset order, so re-rendering the
     same result yields a byte-identical string. Only already-persisted (already
     redacted) values are rendered, and every experiment-derived string is escaped
-    for the chosen format, so example data cannot inject markup. Built with the
-    standard library only.
+    for the chosen format, so example data cannot inject markup. The returned
+    string always encodes: a surrogate, which is what ``os.fsdecode`` leaves in
+    an ``example_id`` taken from a filesystem walk, is escaped rather than left
+    for the caller's ``write`` to refuse. Built with the standard library only.
     """
 
     if format not in _REPORT_FORMATS:
@@ -71,11 +79,11 @@ def _render_experiment_report_html(result: ExperimentResult) -> str:
         '<html lang="en">',
         "<head>",
         '<meta charset="utf-8">',
-        f"<title>{_html_escape(title)}</title>",
+        f"<title>{_html_cell(title)}</title>",
         f"<style>{_REPORT_CSS}</style>",
         "</head>",
         "<body>",
-        f"<h1>{_html_escape(title)}</h1>",
+        f"<h1>{_html_cell(title)}</h1>",
         '<table class="meta">',
     ]
     for label, value in (
@@ -86,7 +94,7 @@ def _render_experiment_report_html(result: ExperimentResult) -> str:
         ("Start", result.start_time),
         ("End", result.end_time),
     ):
-        parts.append(f"<tr><th>{_html_escape(label)}</th><td>{_html_escape(value)}</td></tr>")
+        parts.append(f"<tr><th>{_html_cell(label)}</th><td>{_html_cell(value)}</td></tr>")
     parts.append("</table>")
 
     parts.append("<h2>Evaluator aggregates</h2>")
@@ -96,7 +104,7 @@ def _render_experiment_report_html(result: ExperimentResult) -> str:
         parts.append("<tbody>")
         for name in sorted(aggregate_scores):
             mean = _format_report_score(aggregate_scores[name])
-            parts.append(f"<tr><td>{_html_escape(name)}</td><td>{_html_escape(mean)}</td></tr>")
+            parts.append(f"<tr><td>{_html_cell(name)}</td><td>{_html_cell(mean)}</td></tr>")
         parts.append("</tbody>")
         parts.append("</table>")
     else:
@@ -111,10 +119,10 @@ def _render_experiment_report_html(result: ExperimentResult) -> str:
         error = example.error or "-"
         parts.append(
             "<tr>"
-            f"<td>{_html_escape(example.example_id)}</td>"
-            f"<td>{_html_escape(example.status)}</td>"
-            f"<td>{_html_escape(scores)}</td>"
-            f"<td>{_html_escape(error)}</td>"
+            f"<td>{_html_cell(example.example_id)}</td>"
+            f"<td>{_html_cell(example.status)}</td>"
+            f"<td>{_html_cell(scores)}</td>"
+            f"<td>{_html_cell(error)}</td>"
             "</tr>"
         )
     parts.append("</tbody>")
@@ -171,6 +179,36 @@ def _render_experiment_report_markdown(result: ExperimentResult) -> str:
     return "\n".join(lines)
 
 
+def _encodable(text: str) -> str:
+    """Escape code points that cannot be written out in any encoding.
+
+    A report is a file and a stream, and both have to encode. Surrogates cannot:
+    ``str`` holds them, ``str.encode`` refuses them, and an ``example_id`` that
+    came from a filesystem walk over a directory with a non-UTF-8 filename is
+    full of them. Rendering used to produce a string neither ``--output`` nor
+    stdout could write, so an experiment could not be reported at all.
+
+    Escaped rather than dropped, and escaped rather than replaced by a
+    placeholder, for the reason the CLI escapes a control character instead of
+    stripping it: a reader wants to see that something odd was recorded, and the
+    escape names exactly which code point it was. ``\\udcff`` reads the same way
+    Python and JSON write it.
+
+    Almost every string rendered is plain ASCII, which the fast path returns
+    untouched; anything else pays one scan.
+    """
+
+    if text.isascii():
+        return text
+    return _SURROGATES.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+def _html_cell(text: str) -> str:
+    """Escape one experiment-derived string for HTML, encodably."""
+
+    return _html_escape(_encodable(text))
+
+
 def _format_report_score(value: float) -> str:
     return f"{value:.2f}"
 
@@ -186,8 +224,8 @@ def _collapse_newlines(text: str) -> str:
 
 
 def _markdown_inline(text: str) -> str:
-    return _collapse_newlines(text)
+    return _collapse_newlines(_encodable(text))
 
 
 def _markdown_cell(text: str) -> str:
-    return _collapse_newlines(text).replace("|", "\\|")
+    return _collapse_newlines(_encodable(text)).replace("|", "\\|")

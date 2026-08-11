@@ -169,6 +169,57 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir experiment-report --output` no longer destroys the report it cannot
+  finish writing. It wrote with `Path.write_text`, which opens the destination
+  for truncating write before a byte is encoded or reaches the disk, so any
+  failure left a zero-byte file where a report was. Driven on a 1 MB HFS+ volume
+  padded to 98 KB free, re-rendering a 451 KB report over a 1,540-byte one:
+
+  ```
+                                    before                   after
+  report.html after the failure     0 bytes, exit 1          1,540 bytes, exit 1
+                                    bir: [Errno 28] No space left on device
+  ```
+
+  It now writes through a sibling temporary file and renames it into place, the
+  way the experiment summary, the trace store's sent-ID sidecar, and `prune`
+  already do. It was the only file-producing path in the SDK that did not.
+
+  The staged file is created with the umask's mode rather than the owner-only
+  one those three use: `docs/site/capture-privacy.md` promises that
+  `experiment-report --output` "writes to a path you named and keeps the umask's
+  mode, because those are deliberate handoffs rather than Bir's own store". A
+  rename carries the staged file's mode to the destination, so an existing
+  report's mode is copied onto the staged file first — a plain write left it
+  alone, and a narrowed report must not silently widen on the next render.
+
+- A report can no longer hold text that nothing can write out. `os.fsdecode`
+  returns surrogate-escaped text for a filename that is not valid UTF-8, so an
+  `example_id` taken from a filesystem walk — the ordinary shape for a
+  document-ingestion dataset — carried code points no encoder accepts.
+  `render_experiment_report()` returned a string that neither `--output` nor
+  stdout could write, in both formats:
+
+  ```
+                                    before                         after
+  render_experiment_report(html)    4,835 chars, UnicodeEncodeError  4,840 chars, encodes
+  render_experiment_report(md)      2,434 chars, UnicodeEncodeError  2,439 chars, encodes
+  bir experiment-report --output    exit 1, report destroyed         exit 0
+  ```
+
+  Surrogates are now escaped as `\udcff` where every other experiment-derived
+  string is escaped for its format. Escaped rather than dropped or replaced by a
+  placeholder, for the reason the CLI escapes a control character instead of
+  stripping it: a reader wants to see that something odd was recorded, and the
+  escape names which code point it was. Ordinary non-ASCII text is untouched —
+  `günlük` and `日本語` render as themselves — and the fast path returns an ASCII
+  string without scanning it.
+
+  Fixed in the renderer rather than at the write, so the public
+  `render_experiment_report()` returns something its caller can write, and so
+  the stdout path is covered too: it survives here only because this machine's
+  stdout uses `surrogateescape`, and would have failed on one that does not.
+
 - An append onto a store whose last write never finished no longer destroys the
   event it is recording. An append lands at the byte after whatever is already
   there, so a file ending mid-line ran the fragment and the incoming event

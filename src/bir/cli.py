@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import stat
 import sys
 import time
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
+from uuid import uuid4
 
 from . import __version__, _sdk
 from ._cli_parser import build_parser as _build_cli_parser
@@ -663,12 +665,42 @@ def _cmd_experiment_report(args: argparse.Namespace) -> int:
         output_path = Path(args.output)
         if output_path.parent != Path("."):
             output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(report, encoding="utf-8")
+        _write_report_file(output_path, report)
         print(f"Wrote {args.report_format} report to {output_path}")
         return 0
 
     sys.stdout.write(report)
     return 0
+
+
+def _write_report_file(output_path: Path, report: str) -> None:
+    """Write the report through a temp file, so a failed write keeps the old one.
+
+    A plain write truncates in place, so anything that stops it part-way — a full
+    disk, a volume that went away — leaves an empty file where a report was.
+    Staging and renaming is what the experiment summary, the trace store's
+    sent-ID sidecar, and ``prune`` already do: either the new report is there
+    whole, or the previous one still is.
+
+    The staged file is created with the umask's mode rather than the private one
+    those three use, because a report is a file the user named and expects to
+    hand to someone, not Bir's own bookkeeping. A rename carries the staged
+    file's mode to the destination, so an existing report's mode is copied onto
+    the staged file first; a plain write would have left it alone.
+    """
+
+    temp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(report, encoding="utf-8")
+        try:
+            os.chmod(temp_path, stat.S_IMODE(output_path.stat().st_mode))
+        except OSError:
+            # No report there yet, or one whose mode cannot be read: the umask
+            # decides, which is what writing a new file has always done.
+            pass
+        temp_path.replace(output_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _resolve_experiment_result_path(summary: ExperimentSummary, directory: str) -> Path:
