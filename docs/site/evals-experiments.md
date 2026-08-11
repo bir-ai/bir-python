@@ -216,6 +216,53 @@ Said once per run, on the first example that waits longer than a whole timeout.
 Bounding the run itself would need a budget for the run rather than for each
 example, which is not something `run_experiment()` takes.
 
+### Bound the run itself with `total_timeout`
+
+`timeout` bounds an example. It does not bound the run: a task that outran it
+keeps its worker until it returns, so a run against a backend that stopped
+answering takes as long as the tasks do however small `timeout` is. Pass
+`total_timeout=<seconds>` to bound the run:
+
+```python
+result = run_experiment(
+    "nightly",
+    dataset=dataset,
+    task=answer_question,
+    evaluators=[contains("observability")],
+    timeout=30,           # seconds per example
+    total_timeout=600,    # seconds for the whole run
+    raise_on_error=False,
+)
+```
+
+Measured on 60 examples against a task that never returns, with `max_workers=4`
+and a 5 ms per-example timeout:
+
+| | run time | rows |
+| --- | --- | --- |
+| `timeout` only | 280.07 s | 60 of 60 |
+| `timeout` and `total_timeout=2` | 2.01 s | 4 of 60 |
+
+When the limit passes the run starts no further examples and finalizes with the
+ones that ran. The examples it did not reach are **absent** rather than recorded
+as failures — they did not fail, and calling them errors would make the
+experiment look worse than the code it measured. That is the same shape
+`raise_on_error` already produces when it ends a run early: `example_count`
+counts the rows the run produced, and they are the leading examples in dataset
+order.
+
+Stopping honors `raise_on_error`. With the default `True` it raises
+`TimeoutError: experiment stopped after 600s with 143 of 500 example(s) run`, so
+a truncated run cannot pass unnoticed; with `False` it returns what ran and says
+so on the `bir` logger. `run_experiment_async()` takes the same argument and
+means the same thing by it.
+
+One limit is worth naming: a run can be stopped between examples, not inside
+one. Python cannot interrupt a running task, so `total_timeout` stops the run
+starting anything new — with `timeout` also set, that granularity is one
+example's timeout; without it, an example that never returns is never
+interrupted.
+
 A run that returns with tasks still going says so once, on the `bir` logger:
 
 ```

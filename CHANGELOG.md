@@ -167,6 +167,51 @@ Before publishing, verify the release with the SDK release checklist in
   case pinning the superseded spellings says in its assertion message that the
   transition can end once those constants are gone.
 
+### Added
+
+- `run_experiment()` and `run_experiment_async()` take `total_timeout`, a limit
+  on the run. `timeout` bounds an example and never bounded the run: a task that
+  outran it keeps its worker until it returns, so a run against a backend that
+  stopped answering takes as long as the tasks do however small `timeout` is.
+  Measured on 60 examples against a task that never returns, `max_workers=4`,
+  5 ms per-example timeout:
+
+  ```
+                                    run time   rows
+  timeout only                      280.07 s   60 of 60
+  timeout and total_timeout=2         2.01 s    4 of 60
+  ```
+
+  The previous release bounded the *threads* a serial run abandons; this bounds
+  the run. They are different limits and neither implies the other, which the
+  rejected attempt to stretch the per-example limit over the run made plain.
+
+  Three decisions, recorded because each had a defensible alternative.
+
+  **The examples it does not reach are absent, not failures.** They did not fail,
+  and recording them as errors would make the experiment look worse than the code
+  it measured — it would also move the gate's error rate for a reason that has
+  nothing to do with the code. Absent is the shape `raise_on_error` already
+  produces when it ends a run early, so `example_count` already means "the rows
+  this run produced" rather than the dataset size, and the rows are the leading
+  examples in dataset order. A third status would have said it best and is ruled
+  out: `tests/fixtures/valid-experiment.json` is a wire contract whose canonical
+  copy lives in the product repo, so it cannot change here alone.
+
+  **Stopping honors `raise_on_error`.** With the default `True` it raises
+  `TimeoutError: experiment stopped after 600s with 143 of 500 example(s) run`,
+  because a run that quietly returned a third of its dataset would compare
+  against a full baseline as though nothing were wrong. With `False` it returns
+  what ran and says so on the `bir` logger.
+
+  **The async runner gets it too.** It cancels cleanly so it has no stuck
+  workers, but a run against a backend that stopped answering is just as
+  unbounded there, and the two runners are documented as matching.
+
+  One limit is documented rather than hidden: a run can be stopped between
+  examples, not inside one, because Python cannot interrupt a running task. With
+  `timeout` also set, that granularity is one example's timeout.
+
 ### Fixed
 
 - A concurrent run that is waiting on stuck workers now says so instead of

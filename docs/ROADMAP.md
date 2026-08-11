@@ -72,69 +72,9 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A run has no budget of its own, only a budget per example | P2 | M | A run against a backend that stopped answering finishes when the operator asked it to | — |
-| 2 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
+| 1 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
 
-### 1. A run has no budget of its own, only a budget per example
-
-**Why.** `timeout` bounds an example. Nothing bounds the run. When every worker
-is holding a task that already timed out, a queued example waits for one to
-return, so the run takes as long as the stuck tasks do — which is what `timeout`
-looked like it was preventing. Measured on 60 examples whose task sleeps 20 s,
-with a 5 ms timeout and `max_workers=4`:
-
-```
-                       run time   peak threads   errors
-max_workers=4          280.08 s   9              60 (all "task timed out")
-```
-
-Four workers, twenty seconds each, sixty examples: 60 / 4 x 20 s. The threads are
-bounded and always were; the run is not.
-
-The previous audit's version of this item asked for the wait to be bounded by the
-example's own `timeout`, the way the serial path now bounds its own. That was
-implemented and measured, and it is the wrong fix:
-
-```
-2 slow (0.30 s) + 10 fast, max_workers=2, timeout=0.05 s
-                        succeeded   recorded as never run
-bounded wait            6           4
-waiting as before       10          0
-```
-
-Four of ten queued fast examples were recorded as failures they would not have
-had, because a worker frees a moment after the bound expires. Refusing an example
-that would have passed is worse than a slow run, and no bound separates "returns
-in 0.30 s" from "never returns" without waiting 0.30 s to find out. The serial
-path can bound its wait only because it has sixteen slots of headroom before it
-refuses anything; a pool's bound *is* `max_workers`, so it has none.
-`tests/test_evals.py:2977-3015` caught it — the case written for the property
-that a queued example is not charged for its wait.
-
-What shipped instead is that the run says it is waiting rather than appearing
-hung. What is still open is the thing that would actually bound it: a budget for
-the run.
-
-**Scope.**
-
-- Add a budget for the whole run, not for each example — a deadline or a total
-  duration on `run_experiment` and `run_experiment_async`. This is a public
-  feature, so it is a `Changed`/`Added` entry with documentation, not a fix.
-- Decide and record what happens to the examples the budget cuts off. They have
-  not run and have not failed; recording them as errors makes an experiment look
-  worse than the code under test, and omitting them makes `example_count`
-  disagree with the dataset. A third status is a schema change and needs the
-  `bir-app` contract, so it is probably not that.
-- Decide and record how it interacts with `raise_on_error` and with the summary,
-  which is written when the run ends and would now end early.
-- Decide and record whether the async runner gets the same budget. It cancels
-  cleanly, so it has no stuck workers, but a run against a backend that stopped
-  answering is just as unbounded there.
-
-**Done when** a run given a budget for itself returns within that budget whatever
-the tasks do.
-
-### 2. A prompt's `name` and `version` are written with whatever type they were given
+### 1. A prompt's `name` and `version` are written with whatever type they were given
 
 **Why.** `prompt()` (`bir/_sdk.py:1128-1161`) validates `template` and `rendered`
 with `isinstance` and rejects an empty `name` or `version`, but never checks that
@@ -193,11 +133,9 @@ strings throughout and assert the recorded shape; nothing passes a non-string.
 
 ## Sequencing
 
-The two remaining items are independent of each other. Item 1 is the larger of
-the two and the only one that adds public surface, so it needs a product decision
-before it needs code — the previous shape of it was implemented, measured, and
-rejected, and that measurement is in the item. Item 2 is the smallest piece of
-work here and needs no decision beyond whether its raise is worth a deprecation.
+One item is left and nothing blocks it. It needs no decision beyond whether its
+raise is worth a deprecation, and it is the smallest piece of work this audit
+raised.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -243,7 +181,8 @@ staged file so a failed render keeps the previous one, and refusing an evaluator
 list that names the same evaluator twice, refusing a redirect instead of
 following it to a host nobody configured, refusing a batch response that cannot
 describe the request it answers, bounding the workers a serial timed run
-abandons, and saying so when a concurrent run is waiting on stuck workers.
+abandons, saying so when a concurrent run is waiting on stuck workers, and
+bounding the run itself with `total_timeout`.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
@@ -255,11 +194,12 @@ holds: the error path still escapes and stops at 500 characters. This was the
 saying the bound is on what a message shows rather than on what is parsed. The
 new bound is on the read, and is derived from the request rather than fixed.
 
-Item 1 sits beside "experiment timeouts" and does not reopen them. The per-example
-timeout records what it should: 60 of 60 examples timed out, were recorded as
-error rows, and kept dataset order. This asks for a bound that work never
-offered — one on the run rather than on each example — and the measurement above
-shows why the per-example one cannot be stretched to cover it.
+The run budget that shipped from this audit sits beside "experiment timeouts" and
+does not reopen them. The per-example timeout records what it should: 60 of 60
+examples timed out, were recorded as error rows, and kept dataset order. What
+shipped is a bound that work never offered — one on the run rather than on each
+example — after the attempt to stretch the per-example one over the run was
+measured and rejected for refusing examples that would have passed.
 
 ## Declined
 
@@ -406,7 +346,7 @@ records only the template's SHA-256 unless capture is asked for, redacts a
 credential inside a captured `rendered` string
 (`{"rendered": "Hi [redacted]"}`), guards a variable whose `__repr__` raises
 (`"<unrepresentable X>"`), and rejects a non-mapping `variables`. Only the two
-identity fields are unguarded, which is item 2.
+identity fields are unguarded, which is item 1.
 
 **A server that answers slowly or not at all.** A 200 that sends its headers, a
 `Content-Length` of 1,000,000, and then one byte every 30 s was cut off by the

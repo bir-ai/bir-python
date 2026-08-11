@@ -578,6 +578,15 @@ example that exceeds the limit is recorded as an `"error"`-status result with a
 dataset order) and the run continues. The default `timeout=None` is unlimited and
 byte-for-byte identical to the previous behavior.
 
+`timeout` bounds an example, not the run: a task that outran it keeps its worker
+until it returns, so a run against a backend that stopped answering takes as long
+as the tasks do. `total_timeout=<seconds>` bounds the run — 60 examples against a
+task that never returns took 280 s with `timeout` alone and 2.01 s with
+`total_timeout=2`. The examples it does not reach are absent rather than recorded
+as failures, the same shape `raise_on_error` already produces when it ends a run
+early, and stopping honors `raise_on_error` so a truncated run cannot pass
+unnoticed.
+
 Evaluators range from exact and substring string checks to `similarity_above()`,
 a stdlib-only fuzzy match that scores by `difflib` similarity ratio, plus
 structured-field, numeric, latency/cost, and RAG heuristics. See

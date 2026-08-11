@@ -3193,6 +3193,184 @@ class RunExperimentTimeoutTests(unittest.TestCase):
                 )
 
 
+class RunTotalTimeoutTests(unittest.TestCase):
+    """``total_timeout`` bounds the run, which ``timeout`` never did.
+
+    A task that outran its per-example timeout keeps its worker until it returns,
+    so a run against a backend that stopped answering takes as long as the tasks
+    do however small ``timeout`` is: 60 examples against a 20 s task with a 5 ms
+    timeout took 280 s. Bounding that by stretching the per-example limit was
+    measured and rejected — it refuses examples that would have passed — so the
+    run takes a limit of its own.
+    """
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    @staticmethod
+    def _slow_dataset(count: int) -> Dataset:
+        return Dataset([DatasetExample(id=f"q{index}", input=index) for index in range(count)])
+
+    def test_a_run_stops_on_its_own_limit_and_keeps_what_ran(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capped.jsonl"
+
+            with self.assertLogs("bir", level="WARNING") as logs:
+                result = run_experiment(
+                    "capped",
+                    dataset=self._slow_dataset(40),
+                    task=lambda value: (time.sleep(0.05), value)[1],
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=path,
+                    raise_on_error=False,
+                    total_timeout=0.3,
+                )
+
+            self.assertLess(len(result.results), 40)
+            self.assertGreater(len(result.results), 0)
+            # The rows are the leading examples in dataset order, which is the
+            # shape raise_on_error already produces when it ends a run early.
+            self.assertEqual(
+                [row.example_id for row in result.results],
+                [f"q{index}" for index in range(len(result.results))],
+            )
+            # They ran, so they are not failures.
+            self.assertTrue(all(row.status == "success" for row in result.results))
+            self.assertTrue(any("stopped after its total_timeout" in line for line in logs.output))
+
+    def test_the_summary_counts_what_ran_not_the_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capped.jsonl"
+
+            with self.assertLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "capped",
+                    dataset=self._slow_dataset(40),
+                    task=lambda value: (time.sleep(0.05), value)[1],
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=path,
+                    raise_on_error=False,
+                    total_timeout=0.3,
+                )
+
+            summary = load_experiment_summary(path.with_suffix(".summary.json"))
+            self.assertEqual(summary.example_count, len(result.results))
+            self.assertEqual(summary.error_count, 0)
+            # The rows on disk agree with the summary, so a reader sees one run.
+            self.assertEqual(len(load_experiment(path).results), summary.example_count)
+
+    def test_raise_on_error_will_not_let_a_truncated_run_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("bir", level="WARNING"):
+                with self.assertRaises(TimeoutError) as raised:
+                    run_experiment(
+                        "capped",
+                        dataset=self._slow_dataset(40),
+                        task=lambda value: (time.sleep(0.05), value)[1],
+                        evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                        path=Path(directory) / "capped.jsonl",
+                        total_timeout=0.3,
+                    )
+
+            message = str(raised.exception)
+            self.assertIn("experiment stopped after 0.3s", message)
+            self.assertIn("of 40 example(s) run", message)
+
+    def test_it_bounds_a_concurrent_run_whose_workers_are_all_stuck(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = threading.Event()
+            self.addCleanup(release.set)
+
+            def hangs(_value: object) -> str:
+                release.wait(timeout=30)
+                return "ok"
+
+            started = time.monotonic()
+            with self.assertLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "capped",
+                    dataset=self._slow_dataset(40),
+                    task=hangs,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "capped.jsonl",
+                    raise_on_error=False,
+                    timeout=0.005,
+                    max_workers=2,
+                    total_timeout=0.5,
+                )
+            elapsed = time.monotonic() - started
+
+            # Without a run limit this waits for the stuck tasks, however long
+            # they take; with one it ends when it was told to.
+            self.assertLess(elapsed, 5.0)
+            self.assertLess(len(result.results), 40)
+
+    def test_it_bounds_an_async_run_too(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+
+            async def slow(value: int) -> int:
+                await asyncio.sleep(0.05)
+                return value
+
+            started = time.monotonic()
+            with self.assertLogs("bir", level="WARNING"):
+                result = asyncio.run(
+                    run_experiment_async(
+                        "capped",
+                        dataset=self._slow_dataset(40),
+                        task=slow,
+                        evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                        path=Path(directory) / "capped.jsonl",
+                        raise_on_error=False,
+                        total_timeout=0.3,
+                    )
+                )
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 2.0)
+            self.assertLess(len(result.results), 40)
+            self.assertEqual(
+                [row.example_id for row in result.results],
+                [f"q{index}" for index in range(len(result.results))],
+            )
+
+    def test_a_run_that_finishes_inside_its_limit_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertNoLogs("bir", level="WARNING"):
+                result = run_experiment(
+                    "roomy",
+                    dataset=self._slow_dataset(10),
+                    task=lambda value: value,
+                    evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                    path=Path(directory) / "roomy.jsonl",
+                    total_timeout=30.0,
+                )
+
+            self.assertEqual(len(result.results), 10)
+            self.assertTrue(all(row.status == "success" for row in result.results))
+
+    def test_it_rejects_a_limit_that_is_not_a_positive_number(self) -> None:
+        for bad in (0, -1.0, math.inf, float("nan")):
+            with self.subTest(total_timeout=bad):
+                with self.assertRaises(ValueError):
+                    run_experiment(
+                        "bad",
+                        dataset=self._slow_dataset(1),
+                        task=lambda value: value,
+                        evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                        total_timeout=bad,
+                    )
+        # A non-number is rejected the same way ``timeout`` rejects one.
+        with self.assertRaisesRegex(ValueError, "total_timeout must be an int or float"):
+            run_experiment(
+                "bad",
+                dataset=self._slow_dataset(1),
+                task=lambda value: value,
+                evaluators=[custom_evaluator("identity", lambda output, _expected: 1.0)],
+                total_timeout="soon",  # type: ignore[arg-type]
+            )
+
+
 class ConcurrentTimeoutWaitTests(unittest.TestCase):
     """A concurrent run waits for a worker, and says so instead of looking hung.
 

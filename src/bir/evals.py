@@ -620,6 +620,7 @@ def run_experiment(
     record_traces: bool = False,
     max_workers: int = 1,
     timeout: float | None = None,
+    total_timeout: float | None = None,
 ) -> ExperimentResult:
     """Run a task over a dataset and persist per-example evaluator results.
 
@@ -662,18 +663,35 @@ def run_experiment(
     occupies its worker slot until then, which can delay — but never time out —
     examples still waiting in the queue. ``timeout=None`` is byte-for-byte
     identical to the previous behavior.
+
+    ``total_timeout`` is an optional limit on the *run* (a positive, finite
+    number of seconds; default ``None`` means unlimited). ``timeout`` bounds an
+    example and does not bound the run: a task that outran its timeout keeps its
+    worker until it returns, so a run against a backend that stopped answering
+    takes as long as the tasks do however small ``timeout`` is. When
+    ``total_timeout`` passes, the run starts no further examples and finalizes
+    with the ones that ran -- the same shape ``raise_on_error`` already produces
+    when it stops a run early, so ``example_count`` counts the rows the run
+    produced rather than the dataset. The examples it did not reach are absent
+    rather than recorded as failures: they did not fail, and calling them errors
+    would make the experiment look worse than the code it measured. Stopping is
+    reported on the ``bir`` logger, and honors ``raise_on_error``: ``True`` (the
+    default) raises ``TimeoutError`` so a truncated run cannot pass unnoticed,
+    ``False`` returns what ran.
     """
 
     if not name:
         raise ValueError("experiment name must not be empty")
     max_workers = _validate_positive_int(max_workers, "max_workers")
     timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
+    total_timeout = None if total_timeout is None else _validate_positive_number(total_timeout, "total_timeout")
 
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
     evaluator_list = list(evaluators)
     _validate_distinct_evaluator_names(evaluator_list)
     start_time = _now()
+    deadline = _RunDeadline(total_timeout)
     output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
 
     if max_workers > 1:
@@ -689,6 +707,7 @@ def run_experiment(
             record_traces=record_traces,
             max_workers=max_workers,
             timeout=timeout,
+            deadline=deadline,
         )
 
     results: list[ExperimentExampleResult] = []
@@ -703,6 +722,8 @@ def run_experiment(
         stop_after_error=raise_on_error,
     ) as writer:
         for example in examples:
+            if deadline.expired():
+                break
             result, error = _run_example_capturing_sync(
                 experiment_id=experiment_id,
                 experiment_name=name,
@@ -728,7 +749,7 @@ def run_experiment(
                 raise error
 
     _report_live_timed_workers(name, budget.live, limit=_MAX_LIVE_TIMED_WORKERS)
-    return _finalize_experiment(
+    experiment_result = _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
         name=name,
@@ -736,6 +757,8 @@ def run_experiment(
         end_time=_now(),
         results=results,
     )
+    _stop_or_return(name, deadline, ran=len(results), of=len(examples), raise_on_error=raise_on_error)
+    return experiment_result
 
 
 async def run_experiment_async(
@@ -749,6 +772,7 @@ async def run_experiment_async(
     record_traces: bool = False,
     max_concurrency: int = 1,
     timeout: float | None = None,
+    total_timeout: float | None = None,
 ) -> ExperimentResult:
     """Run a task over a dataset with bounded concurrency and persist results.
 
@@ -762,8 +786,9 @@ async def run_experiment_async(
 
     Every other behavior matches :func:`run_experiment`: evaluator execution,
     the requirement that evaluator names be distinct, task input binding,
-    redaction, ``raise_on_error`` semantics, and the persisted JSONL/summary
-    schema are identical. Each example runs in its own
+    redaction, ``raise_on_error`` semantics, ``total_timeout`` bounding the run
+    rather than an example, and the persisted JSONL/summary schema are
+    identical. Each example runs in its own
     asyncio task, whose copied context isolates the trace contextvars, so
     ``record_traces=True`` produces a separate trace tree per example even while
     they run concurrently.
@@ -801,11 +826,14 @@ async def run_experiment_async(
     max_concurrency = _validate_positive_int(max_concurrency, "max_concurrency")
     timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
 
+    total_timeout = None if total_timeout is None else _validate_positive_number(total_timeout, "total_timeout")
+
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
     evaluator_list = list(evaluators)
     _validate_distinct_evaluator_names(evaluator_list)
     start_time = _now()
+    deadline = _RunDeadline(total_timeout)
     output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
 
     semaphore = asyncio.Semaphore(max_concurrency)
@@ -823,6 +851,12 @@ async def run_experiment_async(
         async def run_one(index: int, example: DatasetExample) -> None:
             nonlocal next_unwritten_index
             async with semaphore:
+                # Checked after the semaphore, so an example that waited its turn
+                # is judged on when it would start rather than on when it was
+                # scheduled. A cut example records nothing; the writer already
+                # stops at the first gap, so the rows stay a contiguous prefix.
+                if deadline.expired():
+                    return
                 if timeout is None:
                     result, error = await _capture_example_async(
                         experiment_id=experiment_id,
@@ -884,7 +918,9 @@ async def run_experiment_async(
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    ordered_results = [results_by_index[index] for index in range(len(examples))]
+    ordered_results = []
+    while len(ordered_results) in results_by_index:
+        ordered_results.append(results_by_index[len(ordered_results)])
     end_time = _now()
 
     if raise_on_error and errors_by_index:
@@ -899,7 +935,7 @@ async def run_experiment_async(
         )
         raise errors_by_index[first_error_index]
 
-    return _finalize_experiment(
+    experiment_result = _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
         name=name,
@@ -907,6 +943,8 @@ async def run_experiment_async(
         end_time=end_time,
         results=ordered_results,
     )
+    _stop_or_return(name, deadline, ran=len(ordered_results), of=len(examples), raise_on_error=raise_on_error)
+    return experiment_result
 
 
 def load_experiment(path: str | Path) -> ExperimentResult:
@@ -1390,6 +1428,7 @@ def _run_experiment_threaded(
     record_traces: bool,
     max_workers: int,
     timeout: float | None,
+    deadline: _RunDeadline,
 ) -> ExperimentResult:
     def run_one(index: int, example: DatasetExample) -> tuple[int, ExperimentExampleResult, Exception | None]:
         result, error = _capture_example(
@@ -1419,6 +1458,12 @@ def _run_experiment_threaded(
                 # each finished example is written while the rest are still going,
                 # so an interrupted run keeps the prefix it had completed.
                 for future in futures:
+                    if deadline.expired():
+                        # Cancel what has not begun; the executor's own exit waits
+                        # for what has, which cannot be stopped anyway.
+                        for pending in futures:
+                            pending.cancel()
+                        break
                     index, result, error = future.result()
                     results_by_index[index] = result
                     if error is not None:
@@ -1434,9 +1479,12 @@ def _run_experiment_threaded(
                 results_by_index=results_by_index,
                 errors_by_index=errors_by_index,
                 writer=writer,
+                deadline=deadline,
             )
 
-    ordered_results = [results_by_index[i] for i in range(len(examples))]
+    # However the run ended, the rows it produced are its leading examples in
+    # dataset order, which is what a run stopped early already looks like.
+    ordered_results = [results_by_index[i] for i in range(len(results_by_index))]
     end_time = _now()
 
     if raise_on_error and errors_by_index:
@@ -1453,7 +1501,7 @@ def _run_experiment_threaded(
         raise errors_by_index[first_error_index]
 
     _report_live_timed_workers(name, live_workers, limit=max_workers)
-    return _finalize_experiment(
+    experiment_result = _finalize_experiment(
         output_path=output_path,
         experiment_id=experiment_id,
         name=name,
@@ -1461,6 +1509,8 @@ def _run_experiment_threaded(
         end_time=end_time,
         results=ordered_results,
     )
+    _stop_or_return(name, deadline, ran=len(ordered_results), of=len(examples), raise_on_error=raise_on_error)
+    return experiment_result
 
 
 def _collect_threaded_results_with_timeout(
@@ -1473,6 +1523,7 @@ def _collect_threaded_results_with_timeout(
     results_by_index: dict[int, ExperimentExampleResult],
     errors_by_index: dict[int, Exception],
     writer: _ExperimentResultWriter,
+    deadline: _RunDeadline,
 ) -> int:
     """Run examples on a thread pool, recording a timeout error per example.
 
@@ -1522,6 +1573,10 @@ def _collect_threaded_results_with_timeout(
         futures = [executor.submit(run_one_recording_start, index, example) for index, example in enumerate(examples)]
         reported_waiting = False
         for index, (future, example) in enumerate(zip(futures, examples)):
+            if deadline.expired():
+                for pending in futures:
+                    pending.cancel()
+                break
             if not started_events[index].wait(timeout=timeout):
                 # Longer than one example's whole budget without a worker means
                 # every one of them is holding a task that already timed out. The
@@ -1529,7 +1584,13 @@ def _collect_threaded_results_with_timeout(
                 if not reported_waiting:
                     reported_waiting = True
                     _report_waiting_for_worker(name, max_workers)
-                started_events[index].wait()
+                # Open-ended unless the run has a limit of its own, which is the
+                # only thing that can bound this wait without refusing an example
+                # that would have passed.
+                if not started_events[index].wait(timeout=deadline.remaining()):
+                    for pending in futures:
+                        pending.cancel()
+                    break
             remaining = timeout - (time.monotonic() - started_monotonic[index])
             try:
                 result_index, result, error = future.result(timeout=max(remaining, 0.0))
@@ -1747,6 +1808,66 @@ def _report_live_timed_workers(name: str, live: int, *, limit: int) -> None:
         name,
         live,
         limit,
+    )
+
+
+class _RunDeadline:
+    """When a run must stop starting examples, or ``None`` for no limit.
+
+    ``timeout`` bounds an example; this bounds the run. The two are not the same
+    limit and neither implies the other: a run whose every worker is holding a
+    task that already timed out waits for one to return, so per-example limits
+    alone leave the run as long as the tasks are -- 60 examples against a 20 s
+    task with a 5 ms timeout took 280 s. Bounding *that* by stretching the
+    per-example limit was measured and rejected, because it refuses examples that
+    would have passed; a run that wants to end on time has to say so.
+    """
+
+    def __init__(self, total_timeout: float | None) -> None:
+        self.total_timeout = total_timeout
+        self._ends_at = None if total_timeout is None else time.monotonic() + total_timeout
+
+    def expired(self) -> bool:
+        return self._ends_at is not None and time.monotonic() >= self._ends_at
+
+    def remaining(self) -> float | None:
+        """Seconds left, or ``None`` when the run has no limit of its own."""
+
+        if self._ends_at is None:
+            return None
+        return max(self._ends_at - time.monotonic(), 0.0)
+
+
+def _stop_or_return(name: str, deadline: _RunDeadline, *, ran: int, of: int, raise_on_error: bool) -> None:
+    """Report a run that stopped on its own limit, and raise if asked to.
+
+    Called after the results are finalized, so what ran is on disk either way --
+    the same order ``raise_on_error`` already uses for a failing example.
+    """
+
+    if deadline.total_timeout is None or ran >= of:
+        return
+    _report_stopped_run(name, deadline.total_timeout, ran, of)
+    if raise_on_error:
+        raise _stopped_run_exc(deadline.total_timeout, ran, of)
+
+
+def _stopped_run_exc(total_timeout: float, ran: int, of: int) -> TimeoutError:
+    """Return the exception for a run that reached its own limit."""
+
+    return TimeoutError(f"experiment stopped after {total_timeout}s with {ran} of {of} example(s) run")
+
+
+def _report_stopped_run(name: str, total_timeout: float, ran: int, of: int) -> None:
+    """Say that a run ended on its own limit rather than on its dataset."""
+
+    _logger.warning(
+        "bir experiment %r stopped after its total_timeout of %ss with %d of %d example(s) run; the "
+        "results and summary cover what ran.",
+        name,
+        total_timeout,
+        ran,
+        of,
     )
 
 
