@@ -622,6 +622,14 @@ def run_experiment(
 ) -> ExperimentResult:
     """Run a task over a dataset and persist per-example evaluator results.
 
+    ``evaluators`` must not name the same evaluator twice. Every score is filed
+    under its evaluator's name -- the aggregate mean, the report's rows, the
+    gate's deltas -- so two sharing one name would be averaged together into a
+    number no example was given. Because each factory defaults ``name`` to its
+    own, the ordinary pairing ``field_equals("answer")`` beside
+    ``field_equals("citation")`` collides; pass ``name=`` to tell them apart. A
+    repeat raises before the run writes anything.
+
     When ``max_workers`` is greater than 1, examples run concurrently inside a
     :class:`concurrent.futures.ThreadPoolExecutor` with up to ``max_workers``
     threads. Results, JSONL rows, and summary aggregates are always written in
@@ -663,6 +671,7 @@ def run_experiment(
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
     evaluator_list = list(evaluators)
+    _validate_distinct_evaluator_names(evaluator_list)
     start_time = _now()
     output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
 
@@ -745,8 +754,9 @@ async def run_experiment_async(
     follow dataset order regardless of completion order.
 
     Every other behavior matches :func:`run_experiment`: evaluator execution,
-    task input binding, redaction, ``raise_on_error`` semantics, and the
-    persisted JSONL/summary schema are identical. Each example runs in its own
+    the requirement that evaluator names be distinct, task input binding,
+    redaction, ``raise_on_error`` semantics, and the persisted JSONL/summary
+    schema are identical. Each example runs in its own
     asyncio task, whose copied context isolates the trace contextvars, so
     ``record_traces=True`` produces a separate trace tree per example even while
     they run concurrently.
@@ -787,6 +797,7 @@ async def run_experiment_async(
     experiment_id = str(uuid4())
     examples = list(dataset.examples if isinstance(dataset, Dataset) else dataset)
     evaluator_list = list(evaluators)
+    _validate_distinct_evaluator_names(evaluator_list)
     start_time = _now()
     output_path = Path(path) if path is not None else _default_experiment_path(name, experiment_id)
 
@@ -1687,6 +1698,37 @@ def _validate_missing_score(missing_score: Any) -> str:
         valid = ", ".join(_MISSING_SCORE_POLICIES)
         raise ValueError(f"missing_score must be one of: {valid}")
     return missing_score
+
+
+def _validate_distinct_evaluator_names(evaluators: list[DeterministicEvaluator]) -> None:
+    """Reject an evaluator list that names the same evaluator twice.
+
+    Every score a run produces is filed under its evaluator's name and nothing
+    else: the aggregate mean sums by name, the report prints one row per name,
+    the gate's deltas are keyed by name, and its per-example detail keeps the
+    last score written for a name. Two evaluators sharing one produce a mean over
+    both -- a number no example was given by anything -- and a per-example delta
+    for only one of them, in the same diff.
+
+    Thirteen of the fourteen evaluator factories default ``name`` to the factory's
+    own, so the collision arrives from the most ordinary pairing there is:
+    ``field_equals("answer")`` beside ``field_equals("citation")``, or two
+    ``regex_match`` patterns. Rejected here, where the list is built and where
+    the keyword-only ``name=`` that fixes it is in reach, rather than reported
+    later from a number that has already lost which evaluator it came from.
+
+    Raised before the run touches its output file, so a rejected experiment
+    cannot truncate a previous one.
+    """
+
+    seen: set[str] = set()
+    for evaluator in evaluators:
+        if evaluator.name in seen:
+            raise ValueError(
+                f"duplicate evaluator name {evaluator.name!r}: scores are aggregated by name, so every "
+                "evaluator in one run must have a distinct one. Pass name= to override a factory's default."
+            )
+        seen.add(evaluator.name)
 
 
 def _validate_failed_examples(failed_examples: Any) -> str:

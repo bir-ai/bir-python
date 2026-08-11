@@ -579,6 +579,9 @@ Evaluators range from exact and substring string checks to `similarity_above()`,
 a stdlib-only fuzzy match that scores by `difflib` similarity ratio, plus
 structured-field, numeric, latency/cost, and RAG heuristics. See
 [local evals and experiments](docs/site/evals-experiments.md) for the full list.
+Every score is filed under its evaluator's name, so a run refuses two evaluators
+that share one — each factory defaults `name` to its own, and the keyword-only
+`name=` tells two checks of the same kind apart.
 
 Inspect persisted experiments from the command line without a server:
 `bir experiments` lists every experiment under `.bir/experiments/`, and

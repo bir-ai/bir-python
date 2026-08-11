@@ -208,6 +208,34 @@ Available deterministic evaluators are:
 | `answer_contains_citation()` | An answer contains a citation marker. |
 | `custom_evaluator()` | A local callable implements a task-specific check. |
 
+### Name each evaluator once per run
+
+Every score is filed under its evaluator's name and nothing else: the aggregate
+mean sums by name, the report prints one row per name, and `eval-gate` keys its
+deltas by name. Two evaluators sharing a name would be averaged together into a
+number no example was given, so a run refuses one before it writes anything:
+
+```
+ValueError: duplicate evaluator name 'field_equals': scores are aggregated by
+name, so every evaluator in one run must have a distinct one. Pass name= to
+override a factory's default.
+```
+
+Each factory above defaults `name` to its own, so the collision arrives from the
+most ordinary pairing there is — two checks of the same kind. Every factory takes
+a keyword-only `name` to tell them apart:
+
+```python
+evaluators=[
+    field_equals("answer", name="answer_matches"),
+    field_equals("citation.id", name="citation_matches"),
+]
+```
+
+The check is on writing only. An experiment recorded before it existed still
+loads and still compares; its two evaluators simply share one aggregate, as they
+always did.
+
 ### Fuzzy text matching
 
 ```python

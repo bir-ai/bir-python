@@ -169,6 +169,50 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A run no longer accepts two evaluators with the same name. Every score is
+  filed under its evaluator's name and nothing else, so two sharing one were
+  averaged together into a number no example was given by anything — and the
+  gate reported a different one beside it in the same diff:
+
+  ```
+  evaluators passed in:  [regex_match(r"^alpha"), regex_match(r"gamma$")]
+  per-example scores:    [('regex_match', 1.0), ('regex_match', 0.0)]
+  aggregate_scores:      {'regex_match': 0.5}
+  the report's rows:     | regex_match | 0.50 |
+                         | q0 | success | regex_match=1.00 regex_match=0.00 | - |
+  compare deltas         {'regex_match': 0.5}   improved: ['regex_match']
+  example_deltas         {'regex_match': {'q0': 1.0, 'q1': 1.0, ...}}
+  ```
+
+  The aggregate moved 0.5 and every example moved 1.0, for the same evaluator
+  name, in one diff: `_example_scores_by_evaluator` keys by name into a dict, so
+  the last score written wins there while the mean takes both.
+
+  Nothing chose this. Thirteen of the fourteen evaluator factories default
+  `name` to the factory's own, so the collision arrives from the most ordinary
+  pairing there is — `field_equals("answer")` beside `field_equals("citation")`,
+  or two `regex_match` patterns — and no error, warning, or documentation
+  mentioned it.
+
+  `run_experiment` and `run_experiment_async` now raise before the run touches
+  its output file, naming the repeated name and the keyword-only `name=` that
+  every factory already takes. Before the file, because the result writer opens
+  its output for truncating write: a rejected run would otherwise have emptied
+  the previous experiment at that path.
+
+  Rejected where the list is built rather than reported later, because that is
+  where the fix is: by the time a merged mean exists it has lost which
+  evaluators it came from. The check is on writing only — an experiment recorded
+  before it existed still loads and still compares, its two evaluators sharing
+  one aggregate as they always did, since refusing to read a file already on
+  disk would be worse than reporting what it holds.
+
+  No test pinned the old behaviour and no documentation mentioned the rule. The
+  new cases cover both factories that collide, both runners, a rejected run
+  leaving an earlier one at that path byte-identical, `name=` producing two
+  aggregates and two per-example delta keys, four different factories not being
+  mistaken for a repeat, and a run recorded before the check still loading.
+
 - `bir experiment-report --output` no longer destroys the report it cannot
   finish writing. It wrote with `Path.write_text`, which opens the destination
   for truncating write before a byte is encoded or reaches the disk, so any

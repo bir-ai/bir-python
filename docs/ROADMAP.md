@@ -40,10 +40,11 @@ names mean against the release the extra installs, and which fields redaction is
 aimed at. This one went where they did not. The evaluation and experiment half
 was driven as a product — the gate's decision under partial failure, the
 evaluator-name contract, concurrency at eight workers, report rendering — and it
-produced three of the four items it raised, including the P1, which has since
-shipped. Storage pressure was driven for real rather than simulated: a 1 MB HFS+
-volume filled by an actual recording workload, which produced the fourth. The
-remaining axes — Unicode and encoding end to end
+produced three of the four items it raised, including the P1. Storage pressure
+was driven for real rather than simulated: a 1 MB HFS+ volume filled by an actual
+recording workload, which produced the fourth and, while that one was being
+fixed, a fifth. All five have shipped. The remaining axes — Unicode and encoding
+end to end
 (what the store accepts, what survives a locale, what each renderer can encode),
 cost, usage and clock arithmetic, and sampling and the kill switch under
 contention — produced no item and are recorded below with their numbers.
@@ -68,88 +69,25 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|---|---|---|---|---|
-| 1 | Two evaluators may share one name and one aggregate | P2 | S | An evaluator list that cannot be reported is refused where it is built | — |
-
-### 1. Two evaluators may share one name and one aggregate
-
-**Why.** Thirteen of the fourteen evaluator factories in `bir/evals.py` take
-`name` as a keyword-only argument with a fixed default — `exact_match` at
-`:143`, `regex_match` at `:218`, `field_equals` at `:277-278`, `field_contains`
-at `:300-306`, and so on — so two evaluators of the same kind arrive with the
-same name. (`custom_evaluator` at `:252-256` is the exception: its `name` is
-required.) Nothing rejects a repeat. `_evaluate_example_output` runs them into a flat
-list (`bir/evals.py:1182`), and `aggregate_scores` keys totals by
-`score.name` (`bir/_eval_models.py:275`), so both land in one bucket:
-
-```
-evaluator names passed in:      ['regex_match', 'regex_match']   # r"^alpha" and r"gamma$"
-per-example scores on q0:       [('regex_match', 1.0), ('regex_match', 0.0)]
-aggregate_scores:               {'regex_match': 0.5}
-persisted summary aggregate:    {'regex_match': 0.5}
-```
-
-The mean is over 8 values from 4 examples, and the 0.5 is not a score any
-example got on any evaluator. Every downstream reader inherits it. The report
-(`bir/_eval_reports.py:127-170`) prints one aggregate row and a per-example cell
-that names the same evaluator twice:
-
-```
-| Evaluator | Mean |
-| regex_match | 0.50 |
-| q0 | success | regex_match=1.00 regex_match=0.00 | - |
-```
-
-And the gate compares the merged number while `--per-example` reports a
-different one. `_example_scores_by_evaluator` (`bir/evals.py:1025-1038`) keys by
-name into a dict, so the last score written wins:
-
-```
-run A aggregate {'regex_match': 0.5}   run B aggregate {'regex_match': 1.0}
-compare deltas  {'regex_match': 0.5}   improved: ['regex_match']
-example_deltas  {'regex_match': {'q0': 1.0, 'q1': 1.0, 'q2': 1.0, 'q3': 1.0}}
-```
-
-The aggregate moved 0.5 and every example moved 1.0, for the same evaluator name,
-in the same diff. That docstring already documents last-write-wins for a
-duplicate *example id* and says "uniquely identified datasets never hit that
-case"; a duplicate evaluator name reaches the same line and nothing rejects it
-anywhere.
-
-No test pins the current behavior, and no documentation mentions it. Nothing in
-`docs/site/evals-experiments.md`, `docs/EVALUATOR_IMPLEMENTATION_GUIDE.md`, or
-`README.md` says evaluator names must be distinct, and the only `name=` in the
-evaluation docs is a single example at `docs/site/evals-experiments.md:288`.
-
-**Scope.**
-
-- Reject duplicate names where the evaluator list is materialized, in
-  `run_experiment` and `run_experiment_async`, with an error naming the repeated
-  name and pointing at the `name=` argument.
-- Decide and record whether `compare_experiments` and `load_experiment` also
-  reject a persisted run that already contains duplicates. A run recorded before
-  the check exists is still on disk, and refusing to load it is worse than
-  reporting what it holds.
-- Document the rule where the evaluator factories are listed, since the
-  keyword-only `name=` on every factory is the fix a user needs to find.
-
-**Done when** `run_experiment` refuses an evaluator list containing two
-evaluators with the same name.
+Every item this audit raised has shipped and is in `CHANGELOG.md`: the P1, an
+`eval-gate` that scored only the examples that survived; the store a full disk
+filled and `bir prune` refused to read; the append that destroyed the next event
+by landing on an unfinished write, found while shipping that one; the report
+`--output` truncated before it could fail; and the two evaluators that shared one
+name and one aggregate. **This list is empty. The next change here starts with a
+new audit.**
 
 ## Sequencing
 
-One item is left and nothing blocks it. It lands in the same three files as the
-gate work that shipped from this audit (`bir/evals.py`, `bir/_eval_models.py`,
-`bir/cli.py`), so it is worth taking while that code is fresh: the gate now
-reports counts against an aggregate that a duplicate evaluator name can still
-silently merge.
+Nothing is queued. What is left below is the record: what must not be reopened,
+what was driven and declined, and what was checked and found sound, so the next
+audit starts from evidence rather than from a blank page.
 
-The full-disk story is finished: the store's own writer repairs an interrupted
-write on its next append, and `bir prune` repairs one nothing is recording into
-any more. What is left of it is recorded under "Checked and found sound" —
-prune needs free space to free space, which is a property of staging rather than
-a defect.
+The full-disk story is finished on both sides: the store's own writer repairs an
+interrupted write on its next append, and `bir prune` repairs one nothing is
+recording into any more. What remains of it is recorded under "Checked and found
+sound" — prune stages the survivors before replacing the original, so it needs
+free space to free space, which is a property of staging rather than a defect.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -190,8 +128,9 @@ and bounding what the CLI prints on its error channel, refreshing the OTLP
 attribute spellings, recording where the redaction boundary stops, failing the
 gate on a candidate run whose examples failed, pruning a store whose final line
 an interrupted write never finished, repairing that line on the next append
-instead of writing the following event onto it, and writing a report through a
-staged file so a failed render keeps the previous one.
+instead of writing the following event onto it, writing a report through a
+staged file so a failed render keeps the previous one, and refusing an evaluator
+list that names the same evaluator twice.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
@@ -202,6 +141,14 @@ the example; the gate work asked whether the gate should notice a voided example
 at all, and the answer does not depend on what voided it. The two compose in one
 direction only: while that decision stands, an evaluator failure also shrinks the
 gate's denominator, and it is no longer silent when it does.
+
+The distinct evaluator names that shipped from this audit sit beside that same
+declined entry and beside the gate work, and reopen neither. The declined one
+asks what a *failing* evaluator does to its example; the gate work asked whether
+the gate notices an example nobody scored. This asks what happens when two
+evaluators that both succeed are filed under one name, which none of the three
+had reason to look at: each of them starts from a score and this one is about a
+score's address.
 
 ## Declined
 

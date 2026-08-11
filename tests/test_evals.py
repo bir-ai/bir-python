@@ -1809,6 +1809,150 @@ class EvalTests(unittest.TestCase):
                     send_experiment(experiment_path, backoff="fast")  # type: ignore[arg-type]
 
 
+class DistinctEvaluatorNameTests(unittest.TestCase):
+    """Every score is filed under its evaluator's name and nothing else.
+
+    The aggregate mean sums by name, the report prints one row per name, the
+    gate's deltas are keyed by name, and its per-example detail keeps the last
+    score written for a name. Two evaluators sharing one used to produce a mean
+    over both — a number no example was given by anything — and a per-example
+    delta for only one of them, in the same diff.
+    """
+
+    def tearDown(self) -> None:
+        _reset_config_for_tests()
+
+    @staticmethod
+    def _dataset() -> Dataset:
+        return Dataset(
+            [DatasetExample(id=f"q{index}", input=f"in{index}", expected="alpha beta") for index in range(4)]
+        )
+
+    def test_two_evaluators_from_one_factory_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # The most ordinary pairing there is: each factory defaults ``name``
+            # to its own, so two of a kind collide without anyone choosing it.
+            for label, evaluators in (
+                ("regex_match", [regex_match(r"^alpha"), regex_match(r"gamma$")]),
+                ("field_equals", [field_equals("answer"), field_equals("citation")]),
+            ):
+                with self.subTest(factory=label):
+                    with self.assertRaises(ValueError) as raised:
+                        run_experiment(
+                            "dupes",
+                            dataset=self._dataset(),
+                            task=lambda _input: "alpha beta",
+                            evaluators=evaluators,
+                            path=Path(directory) / "dupes.jsonl",
+                        )
+
+                    message = str(raised.exception)
+                    self.assertIn(f"duplicate evaluator name {label!r}", message)
+                    # The fix is a keyword argument every factory already takes.
+                    self.assertIn("name=", message)
+
+    def test_the_async_runner_refuses_it_identically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "duplicate evaluator name 'regex_match'"):
+                asyncio.run(
+                    run_experiment_async(
+                        "dupes",
+                        dataset=self._dataset(),
+                        task=lambda _input: "alpha beta",
+                        evaluators=[regex_match("a"), regex_match("b")],
+                        path=Path(directory) / "dupes.jsonl",
+                    )
+                )
+
+    def test_a_refused_run_writes_nothing_and_keeps_an_earlier_one(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            run_experiment(
+                "run",
+                dataset=self._dataset(),
+                task=lambda _input: "alpha beta",
+                evaluators=[exact_match()],
+                path=path,
+            )
+            before = path.read_bytes()
+            summary_before = path.with_suffix(".summary.json").read_bytes()
+
+            with self.assertRaises(ValueError):
+                run_experiment(
+                    "run",
+                    dataset=self._dataset(),
+                    task=lambda _input: "alpha beta",
+                    evaluators=[regex_match("a"), regex_match("b")],
+                    path=path,
+                )
+
+            # The writer opens its output for truncating write, so the check has
+            # to come first or a rejected run would empty the previous one.
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(path.with_suffix(".summary.json").read_bytes(), summary_before)
+
+    def test_names_that_differ_are_accepted_and_aggregate_apart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_experiment(
+                "named",
+                dataset=self._dataset(),
+                task=lambda _input: "alpha beta",
+                evaluators=[
+                    regex_match(r"^alpha", name="starts_alpha"),
+                    regex_match(r"gamma$", name="ends_gamma"),
+                ],
+                path=Path(directory) / "named.jsonl",
+            )
+
+            self.assertEqual(result.aggregate_scores, {"ends_gamma": 0.0, "starts_alpha": 1.0})
+            diff = compare_experiments(result, result, per_example=True)
+            self.assertEqual(sorted(diff.example_deltas), ["ends_gamma", "starts_alpha"])
+
+    def test_different_factories_are_never_confused_for_a_repeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_experiment(
+                "mixed",
+                dataset=self._dataset(),
+                task=lambda _input: "alpha beta",
+                evaluators=[exact_match(), contains("alpha"), regex_match(r"^alpha"), json_valid()],
+                path=Path(directory) / "mixed.jsonl",
+            )
+
+            self.assertEqual(
+                sorted(result.aggregate_scores),
+                ["contains", "exact_match", "json_valid", "regex_match"],
+            )
+
+    def test_a_run_recorded_before_the_check_still_loads_and_compares(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Refusing to read a file already on disk would be worse than
+            # reporting what it holds, so the check is on writing only.
+            result = run_experiment(
+                "named",
+                dataset=self._dataset(),
+                task=lambda _input: "alpha beta",
+                evaluators=[
+                    regex_match(r"^alpha", name="starts_alpha"),
+                    regex_match(r"gamma$", name="ends_gamma"),
+                ],
+                path=Path(directory) / "named.jsonl",
+            )
+            legacy = Path(directory) / "legacy.jsonl"
+            rows = [json.loads(line) for line in Path(result.path or "").read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                for score in row["scores"]:
+                    score["name"] = "regex_match"
+            legacy.write_text(
+                "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+            loaded = load_experiment(legacy)
+
+            self.assertEqual(loaded.aggregate_scores, {"regex_match": 0.5})
+            self.assertEqual(compare_experiments(loaded, loaded).deltas, {"regex_match": 0.0})
+
+
 class CompareExperimentsFailedExampleTests(unittest.TestCase):
     """An aggregate mean cannot express an example nobody scored.
 

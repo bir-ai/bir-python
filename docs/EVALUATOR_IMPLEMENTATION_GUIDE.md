@@ -602,6 +602,9 @@ Naming rules:
   - `json_valid`
 - Result names should default to the factory name.
 - Allow `name=` override for custom score names.
+- Names must be distinct within one run. Scores are aggregated by name, so a
+  repeat is rejected before the run writes anything; because names default to
+  the factory's own, two checks of the same kind need `name=`.
 
 Error behavior:
 
