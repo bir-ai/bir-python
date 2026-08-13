@@ -244,6 +244,26 @@ Commands print failures to stderr and exit non-zero for missing or malformed
 files, server failures, and failed eval gates. JSON output on `traces`, `show`,
 `stats`, `experiments`, `experiment-show`, and `config` is suitable for scripts.
 
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The command did what was asked. An empty store or a filter matching nothing is still 0. |
+| `1` | It failed: a store it could not read, a server that did not answer, a gate that regressed, a write that failed. The reason is on stderr, prefixed `bir:`. |
+| `2` | Usage error from argument parsing, with the usage message on stderr. |
+| `130` | Interrupted (128 + `SIGINT`). `bir tail` exits 0 instead, because Ctrl-C is how you stop it. |
+| `141` | Whoever was reading stdout stopped (128 + `SIGPIPE`). |
+
+`141` is what `bir traces | head -5` returns, and it is not a failure: the command
+read the store and printed what the reader took. Nothing is written to stderr for
+it. It is reported rather than swallowed as 0 so that a script can still tell a
+truncated read from a complete one — `set -o pipefail` will see it, as it does
+with any other tool whose reader leaves early.
+
+A write that fails for any other reason is still a failure: a redirect to a full
+disk exits 1 with the error on stderr, because a disk that is full is not a reader
+that lost interest.
+
 ### Machine-readable output
 
 Every command reports its result as JSON on request, so a script never has to

@@ -46,7 +46,7 @@ theme behind the first of them was new — recording is documented never to *bre
 a traced call, and nobody had asked whether it can *stop* one. That one, the
 audit's only P2, has shipped; shipping it produced a fifth item, about what a
 child that *can* record writes into a trace its parent owns, and that has shipped
-too. Three are left, all P3.
+too, along with the closed pipe. Two are left, both P3.
 
 The concurrency the guardrails actually promise is sound and is recorded below
 with its numbers: eight processes appending to one store lost nothing, rotation
@@ -75,60 +75,10 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A read command piped into a reader that stops reading exits 120 | P3 | S | `bir traces \| head` is an ordinary success, as the CLI's own contract says | — |
-| 2 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
-| 3 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
+| 1 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
+| 2 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
 
-### 1. A read command piped into a reader that stops reading exits 120
-
-**Why.** `bir traces | head -2` is an ordinary thing to type. Measured against a
-10,000-event store, with the reader closing the pipe after two lines:
-
-```
-traces                exit=120   bir: [Errno 32] Broken pipe
-                                 Exception ignored while flushing sys.stdout: BrokenPipeError
-traces --json         exit=120   (same two lines)
-show (4,000 events)   exit=120   (same two lines)
-show --json           exit=120   (same two lines)
-traces > /dev/null    exit=0
-```
-
-`main` (`bir/cli.py:124-130`) catches `OSError`, of which `BrokenPipeError` is
-one, reports it like a failure and returns 1; the interpreter then fails to flush
-`sys.stdout` at shutdown, prints its own line, and replaces the status with 120.
-Nothing failed: the command found the store, read it, and printed what the reader
-asked for.
-
-`docs/site/cli-env.md:243` states the contract this breaks: commands "print
-failures to stderr and exit non-zero for missing or malformed files, server
-failures, and failed eval gates" — a closed pipe is none of those. A script under
-`set -e` or `pipefail` sees a failure where there is none, and an operator sees
-two error lines for using `head`. `stats`, `experiments`, and
-`experiment-show` escape it only because their output fits inside the pipe buffer;
-they are on the same code path.
-
-The signal path next to it is right, which is what makes this one look like an
-oversight rather than a policy: SIGINT delivered while `traces` was rendering
-exited 130 with an empty stderr after printing 1,710 lines, and `bir tail` under
-SIGINT exits 0.
-
-**Scope.**
-
-- Handle `BrokenPipeError` where the CLI writes, not as a failure: the
-  conventional close is to redirect `sys.stdout` to `os.devnull` before the
-  interpreter flushes, which is what silences the second line.
-- Decide and record the exit code. 141 (128 + SIGPIPE) is what a program killed
-  by the signal reports and what a shell pipeline expects; 0 says the command did
-  what was asked. Pick one, say why, and write it into the exit-code table in
-  `docs/site/cli-env.md`.
-- Keep stderr silent in this case only. A write failure that is *not* a closed
-  pipe — a full disk on a redirect — must still be reported and still exit
-  non-zero.
-
-**Done when** `bir traces | head` prints no error and exits with the code the
-docs name for it.
-
-### 2. A relative store path is re-resolved on every append
+### 1. A relative store path is re-resolved on every append
 
 **Why.** `_DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")` (`bir/_config.py:18`)
 is stored as given and passed to `open()` on every append, so the operating
@@ -165,7 +115,7 @@ a temporary directory all reach it.
 **Done when** a process that changes directory after `configure()` keeps
 recording into the store it started with.
 
-### 3. An interrupted `prune --yes` abandons a staging copy nothing reclaims
+### 2. An interrupted `prune --yes` abandons a staging copy nothing reclaims
 
 **Why.** Prune stages the survivors and replaces the original, which is what keeps
 it crash-safe — and that half is sound: killed at four different offsets, the
@@ -214,17 +164,16 @@ interrupted one left.
 
 ## Sequencing
 
-Both fork items have shipped: a child forked out of a recording process records
-instead of hanging, and it no longer writes a second copy of an event its parent
-opened. What is left inconveniences whoever reads a store or runs a command;
-nothing left writes anything wrong into one.
+Three of the audit's five have shipped: a child forked out of a recording process
+records instead of hanging, it no longer writes a second copy of an event its
+parent opened, and a read command piped into `head` is an ordinary success rather
+than exit 120. Nothing left writes anything wrong into a store.
 
-The three are independent; nothing blocks anything. Items 1 and 3 are contained
-inside one function each. Item 2 is one line of resolution plus the decision about
-which resolution, and is the only one that can change where an existing
-application's events land, so it wants its own release note. Item 1 is the one an
-operator meets most often — `bir traces | head` is a thing people type every
-day — so it is the one to do first.
+The two are independent. Item 1 is one line of resolution plus the decision about
+which resolution, and it is the only remaining item that can change where an
+existing application's events land, so it wants its own release note; that also
+makes it the one to think about before doing. Item 2 is contained inside one
+function and needs no decision beyond how a stale sibling is recognized.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -275,8 +224,9 @@ the run itself with `total_timeout`, and requiring every identity a caller write
 into a recorded file — a prompt's name and version, a generation's model, an
 evaluator's name, an example's id, an experiment's name — to be a string, and
 re-creating the store's locks in a forked child so a pre-forking worker records
-instead of hanging, and writing each event only in the process that opened it so
-a fork cannot put one event id in the store twice.
+instead of hanging, writing each event only in the process that opened it so a
+fork cannot put one event id in the store twice, and ending quietly with 141 when
+whoever was reading a command's output stops.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 

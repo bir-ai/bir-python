@@ -339,6 +339,58 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir traces | head` is no longer treated as a failure. A reader that stops
+  reading gave the CLI a `BrokenPipeError`, which it reported like any other
+  `OSError` and turned into exit 1 — and then the interpreter's own flush of
+  `sys.stdout` failed after `main` had returned, printing a second line and
+  replacing the status with 120, which the CLI never chose. Measured against a
+  10,000-event store with the reader closing the pipe after two lines:
+
+  ```
+                                    before                                     after
+  bir traces | head -2              exit 120, 2 lines on stderr                exit 141, stderr empty
+  bir traces --json | head -2       exit 120, 2 lines on stderr                exit 141, stderr empty
+  bir show <trace> | head -2        exit 120, 2 lines on stderr                exit 141, stderr empty
+  bir stats > pipe, reader gone     exit 120, 2 lines on stderr                exit 141, stderr empty
+  bir tail, reader leaves           exit 120, follows on until it writes       exit 141, stops
+  bir stats > read-only fd          exit 120, "bir: [Errno 9] Bad file ..."    exit 1, same message
+  bir traces > file                 exit 0, all output                         exit 0, all output
+  ```
+
+  The two stderr lines were `bir: [Errno 32] Broken pipe` and
+  `Exception ignored while flushing sys.stdout: BrokenPipeError`.
+
+  **The status is 141**, which is 128 + `SIGPIPE`, the status a program killed by
+  that signal reports and what a pipeline already expects from `something | head`.
+  0 was the alternative and was rejected: a script that pipes `--json` into a
+  consumer which dies early would then be told it received the whole store. 141
+  keeps "you did not get all of it" separable from "that was all of it" and from
+  1, which still means the command failed. It also fits the codes this CLI
+  already returns — 0, 1, 2, and 130 for an interrupt, which is `128 + SIGINT` by
+  the same convention. `docs/site/cli-env.md` now has the whole table.
+
+  Two things this deliberately does not do. It does not silence other write
+  failures: only `BrokenPipeError` takes the quiet path, so a redirect onto a
+  descriptor that cannot be written still prints `bir:` and still exits non-zero.
+  And it does not discard output that can still be written — the redirect to
+  `os.devnull` that keeps the shutdown flush harmless happens only after a flush
+  has actually failed, so a command that printed rows and then hit an unrelated
+  error keeps its rows.
+
+  `main` now flushes stdout itself rather than leaving it to interpreter
+  shutdown. That is what covers the second row above: a command whose whole
+  output fits in the pipe buffer fails at the flush rather than mid-render, and
+  before this the flush happened at a point where no handler could see it. Fixing
+  that also fixed the last row of the "before" column — a genuine write failure
+  now exits with the CLI's own 1 instead of the interpreter's 120.
+
+  `tests/test_cli_closed_pipe.py` drives it through real pipes and real
+  subprocesses, because an in-process test writes into a `StringIO`, which has no
+  descriptor to close, no block buffering, and no interpreter shutdown — the
+  three things that produced the defect. Seven of its cases fail against the
+  previous code. It is skipped on Windows, which has neither `SIGPIPE` nor the
+  same teardown for a pipe whose reader is gone.
+
 - A forked child no longer writes a second copy of an event its parent opened.
   A child inherits the open context manager along with everything else, so both
   processes held the same event id and both finalized it. Found while shipping

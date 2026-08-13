@@ -65,8 +65,10 @@ Python REPL — it is read-only and reports secret-bearing rules (redaction patt
 the `model_prices` table) as counts only.
 Add `--json` to any of them for a structured form. The
 same commands run as `python -m bir <command>` when the `bir` console script
-isn't on `PATH` (fresh venvs, `pipx run`, CI). See
-[CLI & environment](docs/site/cli-env.md).
+isn't on `PATH` (fresh venvs, `pipx run`, CI). They pipe like any other tool:
+`bir traces | head` prints nothing on stderr and exits 141 (128 + `SIGPIPE`),
+which is a reader that stopped rather than a command that failed. See
+[CLI & environment](docs/site/cli-env.md) for the full exit-code table.
 
 When capture is on, Bir redacts common secret-like fields and text before
 anything is written — including provider credential formats and Luhn-checked

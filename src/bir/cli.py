@@ -112,6 +112,56 @@ def _report(message: str, *, out: TextIO | None = None) -> None:
     stream.flush()
 
 
+# 128 + SIGPIPE(13): the status a program killed by the signal reports, and what
+# a shell pipeline already expects from `something | head`. Chosen over 0 because
+# it keeps "you did not get all of the output" distinguishable from "that was all
+# of it", and over 1 because nothing failed. It also fits the codes this CLI
+# already returns -- 0 done, 1 failed, 2 usage, 130 interrupted -- which are
+# `128 + signal` for the same reason.
+_BROKEN_PIPE_EXIT_CODE = 141
+
+
+def _discard_unwritable_stdout() -> None:
+    """Keep a stdout that cannot be flushed from choosing the exit status.
+
+    Python flushes ``sys.stdout`` while shutting down, after ``main`` has
+    returned. If that flush fails -- the reader of a pipe is gone, the descriptor
+    is bad -- it fails where nothing can catch it: the interpreter prints
+    ``Exception ignored while flushing sys.stdout`` and replaces whatever status
+    the command chose with 120. Pointing the descriptor at ``os.devnull`` gives
+    the buffered bytes somewhere harmless to go.
+
+    It is called only once a write has already failed. Output that can still be
+    written still is: the flush is attempted first, and only a flush that raises
+    leads to the redirect, so a command that printed rows and then hit an
+    unrelated error keeps the rows it printed.
+    """
+
+    try:
+        sys.stdout.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+    else:
+        return
+
+    try:
+        stdout_fd = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        # ``sys.stdout`` is not a real file -- a test harness's buffer, say.
+        # There is no descriptor to redirect and no shutdown flush to protect.
+        return
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull_fd, stdout_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(devnull_fd)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the ``bir`` command-line interface and return a process exit code."""
 
@@ -122,11 +172,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return 1
     try:
-        return handler(args)
+        exit_code = handler(args)
+        # Flushed here rather than left to interpreter shutdown so that a reader
+        # who left while the last lines were still buffered is handled below,
+        # like one who left mid-render, instead of at a point with no handler.
+        sys.stdout.flush()
+        return exit_code
     except KeyboardInterrupt:
+        _discard_unwritable_stdout()
         return 130
+    except BrokenPipeError:
+        # Not a failure: the command read the store and printed what was asked
+        # for, and whoever was reading stopped. `bir traces | head` is the
+        # ordinary way to reach this, so it says nothing on stderr.
+        _discard_unwritable_stdout()
+        return _BROKEN_PIPE_EXIT_CODE
     except (ValueError, RuntimeError, OSError) as exc:
+        # Every other write failure still reports and still fails: a full disk
+        # under a redirect is not a reader that lost interest.
         _report(str(exc))
+        _discard_unwritable_stdout()
         return 1
 
 
