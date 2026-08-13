@@ -1646,6 +1646,16 @@ class SdkTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "model must be a string"):
                 answer()
 
+    def test_generation_constructor_rejects_non_string_and_empty_model(self) -> None:
+        # The constructor writes the same field the setter does, and only the
+        # setter checked it: `generation(model=3)` recorded `"model": 3`, which
+        # `load_events` then refused to read back.
+        with temporary_workdir():
+            with self.assertRaisesRegex(TypeError, "model must be a string"):
+                generation("local.llm", model=123)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(ValueError, "model must not be empty"):
+                generation("local.llm", model="")
+
     def test_generation_set_model_rejects_empty_string(self) -> None:
         with temporary_workdir():
 
@@ -1825,6 +1835,15 @@ class SdkTests(unittest.TestCase):
     def test_prompt_rejects_empty_name(self) -> None:
         with self.assertRaisesRegex(ValueError, "prompt name"):
             prompt("")
+
+    def test_prompt_rejects_non_string_name_and_version(self) -> None:
+        # Both identities go into metadata.prompt, so they are checked like an
+        # event name. tests/test_identity_field_types.py drives the full table,
+        # including the other entry points that shared this gap.
+        with self.assertRaisesRegex(TypeError, "prompt name must be a string"):
+            prompt(3)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(TypeError, "prompt version must be a string"):
+            prompt("answer", version=3)  # type: ignore[arg-type]
 
     def test_sdk_rejects_empty_event_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "observe name"):

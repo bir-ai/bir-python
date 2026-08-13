@@ -46,9 +46,10 @@ third came from asking what a long-lived process accumulates, driven by counting
 descriptors and threads across 20,000 events, 50 prunes, and a run whose examples
 all time out. The fourth came from the public API surface as a contract: what a
 caller can pass that the type hints permit and the implementation writes into the
-schema anyway. Both transport items have since shipped. Two further axes — `@observe` against every callable shape its
-hints allow, and where the trace context is and is not visible across threads and
-asyncio — produced no item and are recorded below with their numbers.
+schema anyway. All four have since shipped. Two further axes — `@observe` against
+every callable shape its hints allow, and where the trace context is and is not
+visible across threads and asyncio — produced no item and are recorded below with
+their numbers.
 
 ## Product and engineering guardrails
 
@@ -70,72 +71,25 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|---|---|---|---|---|
-| 1 | A prompt's `name` and `version` are written with whatever type they were given | P3 | S | Every identity string in the schema is a string | — |
-
-### 1. A prompt's `name` and `version` are written with whatever type they were given
-
-**Why.** `prompt()` (`bir/_sdk.py:1128-1161`) validates `template` and `rendered`
-with `isinstance` and rejects an empty `name` or `version`, but never checks that
-either of those two *is a string*. Whatever is passed is written into the event:
-
-```
-declared: name: str, version: str | None
-
-prompt(name=3)             recorded {"name": 3}
-prompt(name=3.5)           recorded {"name": 3.5}
-prompt(name=True)          recorded {"name": true}
-prompt(name={'a': 1})      recorded {"name": {"a": 1}}
-prompt(name=['a'])         recorded {"name": ["a"]}
-prompt(version=3)          recorded version=3        json type=int
-prompt(version={'major':3})recorded version={"major": 3}   json type=dict
-```
-
-Every one of those loads back through `load_events` without complaint, so a
-consumer reading `metadata.prompt.name` gets a string, a number, a boolean, or an
-object depending on what the application happened to pass. That is a
-`schema_version = "1.0"` field, and the stability page says field types do not
-change within `1.0` (`docs/site/stability.md`, "Recorded data").
-
-The contrast is inside the same module. Every other name goes through
-`_validate_event_name` (`bir/_config.py:169-174`), which raises
-`TypeError: bir <field> must be a string` — measured on the neighbouring
-primitive:
-
-```
-bir.generation(name=3)          TypeError: bir generation name must be a string
-bir.generation(name={'a': 1})   TypeError: bir generation name must be a string
-bir.prompt(3)                   accepted, recorded as {"name": 3}
-```
-
-So the validator this needs already exists and is used everywhere else; `prompt`
-is the one caller that does not reach for it.
-
-No test pins the current behavior. `tests/test_sdk.py`'s prompt cases pass
-strings throughout and assert the recorded shape; nothing passes a non-string.
-
-**Scope.**
-
-- Route `name` and `version` through `_validate_event_name`, which already
-  produces the empty-string error these two raise by hand, so the two checks
-  collapse into one call each.
-- Decide and record whether this is a breaking change worth a deprecation. It
-  turns a silent acceptance into a `TypeError`, and a caller passing an `int`
-  version is relying on behaviour the type hints never promised — but it is still
-  a raise where there was none, so it belongs in a `Changed` entry with the
-  migration named (`str(version)`).
-- Sweep the remaining public entry points for the same gap rather than fixing
-  only the one found, and record what the sweep covered.
-
-**Done when** `bir.prompt()` raises `TypeError` for a non-string `name` or
-`version`, with the same message shape every other name already produces.
+Every item this audit raised has shipped and is in `CHANGELOG.md`: the redirect
+the transport followed to a host nobody configured; the batch response that could
+not describe the request it answered; the thread a serial timed run abandoned per
+timed-out example, and the concurrent run that looked hung while it waited on
+one; the run that had no budget of its own; and the identity fields a caller
+could record with whatever type they were given. **This list is empty. The next
+change here starts with a new audit.**
 
 ## Sequencing
 
-One item is left and nothing blocks it. It needs no decision beyond whether its
-raise is worth a deprecation, and it is the smallest piece of work this audit
-raised.
+Nothing is queued. What is left below is the record: what must not be reopened,
+what was driven and declined, and what was checked and found sound, so the next
+audit starts from evidence rather than from a blank page.
+
+The one decision the last item carried was whether its raise was worth a
+deprecation, and it shipped without one: the policy governs public *names*, and
+no name changed — the signature, the type hints, and the docstrings all already
+said `str`. The reasoning and the migration are in `CHANGELOG.md` rather than
+here.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -181,8 +135,10 @@ staged file so a failed render keeps the previous one, and refusing an evaluator
 list that names the same evaluator twice, refusing a redirect instead of
 following it to a host nobody configured, refusing a batch response that cannot
 describe the request it answers, bounding the workers a serial timed run
-abandons, saying so when a concurrent run is waiting on stuck workers, and
-bounding the run itself with `total_timeout`.
+abandons, saying so when a concurrent run is waiting on stuck workers, bounding
+the run itself with `total_timeout`, and requiring every identity a caller writes
+into a recorded file — a prompt's name and version, a generation's model, an
+evaluator's name, an example's id, an experiment's name — to be a string.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
@@ -345,8 +301,10 @@ which is the only one of the eleven that does not name the variable.
 records only the template's SHA-256 unless capture is asked for, redacts a
 credential inside a captured `rendered` string
 (`{"rendered": "Hi [redacted]"}`), guards a variable whose `__repr__` raises
-(`"<unrepresentable X>"`), and rejects a non-mapping `variables`. Only the two
-identity fields are unguarded, which is item 1.
+(`"<unrepresentable X>"`), and rejects a non-mapping `variables`. The two
+identity fields were the one gap, and the sweep that shipped with their fix
+closed it at five more entry points and pinned the rest of the surface in
+`tests/test_identity_field_types.py`.
 
 **A server that answers slowly or not at all.** A 200 that sends its headers, a
 `Content-Length` of 1,000,000, and then one byte every 30 s was cut off by the

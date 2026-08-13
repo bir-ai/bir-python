@@ -48,8 +48,7 @@ class EvalResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("eval result name must not be empty")
+        _validate_identity_string(self.name, "eval result name")
         if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
             raise TypeError("eval result value must be an int or float")
         if isinstance(self.value, float) and not math.isfinite(self.value):
@@ -124,8 +123,7 @@ class DatasetExample:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.id:
-            raise ValueError("dataset example id must not be empty")
+        _validate_identity_string(self.id, "dataset example id")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("dataset example metadata must be an object")
         object.__setattr__(self, "metadata", {str(key): value for key, value in self.metadata.items()})
@@ -532,9 +530,25 @@ def _validate_finite_number(value: Any, field: str) -> float:
     return float(value)
 
 
+def _validate_identity_string(value: Any, field: str) -> None:
+    """Check a value that identifies a row in a recorded experiment file.
+
+    The counterpart of ``bir._config._validate_event_name`` on the evaluation
+    side, and the same rule: an identity is a non-empty string. These fields --
+    an evaluator's name, an example's id, an experiment's name -- are written
+    into the experiment JSONL, whose loader already refuses to read a row whose
+    identity is not a string. Checking only emptiness let a writer produce a file
+    its own reader rejects.
+    """
+
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    if not value:
+        raise ValueError(f"{field} must not be empty")
+
+
 def _validate_evaluator_name(name: str) -> None:
-    if not name:
-        raise ValueError("evaluator name must not be empty")
+    _validate_identity_string(name, "evaluator name")
 
 
 def _json_line(payload: Mapping[str, Any]) -> str:

@@ -2533,6 +2533,16 @@ class RunExperimentAsyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "experiment name must not be empty"):
             asyncio.run(run_experiment_async("", dataset=Dataset([]), task=task, evaluators=[exact_match()]))
 
+    def test_requires_a_string_experiment_name(self) -> None:
+        # The name is written to every row's experiment_name and to the summary,
+        # both of which the loader reads back as strings. The identity types of
+        # the whole evaluation surface are in tests/test_identity_field_types.py.
+        async def task(question: str) -> str:
+            return question
+
+        with self.assertRaisesRegex(TypeError, "experiment name must be a string"):
+            asyncio.run(run_experiment_async(3, dataset=Dataset([]), task=task, evaluators=[exact_match()]))  # type: ignore[arg-type]
+
     def test_cancellation_cleans_up_children_without_writing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment_path = Path(directory) / "cancel.jsonl"

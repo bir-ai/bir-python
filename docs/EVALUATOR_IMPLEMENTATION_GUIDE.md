@@ -152,6 +152,9 @@ EvalResult(
 
 Evaluator rules:
 
+- Give the result a non-empty string `name`; it is the identity the score is
+  filed under, and a non-string one is refused with
+  `TypeError: eval result name must be a string`.
 - Return finite numeric scores.
 - Use `1.0` for pass and `0.0` for fail for binary checks.
 - Include compact metadata that helps debug failures.

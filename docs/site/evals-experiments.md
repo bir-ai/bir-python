@@ -339,6 +339,25 @@ The check is on writing only. An experiment recorded before it existed still
 loads and still compares; its two evaluators simply share one aggregate, as they
 always did.
 
+### Every identity must be a string
+
+The four values that identify a row in an experiment file — the experiment's
+`name`, a `DatasetExample`'s `id`, an evaluator's `name`, and the `name` on an
+`EvalResult` a custom evaluator returns — must each be a non-empty string:
+
+```
+TypeError: experiment name must be a string
+TypeError: dataset example id must be a string
+TypeError: evaluator name must be a string
+TypeError: eval result name must be a string
+```
+
+Only emptiness was checked before, so `DatasetExample(id=3, ...)` or
+`exact_match(name=3)` was accepted and written into the JSONL — and
+`load_experiment()` refuses to read a row whose identity is not a string, so the
+run produced a file it could not read back. Pass `str(...)` for an id or name
+your application keeps as a number.
+
 ### Fuzzy text matching
 
 ```python

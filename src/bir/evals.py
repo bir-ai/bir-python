@@ -41,6 +41,7 @@ from ._eval_models import (
     SendExperimentResult,
     _validate_evaluator_name,
     _validate_finite_number,
+    _validate_identity_string,
 )
 from ._sdk import (
     _duration_ms,
@@ -624,6 +625,12 @@ def run_experiment(
 ) -> ExperimentResult:
     """Run a task over a dataset and persist per-example evaluator results.
 
+    ``name`` identifies the run in every row it writes and in the summary, so it
+    must be a non-empty string, as must an evaluator's name and a
+    :class:`DatasetExample`'s id. Pass ``str(...)`` for one the application keeps
+    as a number: the loader reads those fields back as strings, so a non-string
+    used to produce a file this SDK could not read.
+
     ``evaluators`` must not name the same evaluator twice. Every score is filed
     under its evaluator's name -- the aggregate mean, the report's rows, the
     gate's deltas -- so two sharing one name would be averaged together into a
@@ -680,8 +687,7 @@ def run_experiment(
     ``False`` returns what ran.
     """
 
-    if not name:
-        raise ValueError("experiment name must not be empty")
+    _validate_identity_string(name, "experiment name")
     max_workers = _validate_positive_int(max_workers, "max_workers")
     timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
     total_timeout = None if total_timeout is None else _validate_positive_number(total_timeout, "total_timeout")
@@ -785,7 +791,8 @@ async def run_experiment_async(
     follow dataset order regardless of completion order.
 
     Every other behavior matches :func:`run_experiment`: evaluator execution,
-    the requirement that evaluator names be distinct, task input binding,
+    the requirement that evaluator names be distinct and that every identity
+    written to the file be a non-empty string, task input binding,
     redaction, ``raise_on_error`` semantics, ``total_timeout`` bounding the run
     rather than an example, and the persisted JSONL/summary schema are
     identical. Each example runs in its own
@@ -821,8 +828,7 @@ async def run_experiment_async(
     previous behavior.
     """
 
-    if not name:
-        raise ValueError("experiment name must not be empty")
+    _validate_identity_string(name, "experiment name")
     max_concurrency = _validate_positive_int(max_concurrency, "max_concurrency")
     timeout = None if timeout is None else _validate_positive_number(timeout, "timeout")
 

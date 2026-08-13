@@ -82,6 +82,11 @@ front via `generation(model=...)`. Like the other setters, the latest call wins;
 a non-empty string is validated like an event name, and `None` is accepted and
 records no model (clearing any value passed to `generation(model=...)`).
 
+`generation(model=...)` is validated the same way, which it was not before: only
+the setter checked, so the constructor could write a non-string into the event's
+`model` field and `load_events()` would then refuse to read the whole trace file.
+Pass a non-empty string or `None`.
+
 ```python
 with generation("router.chat") as gen:
     response = call_router(...)
@@ -194,6 +199,13 @@ The event records the prompt name, version, and a template SHA-256 digest when
 a template is present. To capture the payload, set `capture_template=True`,
 `capture_variables=True`, or `capture_rendered=True`. Those fields use the same
 best-effort redaction as other captured values.
+
+`name` and `version` identify the prompt in the recorded event, so they are
+validated like an event name: a non-empty string, with `version=None` meaning no
+version. Anything else raises `TypeError: bir prompt name must be a string`
+(or `... prompt version ...`). If your application keeps the version as a number,
+pass `str(version)` — `metadata.prompt.version` is a schema `1.0` string field,
+and it used to be written with whatever type it was given.
 
 ## `get_current_trace_id()` and `get_current_span_id()`
 

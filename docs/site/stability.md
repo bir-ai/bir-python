@@ -188,6 +188,13 @@ Python API:
 - `tests/fixtures/` holds the shared fixtures both repositories verify against,
   guarded by a checksum manifest. A change there is a contract change.
 
+The types are enforced where a value enters, not only where a file is read. Every
+identity a caller passes — an event name, a prompt's name and version, a
+generation's model, an evaluator's name, an example's id, an experiment's name —
+must be a non-empty string, or the call raises `TypeError`. Some of those checked
+emptiness but not type in `0.3.0`, which let an application write a field of the
+wrong JSON type; the `CHANGELOG.md` entry lists which, and the migration.
+
 The *shape* of the event tree is not frozen by the schema. Which events an
 integration emits, and which event a `parent_id` points at, can change to record
 a framework's structure more accurately; such changes are release-noted.

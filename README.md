@@ -232,7 +232,9 @@ the model is only known after the provider responds (a streaming refinement, a
 router-chosen model). The model is read when the generation exits, so a later
 `set_model()` wins over an earlier one or over `generation(model=...)`. A
 non-empty string is validated like an event name, and `None` records no model
-(clearing any constructor value):
+(clearing any constructor value). `generation(model=...)` is validated
+identically — it was not before, so a non-string model reached the JSONL and
+`load_events()` then refused to read the file it was in:
 
 ```python
 with generation("router.chat") as gen:

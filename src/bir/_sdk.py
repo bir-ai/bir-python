@@ -1142,12 +1142,19 @@ def prompt(
     capture_variables: bool = False,
     capture_rendered: bool = False,
 ) -> PromptRecord:
-    """Describe the prompt version used by a generation."""
+    """Describe the prompt version used by a generation.
 
-    if not name:
-        raise ValueError("bir prompt name must not be empty")
-    if version is not None and not version:
-        raise ValueError("bir prompt version must not be empty")
+    ``name`` and ``version`` identify the prompt in the recorded event under
+    ``metadata.prompt``, so they are validated like an event name: a non-empty
+    string, or ``None`` for ``version``. They used to be checked for emptiness
+    only, which let a non-string reach a ``schema_version = "1.0"`` field and
+    made ``metadata.prompt.name`` whichever JSON type the caller happened to
+    pass. Pass ``str(version)`` for a version the application keeps as a number.
+    """
+
+    _validate_event_name(name, "prompt name")
+    if version is not None:
+        _validate_event_name(version, "prompt version")
     if template is not None and not isinstance(template, str):
         raise TypeError("bir prompt template must be a string")
     if rendered is not None and not isinstance(rendered, str):
@@ -1176,9 +1183,18 @@ def generation(
     capture_input: bool | None = None,
     capture_output: bool | None = None,
 ) -> _Generation:
-    """Create a generation event for an LLM call inside the current trace."""
+    """Create a generation event for an LLM call inside the current trace.
+
+    ``model`` is validated exactly as :meth:`_Generation.set_model` already
+    validated it -- a non-empty string, or ``None`` for no model -- because it is
+    written to the event's own ``model`` field. Only the setter checked it, so
+    the constructor could write a non-string into a ``schema_version = "1.0"``
+    field that ``load_events`` then refuses to read back.
+    """
 
     _validate_event_name(name, "generation name")
+    if model is not None:
+        _validate_event_name(model, "model")
     return _Generation(
         name=name,
         model=model,

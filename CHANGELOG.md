@@ -51,6 +51,131 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- Every identity a caller writes into a recorded file must be a string.
+  `prompt()` checked that `name` and `version` were non-empty and never that they
+  were strings, so whatever was passed went into the event; the same hand-written
+  emptiness check sat at five more entry points. Measured on CPython 3.14.6
+  against a real store, each row driven through the public call and read back off
+  disk:
+
+  ```
+                              before                          after
+  prompt(name=3)              "name": 3                       TypeError: bir prompt name must be a string
+  prompt(name=3.5)            "name": 3.5                     TypeError: bir prompt name must be a string
+  prompt(name=True)           "name": true                    TypeError: bir prompt name must be a string
+  prompt(name={'a': 1})       "name": {"a": 1}                TypeError: bir prompt name must be a string
+  prompt(version=3)           "version": 3                    TypeError: bir prompt version must be a string
+  generation(model=3)         "model": 3                      TypeError: bir model must be a string
+  run_experiment(name=3)      "experiment_name": 3            TypeError: experiment name must be a string
+  DatasetExample(id=3)        "example_id": 3                 TypeError: dataset example id must be a string
+  exact_match(name=3)         "scores": [{"name": 3, ...}]    TypeError: evaluator name must be a string
+  EvalResult(name=3)          "scores": [{"name": 3, ...}]    TypeError: eval result name must be a string
+  ```
+
+  The two halves of that table failed differently, which is why the fix is one
+  change rather than two. A prompt's name and version live in `metadata`, which
+  is not type-checked on the way back in, so those five rows loaded back fine and
+  the damage was silent: a consumer reading `metadata.prompt.name` got a string,
+  a number, a boolean, or an object depending on what the application happened to
+  pass, out of a field the stability page lists as a `schema_version = "1.0"`
+  string. The other five wrote fields their own loaders *do* check, so the SDK
+  produced files it then refused to read:
+
+  ```
+  ValueError: Trace file .../traces.jsonl line 1 field 'model' must be a string
+  ValueError: Experiment .../exp.jsonl line 1 field 'example_id' must be a non-empty string
+  ValueError: Experiment .../exp.jsonl line 1 score field 'name' must be a non-empty string
+  ```
+
+  Both errors are raised for the *file*, not the row, so one `generation(model=3)`
+  cost every trace in that store. Measured on a store holding three traces where
+  one generation had an `int` model, `bir traces` exited 1 and printed nothing but
+  the error; `bir traces --skip-invalid` recovered the other two traces and showed
+  the damaged one missing an event. `load_events()` and `load_traces()` have no
+  such flag, so from Python there was no way to read past it at all.
+
+  A non-string evaluator name also split a run's own arithmetic in two, because a
+  JSON object key cannot be a number: the score recorded `"name": 3` while the
+  summary aggregated it under `"3"`.
+
+  All six now call the validator every other name in the package already used —
+  `_validate_event_name` on the tracing side, a new `_validate_identity_string`
+  beside it on the evaluation side — so each site is one call instead of a
+  hand-written check, and the empty-string errors they already raised are
+  unchanged, message for message. `generation(model="")` is the exception and is
+  now a `ValueError` rather than an empty `model` on the event: `set_model("")`
+  refused it from the first release, and one value being accepted or rejected
+  depending on which of the two you reach for is the same defect in its other
+  form.
+
+  **This is a raise where there was none, and it ships without a deprecation
+  period.** The policy in `docs/site/stability.md` governs *names* — a public name
+  is kept working for one minor release while warning, and there is no name here
+  to keep working, since the signature, the type hints, and the docstrings all
+  already said `str`. What the deprecation mechanism would buy, a release in which
+  the old call still works and says so, would mean a release that keeps writing
+  files the SDK cannot read, which is the defect rather than a gentle exit from
+  it; and a caller who type-checks was never able to make these calls — the ten
+  rows of the table above, put in a file and checked, are ten Pyright errors
+  against the shipped stubs. Breaking changes land in a
+  minor release with the migration named, which is this entry. **Migration:** pass
+  `str(version)`, `str(example_id)`, `str(name)` for a value your application
+  keeps as a number, and a non-empty string or `None` for `model`.
+
+  The one raise that could have broken something is `generation(model=...)`,
+  because the 19 integrations pass a model they read off a provider request or
+  response straight into it. Every one of them funnels it through
+  `_string_or_none` first, so a provider that answers with a non-string still
+  records no model rather than raising inside the call being traced. That is the
+  capture guardrail, so it is pinned on a bridge in the new tests rather than
+  argued here.
+
+  **The sweep.** The other five were found by driving the whole public surface
+  rather than fixing the one the roadmap named. Every callable exported by
+  `bir.__all__`, `bir.evals`, `bir.logging` and `bir.testing` was enumerated by
+  its own signature and type hints — 40 declare at least one `str` parameter — and
+  each was called with an `int`, a `float`, a `bool`, a `dict`, a `list`, and
+  `bytes`. What it found already guarded, and now pins:
+  `observe`/`span`/`generation`/`tool_call`/`retrieval`/`trace`/`score` names,
+  `configure(service_name=/environment=/source=)`, `prompt(template=/rendered=)`,
+  `set_model`, and `set_cost(currency=)` all raise `TypeError` with this message
+  shape; `regex_match(pattern=)` and `answer_contains_citation(pattern=)` raise
+  out of `re.compile`; `field_equals(path=)`, `field_contains(path=)` and
+  `numeric_between(field=)` refuse a non-string path; `render_experiment_report`
+  and `compare_experiments` refuse a non-string choice against their fixed word
+  lists; every path argument refuses one through `os.fspath`. `bir.logging` and
+  `bir.testing` declare no `str` parameter at all.
+
+  Three findings were left, with reasons rather than silence.
+  `contains(3)`, `similarity_above(0.5, 3)` and `retrieved_context_contains(3)`
+  are checked when an example is scored rather than when the evaluator is built,
+  which is not a gap: `expected` defaults to the example's own expected value, so
+  what it is cannot be known earlier. `cost_under(field=3)` is accepted and
+  scores 0.0 with `{"field": 3, "reason": "missing"}`, where the sibling
+  `numeric_between(field=3)` refuses — but a *misspelled* string field scores 0.0
+  the same way, the value lands in free-form metadata rather than in an identity,
+  and the file still loads, so it is a different question from this one.
+  `send_events(server_url=3)` and `send_experiment(server_url=3)` refuse the call
+  with `AttributeError: 'int' object has no attribute 'rstrip'` — an unhelpful
+  message, but they record nothing and send nothing, so the fix is cosmetic and
+  is not smuggled in here.
+
+  The read-back dataclasses (`TraceEvent`, `LoadedTrace`, `ExperimentResult`,
+  `ExperimentExampleResult`, `ExperimentSummary`) are deliberately untouched.
+  They are outputs the loaders construct, those loaders type-check every field
+  they read — which is exactly what made the writer-side gap visible — and
+  nothing writes a hand-built one back out.
+
+  `tests/test_identity_field_types.py` pins the whole table, both columns, by
+  calling the real entry points and reading the JSONL back: every written
+  identity against every non-string type, `None` against the identities that are
+  required and accepted on the two that are optional, the unchanged empty-string
+  errors, a store that stays readable after a rejected call, a bridge that
+  survives a non-string provider model, and the loader's half of the contract.
+  Nothing pinned the old behavior: the entire suite passed against the new raises
+  before a line of those tests existed, which is how six entry points kept the
+  same gap this long.
+
 - `bir eval-gate` now fails a candidate run whose examples failed. An aggregate
   score is a mean over the examples an evaluator actually *scored*, and a failed
   example carries no scores at all, so failures leave that denominator rather
