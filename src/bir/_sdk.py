@@ -2026,6 +2026,29 @@ _write_failure_lock = Lock()
 _write_failing = False
 _events_lost_while_failing = 0
 
+
+def _reinitialize_write_failure_state_after_fork() -> None:
+    """Reset the failure reporter in a freshly forked child.
+
+    The lock is re-initialized for the reason
+    :func:`bir._storage._reinitialize_locks_after_fork` explains: inherited
+    locked, with no thread left to release it. The two counters are reset because
+    they describe the *parent's* recording. A child that inherited
+    ``_write_failing`` would announce a recovery, and a loss count, for events
+    another process failed to write.
+    """
+
+    global _write_failing, _events_lost_while_failing
+
+    # See the note in ``bir._storage``: typeshed does not describe this method.
+    _write_failure_lock._at_fork_reinit()  # type: ignore[attr-defined]
+    _write_failing = False
+    _events_lost_while_failing = 0
+
+
+if hasattr(os, "register_at_fork"):  # POSIX only; Windows has no fork.
+    os.register_at_fork(after_in_child=_reinitialize_write_failure_state_after_fork)
+
 # The SDK's own operational log. A library reporting that it cannot do its job
 # belongs in the application's logging, where an operator already looks and can
 # route or silence it; this is unrelated to ``bir.logging``, which stamps trace

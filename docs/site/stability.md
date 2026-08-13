@@ -246,6 +246,15 @@ reconfiguration against concurrent recording to keep that true. Treat
 free-threaded support as covered to that extent — the unit suite, on Linux —
 rather than as broadly exercised in production.
 
+**Processes.** Those locks are re-created in a forked child through
+`os.register_at_fork` (POSIX only; Windows has no `fork`), so a pre-forking
+server or a `multiprocessing` pool started from a process that was recording gets
+workers that record rather than workers that hang. Several processes may share
+one store: appends are serialized across them by an advisory lock on a sibling
+lock file, and a reader is never shown a half-written line. See
+[recording in a process that forks](core-api.md#recording-in-a-process-that-forks)
+for what a child inherits.
+
 **Dependencies.** The runtime package has no third-party dependencies and will
 not gain any; optional capabilities ship as extras (`otel`, `dev`, `docs`). This
 is a compatibility guarantee in itself: installing Bir cannot change the version

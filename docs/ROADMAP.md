@@ -42,8 +42,10 @@ This one pointed at the operating system underneath: what happens when the
 process forks, when the shell's reader goes away, when the working directory moves
 under a relative path, when a rewrite is killed half-finished, and when several
 processes record into one file at once. Four items, from four surfaces, and the
-theme that connects the first two is new — recording is documented never to
-*break* a traced call, and nobody had asked whether it can *stop* one.
+theme behind the first of them was new — recording is documented never to *break*
+a traced call, and nobody had asked whether it can *stop* one. That one, the
+audit's only P2, has since shipped, and shipping it produced a fifth item: what a
+child that *can* record writes into a trace its parent owns.
 
 The concurrency the guardrails actually promise is sound and is recorded below
 with its numbers: eight processes appending to one store lost nothing, rotation
@@ -72,71 +74,12 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A process that forks while a thread is recording hangs its child | P2 | S | A forked worker records instead of blocking on a lock nobody holds | — |
-| 2 | A read command piped into a reader that stops reading exits 120 | P3 | S | `bir traces \| head` is an ordinary success, as the CLI's own contract says | — |
-| 3 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
-| 4 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
+| 1 | A read command piped into a reader that stops reading exits 120 | P3 | S | `bir traces \| head` is an ordinary success, as the CLI's own contract says | — |
+| 2 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
+| 3 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
+| 4 | A child forked inside a trace writes that trace's root twice | P3 | S | One event id means one event, whatever forked | — |
 
-### 1. A process that forks while a thread is recording hangs its child
-
-**Why.** `_append_event` (`bir/_storage.py:687-733`) takes the module-level
-`threading.Lock` at `bir/_storage.py:706` around every write. A lock held at the
-moment of `os.fork()` is inherited *locked* by the child, and the thread that
-would release it does not exist there, so the first event the child records waits
-forever. Driven with four threads recording and a child forked into the middle of
-it, with `faulthandler` dumping the child's own stack:
-
-```
-five children forked mid-append: HUNG, HUNG, HUNG, HUNG, HUNG   (killed after 5 s each)
-
-Timeout (0:00:03)!
-Thread 0x00000001f5789d80 (most recent call first):
-  File "bir/_storage.py", line 706 in _append_event
-  File "bir/_sdk.py", line 2057 in _write_event
-  File "bir/_sdk.py", line 1493 in __exit__
-```
-
-It is reached through the ordinary shape, not only a hand-written `fork`:
-`multiprocessing.get_context("fork").Pool(2)` from a parent whose threads are
-recording returned no worker within 5 s. The child is not slow; it is stopped, and
-nothing on stdout, stderr, or the `bir` logger says so.
-
-What is *not* affected bounds the item. A single-threaded parent forking four
-workers is fine — 4 workers × 20 traces, all exit 0, and the store loads back with
-83,048 events. Bir starts no threads of its own (`threading.enumerate()` is
-`['MainThread']` after `configure`), so the exposure is always the application's
-threads: a thread pool, a background flusher, an async runner, and then a fork.
-CPython itself deprecates forking a multi-threaded process — 3.14 warns on it,
-and the probe above tripped that warning — which is why this is P2 rather than
-P1. What keeps it above cosmetic is that a pre-forking server (gunicorn's default
-worker) and `multiprocessing`'s `fork` start method are exactly that shape, and
-Bir is aimed at applications that run under them. That start method is CPython's
-documented default on Linux through 3.13 and was measured here only by asking for
-it explicitly (`get_context("fork")`), since macOS defaults to `spawn`; no Linux
-run backs this paragraph.
-
-Three locks are inherited: `_storage._write_lock`, `_storage._sent_ids_lock`, and
-`_sdk._write_failure_lock`. The stdlib's own writer has the same problem and the
-same fix — `logging` re-creates its locks through `os.register_at_fork`.
-
-**Scope.**
-
-- Re-create the module locks in the child through `os.register_at_fork`, the way
-  `logging._at_fork_reinit` does, and clear `_verified_tail`, which describes an
-  append the child did not perform.
-- Decide and record what an inherited *experiment* writer should do. A forked
-  child holding `_eval_persistence`'s open result file shares its offset with the
-  parent; whether the child should keep writing, be reset, or be refused is a
-  product decision, not a lock fix.
-- Decide and record whether anything is said at all when a child inherits a trace
-  context: the child continues a trace whose root another process owns.
-- Add a test that forks with the lock held. It must not be able to hang the
-  suite: bound the child and fail on the timeout.
-
-**Done when** a child forked from a recording, threaded parent records its own
-events instead of blocking.
-
-### 2. A read command piped into a reader that stops reading exits 120
+### 1. A read command piped into a reader that stops reading exits 120
 
 **Why.** `bir traces | head -2` is an ordinary thing to type. Measured against a
 10,000-event store, with the reader closing the pipe after two lines:
@@ -185,7 +128,7 @@ SIGINT exits 0.
 **Done when** `bir traces | head` prints no error and exits with the code the
 docs name for it.
 
-### 3. A relative store path is re-resolved on every append
+### 2. A relative store path is re-resolved on every append
 
 **Why.** `_DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")` (`bir/_config.py:18`)
 is stored as given and passed to `open()` on every append, so the operating
@@ -222,7 +165,7 @@ a temporary directory all reach it.
 **Done when** a process that changes directory after `configure()` keeps
 recording into the store it started with.
 
-### 4. An interrupted `prune --yes` abandons a staging copy nothing reclaims
+### 3. An interrupted `prune --yes` abandons a staging copy nothing reclaims
 
 **Why.** Prune stages the survivors and replaces the original, which is what keeps
 it crash-safe — and that half is sound: killed at four different offsets, the
@@ -269,14 +212,67 @@ eventually while the sibling next to the store is not.
 **Done when** a prune that follows an interrupted one reclaims what the
 interrupted one left.
 
+### 4. A child forked inside a trace writes that trace's root twice
+
+**Why.** Found while shipping the fork fix, and left out of it deliberately: that
+change was about a child that could not record at all, this is about what a child
+that *can* record writes. A forked child inherits the trace context, so its events
+attach to the parent's trace id and span — which is what a worker continuing a
+piece of work should record. But the child also inherits the open `with` block,
+and if it leaves through that block rather than through `os._exit()`, both
+processes finalize the same trace root:
+
+```
+parent: with bir.trace("parent-root"):  fork; child records one generation, sys.exit(0)
+
+generation  child-generation   id=469ced1b  trace=51d610b9  parent=51d610b9
+trace       parent-root        id=51d610b9  trace=51d610b9  parent=-
+generation  parent-generation  id=4413efb9  trace=51d610b9  parent=51d610b9
+trace       parent-root        id=51d610b9  trace=51d610b9  parent=-
+
+duplicate event ids: ['51d610b9']
+load_traces: [('parent-root', 4)]
+```
+
+One event id, two events. `load_traces` reports a three-event trace as four, and
+any consumer counting events or joining on id sees the root twice. Nothing else
+in the SDK can produce a duplicate id.
+
+The inherited context itself is not the defect and is documented behavior
+(`docs/site/core-api.md`, "Recording in a process that forks"): clearing it in the
+child would orphan the child's events or make `bir.span()` raise inside code that
+works today. What is wrong is only that two processes both finalize a root one of
+them owns.
+
+**Scope.**
+
+- Record which process opened a trace, and have the finalizer write the root only
+  there. The child's own nested events keep attaching to the inherited trace,
+  which is the behavior being preserved.
+- Cover every finalization path, not just `_TraceContext.__exit__`: `@observe`,
+  the generator and async-generator finalizers, and the error paths all end a
+  trace.
+- Decide and record what the child should do instead. Writing nothing loses the
+  fact that the child ran; writing a root of its own would need a trace id it does
+  not have. Silence is the likely answer, and the docs already tell a reader to
+  fork outside a traced block.
+- Keep the check off the hot path: one `os.getpid()` when a trace opens, one
+  comparison when it closes.
+
+**Done when** a child forked inside a trace leaves it without writing a second
+copy of its root.
+
 ## Sequencing
 
-The four are independent; nothing blocks anything. Item 1 is the one worth doing
-first — it is the only one that stops an application rather than annoying an
-operator, and its fix is the smallest of the four. Items 2 and 4 are contained
-inside one function each. Item 3 is one line of resolution plus the decision about
-which resolution, and is the only one that can change where an existing
-application's events land, so it wants its own release note.
+The audit's P2 has shipped: a process that forks while a thread is recording no
+longer hangs its child. Item 4 came out of shipping it and is the only one of the
+four that writes something wrong into a store rather than inconveniencing whoever
+reads it, so it is the one to do first even though nothing about it is urgent.
+
+The remaining four are independent; nothing blocks anything. Items 1 and 3 are
+contained inside one function each. Item 2 is one line of resolution plus the
+decision about which resolution, and is the only one that can change where an
+existing application's events land, so it wants its own release note.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -325,7 +321,9 @@ describe the request it answers, bounding the workers a serial timed run
 abandons, saying so when a concurrent run is waiting on stuck workers, bounding
 the run itself with `total_timeout`, and requiring every identity a caller writes
 into a recorded file — a prompt's name and version, a generation's model, an
-evaluator's name, an example's id, an experiment's name — to be a string.
+evaluator's name, an example's id, an experiment's name — to be a string, and
+re-creating the store's locks in a forked child so a pre-forking worker records
+instead of hanging.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 

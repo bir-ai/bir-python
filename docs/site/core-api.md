@@ -359,6 +359,39 @@ If the process never records again, the fragment stays. `--skip-invalid` reads
 past it and `bir prune` drops it; see
 [recovering after a full disk](cli-env.md#recovering-after-a-full-disk).
 
+## Recording in a process that forks
+
+A forked child can record. Bir re-creates its own locks in the child through
+`os.register_at_fork`, the way the standard library's `logging` does, so a child
+forked out of a process whose threads were recording writes its events instead of
+waiting on a lock the parent's threads still hold. Without that, the first event
+such a child recorded blocked forever: five of five children forked into four
+recording threads were still stopped when killed after five seconds, and a
+`multiprocessing` pool using the `fork` start method never returned a worker.
+
+Several processes may record into one store, forked or not. Appends are
+serialized by an advisory lock on a sibling `.traces.jsonl.lock` file, and the
+store stays readable throughout: eight processes appending 500 traces each
+produced 4,000 events with none lost, torn, or duplicated, and a reader calling
+`load_events()` in a loop across the whole run failed none of 2,875 times.
+
+Two things are worth knowing when you fork:
+
+- **A child inherits the trace it was forked inside of.** Its events attach to
+  that trace id and to the parent's span, which is usually what you want from a
+  worker. But if the child then leaves the same `with bir.trace(...)` block — by
+  returning, or through `sys.exit()` — it writes that trace root a second time,
+  with the same event id, and the store then holds two copies of one event. Fork
+  outside your traced blocks, or leave the child through `os._exit()`.
+- **A child inherits the configuration, including the store path.** That is what
+  makes workers write to one file on purpose. Call `configure(trace_path=...)` in
+  the child if you would rather each worker had its own.
+
+`bir.evals` is not part of this. An experiment run is a foreground operation that
+holds its result file open; forking in the middle of one gives parent and child
+the same file offset, and nothing is done about that because a forked
+`run_experiment()` is not a shape the runner supports.
+
 ## Event loading
 
 `load_events()` validates JSONL records against the current event schema and

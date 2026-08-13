@@ -339,6 +339,76 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A process that forks while one of its threads is recording no longer hangs its
+  child. Every append takes a module-level `threading.Lock`; a lock held when
+  `os.fork()` is called is inherited *locked*, and the thread that would release
+  it does not exist in the child. The first event the child recorded therefore
+  waited for a holder that could never come — and said nothing on any channel, so
+  the worker read as slow rather than as stopped. Measured with `faulthandler`
+  dumping the child's own stack:
+
+  ```
+                                              before          after
+  child forked into 4 recording threads       5 of 5 hung     5 of 5 recorded
+  multiprocessing fork Pool(2), same parent   no worker in    [0, 1]
+                                              5 s
+  single-threaded parent, 4 forked workers    all exit 0      all exit 0
+
+  Timeout (0:00:03)!
+  Thread 0x00000001f5789d80 (most recent call first):
+    File "bir/_storage.py", line 706 in _append_event      <- with _write_lock
+    File "bir/_sdk.py", line 2057 in _write_event
+    File "bir/_sdk.py", line 1493 in __exit__
+  ```
+
+  Three locks are now re-created in the child through `os.register_at_fork`:
+  `_write_lock` and `_sent_ids_lock` in `bir._storage`, and `_write_failure_lock`
+  in `bir._sdk`. This is what the standard library's own writer does — `logging`
+  re-initializes its locks the same way — and it is registered only on POSIX,
+  since Windows has no `fork` and takes the `msvcrt` locking branch anyway.
+
+  Two pieces of state are reset with them, because they describe the *parent's*
+  recording rather than the child's. `_verified_tail` records an append this
+  process completed, and lets the next one skip re-reading the store's final
+  byte; the child performed no append and the parent may write again before it
+  does. `_write_failing` and its loss count would otherwise have a child announce
+  a recovery, and a number of dropped events, for writes another process failed.
+
+  Three decisions, each with a defensible alternative.
+
+  **The locks are reset in place, not rebound.** `bir._sdk` re-exports the two
+  storage locks as module attributes, so rebinding `bir._storage._write_lock`
+  would leave `bir._sdk._write_lock` pointing at the inherited, permanently
+  locked object. Resetting in place keeps every alias correct and needs
+  `threading.Lock._at_fork_reinit`, which is private CPython API. `logging`
+  depends on the same method, and a test asserts it exists, so an interpreter
+  that ever drops it fails the suite here rather than hanging somebody's worker.
+
+  **Nothing is registered for the parent side.** Acquiring the write lock before
+  the fork — the other half of what `logging` does — would additionally guarantee
+  that no thread is mid-append when the fork happens. It would also deadlock a
+  fork issued from inside a write, because the lock is not reentrant. The hazard
+  it protects against was driven and did not appear: 300 children forked into six
+  threads of continuous appends produced 4,304 lines, 4,304 distinct event ids,
+  no duplicate and no unparsable line, so the trade was not worth taking.
+
+  **A child still inherits the trace it was forked inside of**, and that is left
+  alone. Its events attach to the parent's trace id and span, which is what a
+  worker forked to continue a piece of work should record; clearing the context
+  instead would orphan those events, or make `bir.span()` raise inside code that
+  works today. It has one sharp edge, now documented rather than fixed: a child
+  that leaves the same `with bir.trace(...)` block writes that root a second time
+  under the same event id. Fork outside your traced blocks, or leave the child
+  through `os._exit()`. `bir.evals` is deliberately untouched — an experiment run
+  holds its result file open, and a forked `run_experiment()` is not a shape the
+  runner supports.
+
+  `tests/test_fork_safety.py` pins all of it, with every child bounded and killed
+  if it outlives its deadline so a regression fails the suite instead of hanging
+  it. Against the previous code five of its seven cases fail in 50 s; the two
+  that pass are the check that the reinit hook exists and the one that forks from
+  a single-threaded parent, which never had the problem.
+
 - A concurrent run that is waiting on stuck workers now says so instead of
   looking hung. `max_workers > 1` bounds its threads by construction, but a task
   that outran its timeout holds its pool slot until it returns, so a queued
