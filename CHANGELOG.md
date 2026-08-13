@@ -123,8 +123,8 @@ Before publishing, verify the release with the SDK release checklist in
   keeps as a number, and a non-empty string or `None` for `model`.
 
   The one raise that could have broken something is `generation(model=...)`,
-  because the 19 integrations pass a model they read off a provider request or
-  response straight into it. Every one of them funnels it through
+  because the 18 provider and framework bridges pass a model they read off a
+  request or a response straight into it. Every one of them funnels it through
   `_string_or_none` first, so a provider that answers with a non-string still
   records no model rather than raising inside the call being traced. That is the
   capture guardrail, so it is pinned on a bridge in the new tests rather than
