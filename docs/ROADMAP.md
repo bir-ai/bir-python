@@ -44,8 +44,9 @@ under a relative path, when a rewrite is killed half-finished, and when several
 processes record into one file at once. Four items, from four surfaces, and the
 theme behind the first of them was new — recording is documented never to *break*
 a traced call, and nobody had asked whether it can *stop* one. That one, the
-audit's only P2, has since shipped, and shipping it produced a fifth item: what a
-child that *can* record writes into a trace its parent owns.
+audit's only P2, has shipped; shipping it produced a fifth item, about what a
+child that *can* record writes into a trace its parent owns, and that has shipped
+too. Three are left, all P3.
 
 The concurrency the guardrails actually promise is sound and is recorded below
 with its numbers: eight processes appending to one store lost nothing, rotation
@@ -77,7 +78,6 @@ breaking release says otherwise:
 | 1 | A read command piped into a reader that stops reading exits 120 | P3 | S | `bir traces \| head` is an ordinary success, as the CLI's own contract says | — |
 | 2 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
 | 3 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
-| 4 | A child forked inside a trace writes that trace's root twice | P3 | S | One event id means one event, whatever forked | — |
 
 ### 1. A read command piped into a reader that stops reading exits 120
 
@@ -212,67 +212,19 @@ eventually while the sibling next to the store is not.
 **Done when** a prune that follows an interrupted one reclaims what the
 interrupted one left.
 
-### 4. A child forked inside a trace writes that trace's root twice
-
-**Why.** Found while shipping the fork fix, and left out of it deliberately: that
-change was about a child that could not record at all, this is about what a child
-that *can* record writes. A forked child inherits the trace context, so its events
-attach to the parent's trace id and span — which is what a worker continuing a
-piece of work should record. But the child also inherits the open `with` block,
-and if it leaves through that block rather than through `os._exit()`, both
-processes finalize the same trace root:
-
-```
-parent: with bir.trace("parent-root"):  fork; child records one generation, sys.exit(0)
-
-generation  child-generation   id=469ced1b  trace=51d610b9  parent=51d610b9
-trace       parent-root        id=51d610b9  trace=51d610b9  parent=-
-generation  parent-generation  id=4413efb9  trace=51d610b9  parent=51d610b9
-trace       parent-root        id=51d610b9  trace=51d610b9  parent=-
-
-duplicate event ids: ['51d610b9']
-load_traces: [('parent-root', 4)]
-```
-
-One event id, two events. `load_traces` reports a three-event trace as four, and
-any consumer counting events or joining on id sees the root twice. Nothing else
-in the SDK can produce a duplicate id.
-
-The inherited context itself is not the defect and is documented behavior
-(`docs/site/core-api.md`, "Recording in a process that forks"): clearing it in the
-child would orphan the child's events or make `bir.span()` raise inside code that
-works today. What is wrong is only that two processes both finalize a root one of
-them owns.
-
-**Scope.**
-
-- Record which process opened a trace, and have the finalizer write the root only
-  there. The child's own nested events keep attaching to the inherited trace,
-  which is the behavior being preserved.
-- Cover every finalization path, not just `_TraceContext.__exit__`: `@observe`,
-  the generator and async-generator finalizers, and the error paths all end a
-  trace.
-- Decide and record what the child should do instead. Writing nothing loses the
-  fact that the child ran; writing a root of its own would need a trace id it does
-  not have. Silence is the likely answer, and the docs already tell a reader to
-  fork outside a traced block.
-- Keep the check off the hot path: one `os.getpid()` when a trace opens, one
-  comparison when it closes.
-
-**Done when** a child forked inside a trace leaves it without writing a second
-copy of its root.
-
 ## Sequencing
 
-The audit's P2 has shipped: a process that forks while a thread is recording no
-longer hangs its child. Item 4 came out of shipping it and is the only one of the
-four that writes something wrong into a store rather than inconveniencing whoever
-reads it, so it is the one to do first even though nothing about it is urgent.
+Both fork items have shipped: a child forked out of a recording process records
+instead of hanging, and it no longer writes a second copy of an event its parent
+opened. What is left inconveniences whoever reads a store or runs a command;
+nothing left writes anything wrong into one.
 
-The remaining four are independent; nothing blocks anything. Items 1 and 3 are
-contained inside one function each. Item 2 is one line of resolution plus the
-decision about which resolution, and is the only one that can change where an
-existing application's events land, so it wants its own release note.
+The three are independent; nothing blocks anything. Items 1 and 3 are contained
+inside one function each. Item 2 is one line of resolution plus the decision about
+which resolution, and is the only one that can change where an existing
+application's events land, so it wants its own release note. Item 1 is the one an
+operator meets most often — `bir traces | head` is a thing people type every
+day — so it is the one to do first.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -323,7 +275,8 @@ the run itself with `total_timeout`, and requiring every identity a caller write
 into a recorded file — a prompt's name and version, a generation's model, an
 evaluator's name, an example's id, an experiment's name — to be a string, and
 re-creating the store's locks in a forked child so a pre-forking worker records
-instead of hanging.
+instead of hanging, and writing each event only in the process that opened it so
+a fork cannot put one event id in the store twice.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 

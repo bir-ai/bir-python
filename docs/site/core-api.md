@@ -379,10 +379,21 @@ Two things are worth knowing when you fork:
 
 - **A child inherits the trace it was forked inside of.** Its events attach to
   that trace id and to the parent's span, which is usually what you want from a
-  worker. But if the child then leaves the same `with bir.trace(...)` block — by
-  returning, or through `sys.exit()` — it writes that trace root a second time,
-  with the same event id, and the store then holds two copies of one event. Fork
-  outside your traced blocks, or leave the child through `os._exit()`.
+  worker: a child that records a generation inside an inherited trace lands in
+  that trace's tree.
+
+  What the child does *not* do is finish what the parent started. An event is
+  written by the process that opened it, so a child that leaves the same
+  `with bir.trace(...)` block — by returning, or through `sys.exit()` — writes
+  nothing for it and the parent writes it once. Before that rule, both wrote it:
+  one event id twice in the store, and `load_traces()` reporting a three-event
+  trace as four. The same holds for a span, generation, tool call, or retrieval
+  that was open at the fork.
+
+  The corner this leaves is a parent that never finishes the block — a double
+  fork where the parent exits immediately, say. Nobody writes the root, and the
+  child's own events are then orphans whose trace root is missing, which the
+  readers already recognize and report.
 - **A child inherits the configuration, including the store path.** That is what
   makes workers write to one file on purpose. Call `configure(trace_path=...)` in
   the child if you would rather each worker had its own.

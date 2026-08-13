@@ -249,9 +249,11 @@ rather than as broadly exercised in production.
 **Processes.** Those locks are re-created in a forked child through
 `os.register_at_fork` (POSIX only; Windows has no `fork`), so a pre-forking
 server or a `multiprocessing` pool started from a process that was recording gets
-workers that record rather than workers that hang. Several processes may share
-one store: appends are serialized across them by an advisory lock on a sibling
-lock file, and a reader is never shown a half-written line. See
+workers that record rather than workers that hang. Each event is written by the
+process that opened it, so a child that inherits an open trace records its own
+events into it without writing a second copy of the parent's. Several processes
+may share one store: appends are serialized across them by an advisory lock on a
+sibling lock file, and a reader is never shown a half-written line. See
 [recording in a process that forks](core-api.md#recording-in-a-process-that-forks)
 for what a child inherits.
 

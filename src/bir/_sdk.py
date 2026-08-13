@@ -883,6 +883,29 @@ def observe(
     return decorator
 
 
+def _opened_in_this_process(owner_pid: int) -> bool:
+    """Whether the event opened under ``owner_pid`` belongs to this process.
+
+    An event is written by the process that opened it. A fork between an event's
+    start and its end leaves both processes holding the same event id -- the
+    child inherits the open context manager along with everything else -- and
+    both would otherwise write it, putting two copies of one id in the store.
+    Measured before this guard: a child forked inside ``with bir.trace(...)`` and
+    leaving through that block made ``load_traces()`` report a three-event trace
+    as four, and a fork inside a span or a generation duplicated that event too.
+
+    The child stays silent about an event it did not open, rather than writing it
+    under a fresh id: a second root would leave one trace with two of them. Its
+    *own* nested events still record and still attach to the inherited trace,
+    which is the useful half of what it inherited. If the parent then dies
+    without writing the root, those events are orphans -- a state the readers
+    already recognize and report, and the same one any process killed mid-trace
+    leaves behind.
+    """
+
+    return owner_pid == os.getpid()
+
+
 @dataclass(frozen=True)
 class _ObserveState:
     """Per-call state shared by the sync and async ``observe`` wrappers."""
@@ -892,6 +915,8 @@ class _ObserveState:
     parent_id: str | None
     event_type: str
     start_time: str
+    # The process that opened this observation; see ``_opened_in_this_process``.
+    owner_pid: int
     capture_inputs: bool
     capture_outputs: bool
     dropped: bool
@@ -949,6 +974,7 @@ def _begin_observe(
         parent_id=parent_id,
         event_type=event_type,
         start_time=start_time,
+        owner_pid=os.getpid(),
         capture_inputs=capture_inputs_for_call,
         capture_outputs=capture_outputs_for_call,
         dropped=dropped,
@@ -1011,7 +1037,7 @@ def _finish_observe_success(
             state.capture_outputs_token,
             state.dropped_token,
         )
-    if state.dropped:
+    if state.dropped or not _opened_in_this_process(state.owner_pid):
         return
     output_payload = _safe_capture(result) if state.capture_outputs else None
     _write_event(
@@ -1061,7 +1087,7 @@ def _finish_observe_error(
             state.capture_outputs_token,
             state.dropped_token,
         )
-    if state.dropped:
+    if state.dropped or not _opened_in_this_process(state.owner_pid):
         return
     event = _event(
         event_id=state.event_id,
@@ -1441,6 +1467,7 @@ class _TraceContext:
         self.metadata: dict[str, Any] = _safe_metadata(metadata, field="trace metadata")
         self.id: str | None = None
         self.start_time: str | None = None
+        self._owner_pid: int | None = None
         self._dropped = False
         self._trace_token: Token[str | None] | None = None
         self._parent_token: Token[str | None] | None = None
@@ -1451,6 +1478,7 @@ class _TraceContext:
     def __enter__(self) -> _TraceContext:
         self.id = _new_id()
         self.start_time = _now()
+        self._owner_pid = os.getpid()
         self._dropped = _should_drop_trace(self.name)
         self._trace_token = _current_trace_id.set(self.id)
         self._parent_token = _current_parent_id.set(self.id)
@@ -1472,10 +1500,10 @@ class _TraceContext:
         del exc_type, traceback
         self._reset()
 
-        if self.id is None or self.start_time is None:
+        if self.id is None or self.start_time is None or self._owner_pid is None:
             raise RuntimeError("bir trace context exited before it was entered")
 
-        if self._dropped:
+        if self._dropped or not _opened_in_this_process(self._owner_pid):
             return False
 
         event = _event(
@@ -1532,6 +1560,7 @@ class _Span:
         self.trace_id: str | None = None
         self.parent_id: str | None = None
         self.start_time: str | None = None
+        self._owner_pid: int | None = None
         self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
@@ -1545,6 +1574,7 @@ class _Span:
         self.trace_id = trace_id
         self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
+        self._owner_pid = os.getpid()
         self._parent_token = _current_parent_id.set(self.id)
         return self
 
@@ -1557,8 +1587,13 @@ class _Span:
         if self._parent_token is not None:
             _current_parent_id.reset(self._parent_token)
 
-        if self.id is None or self.trace_id is None or self.start_time is None:
+        if self.id is None or self.trace_id is None or self.start_time is None or self._owner_pid is None:
             raise RuntimeError("bir.span() exited before it was entered")
+
+        # An event belongs to the process that opened it; a fork between the
+        # two would otherwise have both write this id.
+        if not _opened_in_this_process(self._owner_pid):
+            return False
 
         event = _event(
             event_id=self.id,
@@ -1621,6 +1656,7 @@ class _Generation:
         self.usage: dict[str, int | float] | None = None
         self.cost: dict[str, int | float] | None = None
         self.currency: str | None = None
+        self._owner_pid: int | None = None
         self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
@@ -1634,6 +1670,7 @@ class _Generation:
         self.trace_id = trace_id
         self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
+        self._owner_pid = os.getpid()
         self._parent_token = _current_parent_id.set(self.id)
         return self
 
@@ -1646,8 +1683,13 @@ class _Generation:
         if self._parent_token is not None:
             _current_parent_id.reset(self._parent_token)
 
-        if self.id is None or self.trace_id is None or self.start_time is None:
+        if self.id is None or self.trace_id is None or self.start_time is None or self._owner_pid is None:
             raise RuntimeError("bir.generation() exited before it was entered")
+
+        # An event belongs to the process that opened it; a fork between the
+        # two would otherwise have both write this id.
+        if not _opened_in_this_process(self._owner_pid):
+            return False
 
         input_payload = _safe_capture(self.input) if _should_capture(self.capture_input, "inputs") else None
         output_payload = _safe_capture(self.output) if _should_capture(self.capture_output, "outputs") else None
@@ -1823,6 +1865,7 @@ class _ToolCall:
         self.parent_id: str | None = None
         self.start_time: str | None = None
         self.output: Any = None
+        self._owner_pid: int | None = None
         self._parent_override: str | None = None
         self._parent_token: Token[str | None] | None = None
 
@@ -1836,6 +1879,7 @@ class _ToolCall:
         self.trace_id = trace_id
         self.parent_id = self._parent_override or parent_id
         self.start_time = _now()
+        self._owner_pid = os.getpid()
         self._parent_token = _current_parent_id.set(self.id)
         return self
 
@@ -1848,8 +1892,13 @@ class _ToolCall:
         if self._parent_token is not None:
             _current_parent_id.reset(self._parent_token)
 
-        if self.id is None or self.trace_id is None or self.start_time is None:
+        if self.id is None or self.trace_id is None or self.start_time is None or self._owner_pid is None:
             raise RuntimeError("bir.tool_call() exited before it was entered")
+
+        # An event belongs to the process that opened it; a fork between the
+        # two would otherwise have both write this id.
+        if not _opened_in_this_process(self._owner_pid):
+            return False
 
         input_payload = _safe_capture(self.input) if _should_capture(self.capture_input, "inputs") else None
         output_payload = _safe_capture(self.output) if _should_capture(self.capture_output, "outputs") else None

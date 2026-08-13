@@ -339,6 +339,59 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- A forked child no longer writes a second copy of an event its parent opened.
+  A child inherits the open context manager along with everything else, so both
+  processes held the same event id and both finalized it. Found while shipping
+  the fork deadlock fix below, and broader than the trace root it was first seen
+  on — anything open at the fork was duplicated:
+
+  ```
+  fork inside                        before                      after
+  with bir.trace("root")             trace written twice         once
+  with bir.span("s")                 span and trace twice        once each
+  with bir.generation("g")           generation and trace twice  once each
+  with bir.tool_call("t")            tool_call and trace twice   once each
+  @observe(), child returns          trace twice                 once
+  observed generator, child finishes trace twice                 once
+  ```
+
+  The consequence a consumer saw: `load_traces()` reported a three-event trace as
+  four, and any join on event id matched the root twice. Nothing else in the SDK
+  can produce a duplicate id.
+
+  Each event now records the pid that opened it and is written only there. The
+  child's *own* events still record and still attach to the inherited trace,
+  which is the half worth keeping: a child that opens a generation inside an
+  inherited trace lands in that trace's tree, and a test pins that they share one
+  trace id.
+
+  Three decisions.
+
+  **The child stays silent rather than writing under a fresh id.** A second root
+  would leave one trace with two of them, which is worse than one root written by
+  the process that owns it. This leaves one corner, documented in
+  `docs/site/core-api.md`: if the parent never finishes the block — a double fork
+  where it exits immediately — nobody writes the root, and the child's events are
+  orphans whose trace root is missing. The readers already recognize and report
+  that state, and it is the same one any process killed mid-trace leaves.
+
+  **The context is still inherited.** Clearing the trace contextvars in the child
+  was the other way to stop the duplicate, and it would orphan every event the
+  child records or make `bir.span()` raise inside code that works today. What was
+  wrong was two processes finalizing one event, not the child knowing which trace
+  it belongs to.
+
+  **The check is a pid, not a fork counter.** A counter bumped by the at-fork hook
+  would avoid a syscall, but it only sees forks that go through `os.fork()`.
+  `os.getpid()` costs 24 ns here and the comparison 11 ns, so the guard adds 35 ns
+  to an event that costs 88–119 µs to record on this machine — three orders of
+  magnitude under the run-to-run spread of the benchmark that would measure it.
+
+  `tests/test_fork_safety.py` grew a second class for it. Every child leaves
+  through `os._exit`, but only after unwinding the traced block, which is the
+  path under test; against the previous code seven of its cases fail, one per row
+  of the table above.
+
 - A process that forks while one of its threads is recording no longer hangs its
   child. Every append takes a module-level `threading.Lock`; a lock held when
   `os.fork()` is called is inherited *locked*, and the thread that would release
