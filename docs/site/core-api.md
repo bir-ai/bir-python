@@ -258,7 +258,19 @@ configure(
 
 Arguments that are omitted retain the current setting. Environment defaults are
 read once when `bir` is imported; explicit `configure()` arguments take
-precedence. `sample_rules` is an optional exact trace-root-name override table;
+precedence.
+
+A relative `trace_path` — including the default `.bir/traces.jsonl` — is anchored
+to an absolute path the first time it is needed, and every writer and reader in
+the process uses that one file from then on. It means "where this program
+records", so a process that starts recording in one directory and then changes
+directory keeps writing to the store it started with rather than opening a second
+one alongside the new working directory. `configure()` builds a new
+configuration, so calling it again after a `chdir` deliberately re-anchors; a
+program that never does never moves. Pass an absolute path if you want the store
+fixed regardless of where the process is, and note that an absolute path is
+recorded and reported exactly as you wrote it — symlinks are not resolved
+underneath you. `sample_rules` is an optional exact trace-root-name override table;
 unmatched roots use the global `sample_rate`. See
 [Sampling & Service Metadata](sampling-service-metadata.md) and
 [CLI & Environment Config](cli-env.md).

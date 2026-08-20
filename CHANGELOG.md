@@ -51,6 +51,66 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Changed
 
+- A relative `trace_path` is anchored once instead of being resolved on every
+  append. The default `.bir/traces.jsonl` is relative, and the operating system
+  resolved it against whatever the working directory happened to be at the moment
+  of each write, so a process that changed directory mid-run split its store in
+  two and said nothing:
+
+  ```
+  configure(enabled=True) in app/, one trace, then os.chdir to elsewhere/, one trace
+
+                                 before                    after
+  app/.bir/traces.jsonl          ['before-chdir']          ['before-chdir', 'after-chdir']
+  elsewhere/.bir/traces.jsonl    ['after-chdir']           (not created)
+  ```
+
+  Each half then looked complete to `bir traces` run in that directory.
+  Daemonizing (`os.chdir("/")`), a test fixture, and any job that runs work in a
+  scratch directory reach it, as does any relative path a caller configures or
+  sets in `BIR_TRACE_PATH`.
+
+  The path is now resolved the first time a configuration needs it and remembered
+  for that configuration's life, so every writer and reader in the process agrees
+  on one file. `load_events()` and `load_traces()` with no argument read the same
+  anchored path, so a program that records and then changes directory still reads
+  back what it wrote.
+
+  **This is a `Changed` entry, not a `Fixed` one**, because a program that
+  changes directory mid-run will find its later events in a different file than
+  before — the first one rather than the second — and there is no flag that
+  restores the old behavior. The migration is to say so: call
+  `configure(trace_path=...)` after the `chdir` to move the store deliberately.
+  `configure()` builds a new configuration, so that re-anchors; what a program can
+  no longer do is move its store by accident.
+
+  **Anchoring where the configuration is built was implemented first and
+  rejected.** It is the obvious reading — resolve in `_Config`, once, at
+  construction — and it fails a test the SDK's own suite runs 1,031 times: chdir
+  into a scratch directory, then record with the default path. The configuration
+  there was built before the `chdir` (at import, as it is for any program), so the
+  store landed in the directory the process started in rather than the one it
+  records from. A relative default has to mean "where this program records", which
+  is why the anchor is taken on first use rather than at construction.
+
+  **`absolute()` semantics rather than `resolve()`.** Both make the path
+  cwd-independent, which is the point; `resolve()` also follows symlinks, so a
+  store configured as `/tmp/traces.jsonl` would be reported as
+  `/private/tmp/traces.jsonl` on macOS in every error message. An absolute path is
+  now passed through exactly as configured. A relative one is joined to
+  `os.getcwd()`, which already reports the working directory in canonical form —
+  that part is the operating system's answer rather than a rewrite of the
+  caller's.
+
+  `bir config` reports that same anchored path. It used to print
+  `trace_path.resolve()`, which on macOS could name a file
+  (`/private/var/folders/...`) that no other message in the SDK would ever show,
+  while claiming to be "resolved the way a write would" — now it is.
+
+  `tests/test_relative_store_path.py` pins both directions: the store stops
+  following a `chdir`, and it still lands where recording starts rather than where
+  the process was imported. Six of its seven cases fail against the previous code.
+
 - Every identity a caller writes into a recorded file must be a string.
   `prompt()` checked that `name` and `version` were non-empty and never that they
   were strings, so whatever was passed went into the event; the same hand-written

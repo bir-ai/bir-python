@@ -39,8 +39,10 @@ def answer_question(question: str) -> str:
     return response
 ```
 
-Events are written to `.bir/traces.jsonl` by default. Input and output capture
-is disabled unless you explicitly enable it.
+Events are written to `.bir/traces.jsonl` by default — relative to where the
+program records, anchored the first time it is needed, so a later `chdir` does not
+split the store across two directories. Input and output capture is disabled
+unless you explicitly enable it.
 
 Inspect them from the command line without a server: `bir traces` lists recorded
 traces (filter with `--name`, `--status {success,error}`, and

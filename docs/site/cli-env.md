@@ -521,7 +521,7 @@ Bir reads these variables once when the `bir` package is imported:
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BIR_TRACE_PATH` | Local trace JSONL path. | `.bir/traces.jsonl` |
+| `BIR_TRACE_PATH` | Local trace JSONL path. A relative one is anchored where the program records, once. | `.bir/traces.jsonl` |
 | `BIR_CAPTURE_INPUTS` | Enable input capture. | `false` |
 | `BIR_CAPTURE_OUTPUTS` | Enable output capture. | `false` |
 | `BIR_DISABLED` | Master kill switch: a truthy value records nothing (inverse of `enabled`). | `false` |

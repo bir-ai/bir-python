@@ -421,7 +421,7 @@ def load_events(path: str | Path | None = None, *, include_rotated: bool = False
     return _storage_helpers.load_events(
         path,
         include_rotated=include_rotated,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
     )
 
 
@@ -443,7 +443,7 @@ def _iter_trace_events(
     return _storage_helpers._iter_trace_events(
         path,
         include_rotated=include_rotated,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
         on_invalid=on_invalid,
     )
 
@@ -458,7 +458,7 @@ def load_traces(path: str | Path | None = None, *, include_rotated: bool = False
     return _storage_helpers.load_traces(
         path,
         include_rotated=include_rotated,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
     )
 
 
@@ -480,7 +480,7 @@ def _load_events_skipping_invalid(
     return _storage_helpers.load_events(
         path,
         include_rotated=include_rotated,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
         on_invalid=on_invalid,
     )
 
@@ -496,7 +496,7 @@ def _load_traces_skipping_invalid(
     return _storage_helpers.load_traces(
         path,
         include_rotated=include_rotated,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
         on_invalid=on_invalid,
     )
 
@@ -2128,7 +2128,7 @@ def _write_event(event: dict[str, Any]) -> None:
         # trace path with the previous rotation settings.
         dropped_bytes = _storage_helpers._append_event(
             event,
-            trace_path=config.trace_path,
+            trace_path=config.anchored_trace_path(),
             max_bytes=config.max_bytes,
             backup_count=config.backup_count,
         )
@@ -2136,10 +2136,10 @@ def _write_event(event: dict[str, Any]) -> None:
         # Deliberately broad: from the caller's side every way of failing to
         # record is the same thing, and a serialization bug here would otherwise
         # destroy a production call rather than a trace.
-        _report_write_failure(config.trace_path, error)
+        _report_write_failure(config.anchored_trace_path(), error)
         return
     if dropped_bytes:
-        _report_unfinished_tail_dropped(config.trace_path, dropped_bytes)
+        _report_unfinished_tail_dropped(config.anchored_trace_path(), dropped_bytes)
     if _write_failing:
         _report_write_recovered()
 
@@ -2227,7 +2227,7 @@ def _prune_trace_store(
 
     return _storage_helpers._prune_trace_store(
         path,
-        default_path=_config.trace_path,
+        default_path=_config.anchored_trace_path(),
         include_rotated=include_rotated,
         before=before,
         keep_last=keep_last,
@@ -2239,7 +2239,7 @@ def _prune_trace_store(
 def _sent_ids_path(path: str | Path | None) -> Path:
     """Return the sidecar path that records IDs the server has already accepted."""
 
-    return _storage_helpers._sent_ids_path(path, default_path=_config.trace_path)
+    return _storage_helpers._sent_ids_path(path, default_path=_config.anchored_trace_path())
 
 
 def _should_capture(override: bool | None, target: str) -> bool:

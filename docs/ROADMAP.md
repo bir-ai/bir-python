@@ -46,7 +46,8 @@ theme behind the first of them was new — recording is documented never to *bre
 a traced call, and nobody had asked whether it can *stop* one. That one, the
 audit's only P2, has shipped; shipping it produced a fifth item, about what a
 child that *can* record writes into a trace its parent owns, and that has shipped
-too, along with the closed pipe. Two are left, both P3.
+too, along with the closed pipe and the store path that followed the working
+directory. One is left, a P3.
 
 The concurrency the guardrails actually promise is sound and is recorded below
 with its numbers: eight processes appending to one store lost nothing, rotation
@@ -75,47 +76,9 @@ breaking release says otherwise:
 
 | # | Improvement | Priority | Size | Primary outcome | Depends on |
 |---|---|---|---|---|---|
-| 1 | A relative store path is re-resolved on every append | P3 | S | A process that changes directory keeps recording where it started | — |
-| 2 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
+| 1 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
 
-### 1. A relative store path is re-resolved on every append
-
-**Why.** `_DEFAULT_TRACE_PATH = Path(".bir/traces.jsonl")` (`bir/_config.py:18`)
-is stored as given and passed to `open()` on every append, so the operating
-system resolves it against the working directory *at the time of the write*
-rather than at the time of the call to `configure()`. A process that changes
-directory splits its store in two, silently:
-
-```
-configure(enabled=True) in app/, one trace, then os.chdir to elsewhere/, one trace
-
-app/.bir/traces.jsonl        -> ['before-chdir']
-elsewhere/.bir/traces.jsonl  -> ['after-chdir']
-```
-
-Nothing warns, and `bir traces` run in either directory shows half a picture. The
-same holds for any relative path a caller configures explicitly or sets in
-`BIR_TRACE_PATH`. Daemonizing (`os.chdir("/")`), a test that changes directory, a
-CLI tool that resolves paths from a project root, and anything that runs work in
-a temporary directory all reach it.
-
-**Scope.**
-
-- Resolve the configured trace path to an absolute path once, where the
-  configuration is built, so every writer in the process agrees on one file.
-- Decide and record which resolution: `Path.absolute()` keeps the path the caller
-  wrote, while `Path.resolve()` also follows symlinks and normalizes `..`, which
-  changes what an operator sees in an error message.
-- Leave the CLI's own default relative to the invocation directory, which is what
-  a command is expected to do, and say so where the default is documented.
-- Decide and record whether this is worth a `Changed` entry: an application that
-  relies on the store following its working directory has no other way to get
-  that behavior back.
-
-**Done when** a process that changes directory after `configure()` keeps
-recording into the store it started with.
-
-### 2. An interrupted `prune --yes` abandons a staging copy nothing reclaims
+### 1. An interrupted `prune --yes` abandons a staging copy nothing reclaims
 
 **Why.** Prune stages the survivors and replaces the original, which is what keeps
 it crash-safe — and that half is sound: killed at four different offsets, the
@@ -164,16 +127,15 @@ interrupted one left.
 
 ## Sequencing
 
-Three of the audit's five have shipped: a child forked out of a recording process
+Four of the audit's five have shipped: a child forked out of a recording process
 records instead of hanging, it no longer writes a second copy of an event its
-parent opened, and a read command piped into `head` is an ordinary success rather
-than exit 120. Nothing left writes anything wrong into a store.
+parent opened, a read command piped into `head` is an ordinary success rather than
+exit 120, and a relative store path is anchored once rather than re-resolved on
+every append.
 
-The two are independent. Item 1 is one line of resolution plus the decision about
-which resolution, and it is the only remaining item that can change where an
-existing application's events land, so it wants its own release note; that also
-makes it the one to think about before doing. Item 2 is contained inside one
-function and needs no decision beyond how a stale sibling is recognized.
+One is left. It is contained inside one function and needs no decision beyond how
+a stale sibling is recognized: the staging file's name carries the pid that wrote
+it, so a live one must not be swept, and the rest need an age threshold.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -225,8 +187,9 @@ into a recorded file — a prompt's name and version, a generation's model, an
 evaluator's name, an example's id, an experiment's name — to be a string, and
 re-creating the store's locks in a forked child so a pre-forking worker records
 instead of hanging, writing each event only in the process that opened it so a
-fork cannot put one event id in the store twice, and ending quietly with 141 when
-whoever was reading a command's output stops.
+fork cannot put one event id in the store twice, ending quietly with 141 when
+whoever was reading a command's output stops, and anchoring a relative store path
+once so a process that changes directory does not split its store.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 

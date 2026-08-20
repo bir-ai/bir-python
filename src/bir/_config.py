@@ -91,6 +91,47 @@ class _Config:
     max_value_length: int | None = None
     max_collection_items: int | None = None
 
+    def anchored_trace_path(self) -> Path:
+        """Return the absolute store path this configuration records into.
+
+        ``trace_path`` may be relative -- the default ``.bir/traces.jsonl`` is,
+        and it means "a ``.bir`` directory where this program runs". The
+        operating system used to resolve that on *every* append, against whatever
+        the working directory happened to be at that moment, so a process that
+        changed directory mid-run silently split its store in two: half the
+        events in the directory it started in, half in the one it moved to, and
+        each ``bir traces`` showing half a picture.
+
+        So it is resolved once, here, and remembered for the life of this
+        configuration object: the first thing that needs the path fixes it, and
+        every writer and reader in the process agrees from then on. Anchoring it
+        earlier -- when the configuration is built -- was tried and rejected: a
+        relative default has to mean the directory the program records from, and
+        binding it at import breaks every program that chdirs into a working
+        directory before it starts (a test fixture, a CLI that moves to a project
+        root), which is most of them.
+
+        ``absolute()`` semantics rather than ``resolve()``: both make the path
+        cwd-independent, which is the point, but ``resolve()`` also follows
+        symlinks, so a store configured as ``/tmp/traces.jsonl`` would be reported
+        as ``/private/tmp/traces.jsonl`` on macOS in every message. The path an
+        operator configured is the path they should be shown, so an absolute one
+        is passed through untouched. A relative one is joined to the working
+        directory, which ``os.getcwd()`` already reports in canonical form -- that
+        part is the operating system's answer, not a rewrite of the caller's.
+
+        ``configure()`` builds a new configuration, so reconfiguring re-anchors;
+        a process that never reconfigures never moves.
+        """
+
+        anchored = self.__dict__.get("_anchored_trace_path")
+        if anchored is None:
+            anchored = self.trace_path if self.trace_path.is_absolute() else Path.cwd() / self.trace_path
+            # Frozen for callers, not for this memo. Two threads racing here
+            # compute the same path from the same working directory.
+            object.__setattr__(self, "_anchored_trace_path", anchored)
+        return cast("Path", anchored)
+
 
 def _validate_additional_secret_keys(value: Any) -> frozenset[str]:
     """Validate and normalize the user-supplied extra secret-key names.

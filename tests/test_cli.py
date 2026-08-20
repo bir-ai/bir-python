@@ -3150,7 +3150,11 @@ class ConfigCommandTests(CliBaseTest):
         self.assertEqual(payload["backup_count"], 5)
         self.assertEqual(payload["max_value_length"], 2048)
         self.assertEqual(payload["max_collection_items"], 64)
-        self.assertEqual(payload["trace_path"], str(trace_path.resolve()))
+        # The path as configured, not `Path.resolve()`'s canonical form: what
+        # `bir config` prints is the path a write would use, and on macOS a
+        # temporary directory under /var is reached through a symlink, so
+        # resolving it would print a file name the operator never wrote.
+        self.assertEqual(payload["trace_path"], str(trace_path))
 
     def test_env_var_presence_is_reported_without_values(self) -> None:
         # A blank value is treated as unset by the SDK and so is not reported.

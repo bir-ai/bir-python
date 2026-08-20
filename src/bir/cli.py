@@ -933,13 +933,15 @@ def _config_summary(config: _sdk._Config) -> dict[str, Any]:
     fields cannot drift apart. Secret-bearing configuration is reduced to counts
     only: the additional redaction rules and the local ``model_prices`` table are
     reported as sizes, never as patterns or prices, so a value that could leak a
-    credential or a private rate is never printed. ``trace_path`` is resolved to an
-    absolute path the way a write would, and ``env_vars_set`` lists the ``BIR_*``
-    variable names currently set (to a non-blank value) without their values.
+    credential or a private rate is never printed. ``trace_path`` is the absolute
+    path a write would use -- the same anchoring, so what this prints is the file
+    events go to, symlinks and all left as the operator wrote them -- and
+    ``env_vars_set`` lists the ``BIR_*`` variable names currently set (to a
+    non-blank value) without their values.
     """
 
     return {
-        "trace_path": str(config.trace_path.resolve()),
+        "trace_path": str(config.anchored_trace_path()),
         "capture_inputs": config.capture_inputs,
         "capture_outputs": config.capture_outputs,
         "enabled": config.enabled,
@@ -1227,7 +1229,7 @@ def _resolved_trace_path(path_arg: str | None) -> Path:
 
     if path_arg is not None:
         return Path(path_arg)
-    return _sdk._config.trace_path
+    return _sdk._config.anchored_trace_path()
 
 
 if __name__ == "__main__":
