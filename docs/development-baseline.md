@@ -13,12 +13,12 @@ re-record the whole file when the commit under test moves on.
 
 | | |
 |---|---|
-| Commit | `704a49ba9a77cba494f6856066e45dfeeb9b9043` (`v0.3.0-86-g704a49b`), working tree clean — this file was added on top of it and changes nothing it measures |
+| Commit | `8e72c1b4de1ca0bada3c077bec2538f22169aecd` (`v0.3.0-88-g8e72c1b`), working tree clean — this file is re-recorded on top of it and changes nothing it measures |
 | Package version | `bir-sdk` 0.3.0, schema version `1.0` |
 | Python | CPython 3.14.6 (Clang 21.0.0), not free-threaded (`Py_GIL_DISABLED` is 0) |
 | Platform | macOS 26.6.2, arm64 (`darwin`) |
-| Runtime source | 40 modules, 19,569 lines under `src/bir` (19 integration bridges) |
-| Tests | 57 files (55 `test_*.py` plus 2 shared contract helpers), 36,892 lines |
+| Runtime source | 40 modules, 19,579 lines under `src/bir` (19 integration bridges) |
+| Tests | 57 files (55 `test_*.py` plus 2 shared contract helpers), 36,912 lines |
 | Tooling | ruff 0.16.1, coverage 7.15.2 (C extension), pyright 1.1.410, mkdocs 1.6.1 |
 | Optional extras installed | `otel` (so `export_otel` benchmarks and OTLP tests run) |
 
@@ -68,11 +68,11 @@ installed `bir` console script.
 
 | | |
 |---|---|
-| Tests run | **1893** |
-| Subtests | 2183 |
+| Tests run | **1895** |
+| Subtests | 2188 |
 | Failures / errors | 0 / 0 |
 | Skipped | 1 |
-| Wall time | 27.9 s plain, 27.0 s under coverage |
+| Wall time | 27.2 s plain, 27.3 s under coverage |
 
 The single skip is expected on this machine:
 
@@ -106,8 +106,8 @@ Branch coverage is on (`[tool.coverage.run] branch = true`) and the gate is
 | | |
 |---|---|
 | Total | **94.52%** branch coverage |
-| Statements | 7,992 total, 333 missed |
-| Branches | 2,756 total, 234 partial |
+| Statements | 7,995 total, 333 missed |
+| Branches | 2,758 total, 234 partial |
 | Files at 100% | 7 (skipped in the report) |
 
 Per-module, lowest first — the ones worth watching during a refactor:
@@ -124,7 +124,7 @@ Per-module, lowest first — the ones worth watching during a refactor:
 | `src/bir/_cli_present.py` | 139 | 10 | 42 | 7 | 90.61% |
 | `src/bir/integrations/openai_agents.py` | 227 | 10 | 108 | 14 | 91.64% |
 | `src/bir/_eval_models.py` | 275 | 16 | 84 | 13 | 91.92% |
-| `src/bir/_storage.py` | 920 | 59 | 322 | 37 | 91.95% |
+| `src/bir/_storage.py` | 923 | 59 | 324 | 37 | 91.98% |
 | `src/bir/integrations/pydantic_ai.py` | 249 | 13 | 120 | 10 | 93.22% |
 | `src/bir/integrations/haystack.py` | 163 | 7 | 54 | 7 | 93.55% |
 | `src/bir/cli.py` | 490 | 27 | 134 | 8 | 94.39% |
