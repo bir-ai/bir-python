@@ -13,12 +13,12 @@ re-record the whole file when the commit under test moves on.
 
 | | |
 |---|---|
-| Commit | `8e72c1b4de1ca0bada3c077bec2538f22169aecd` (`v0.3.0-88-g8e72c1b`), working tree clean — this file is re-recorded on top of it and changes nothing it measures |
+| Commit | `484ee8c3e4af29e2a7cb69ffaf2b7f436469a040` (`v0.3.0-90-g484ee8c`), working tree clean — this file is re-recorded on top of it and changes nothing it measures |
 | Package version | `bir-sdk` 0.3.0, schema version `1.0` |
 | Python | CPython 3.14.6 (Clang 21.0.0), not free-threaded (`Py_GIL_DISABLED` is 0) |
 | Platform | macOS 26.6.2, arm64 (`darwin`) |
 | Runtime source | 40 modules, 19,579 lines under `src/bir` (19 integration bridges) |
-| Tests | 57 files (55 `test_*.py` plus 2 shared contract helpers), 36,912 lines |
+| Tests | 58 files (56 `test_*.py` plus 2 shared contract helpers), 37,378 lines |
 | Tooling | ruff 0.16.1, coverage 7.15.2 (C extension), pyright 1.1.410, mkdocs 1.6.1 |
 | Optional extras installed | `otel` (so `export_otel` benchmarks and OTLP tests run) |
 
@@ -58,6 +58,10 @@ python -m ruff check . && python -m ruff format --check . && .venv/bin/pyright &
 PYTHONPATH=src python -m pytest tests/test_examples.py -q && python scripts/fixtures.py check
 ```
 
+```bash
+PYTHONPATH=src python scripts/contract.py check
+```
+
 `scripts/verify_release.py` is the canonical gate and runs most of the above
 itself: coverage-instrumented unit tests under `PYTHONWARNINGS=error::ResourceWarning`,
 the coverage floor, ruff lint and format, pyright, then hermetic wheel and sdist
@@ -68,11 +72,11 @@ installed `bir` console script.
 
 | | |
 |---|---|
-| Tests run | **1895** |
-| Subtests | 2188 |
+| Tests run | **1924** |
+| Subtests | 2332 |
 | Failures / errors | 0 / 0 |
 | Skipped | 1 |
-| Wall time | 27.2 s plain, 27.3 s under coverage |
+| Wall time | 28.1 s plain, 27.5 s under coverage |
 
 The single skip is expected on this machine:
 
@@ -149,6 +153,7 @@ that a refactor moved something it should not have.
 | Event schema `1.0` against the shared artifact | `PYTHONPATH=src:tests python -m unittest test_sdk.SdkTests.test_sdk_event_contract_matches_schema_artifact test_sdk.SdkTests.test_load_events_accepts_schema_contract_fixtures test_sdk.SdkTests.test_load_events_rejects_invalid_schema` | 3 tests, OK |
 | Experiment and redaction fixtures | `PYTHONPATH=src:tests python -m unittest test_experiment_contract test_redaction_parity` | 5 tests, OK |
 | Shared fixture checksums | `python scripts/fixtures.py check` | `OK: 4 shared fixtures match tests/fixtures/CHECKSUMS.sha256` |
+| Schema `1.0` corpus is what the SDK records | `PYTHONPATH=src python scripts/contract.py check` | OK, and `cross-repo: NOT VALIDATED` |
 
 Inventory sizes a refactor must not change silently: `bir.__all__` 19 names,
 `bir.evals.__all__` 32, `bir.testing.__all__` 2, `bir.logging.__all__` 4,
@@ -252,5 +257,11 @@ would otherwise mistake for one.
   `msvcrt` import and lock branch in `src/bir/_storage.py`, `src/bir/__main__.py`'s
   `__main__` guard, and the free-threaded build branch. None can execute on this
   machine.
+- **The schema contract is not cross-repo validated.** `scripts/contract.py check`
+  ends every run with `cross-repo: NOT VALIDATED`, which is a status rather than
+  a failure: the corpus in `tests/contract/` is verified against the schema and
+  against what the SDK records, but no `bir-app` release has ever been run
+  against it. `tests/contract/CROSS_REPO.json` holds that status and a test keeps
+  the Beta checklist item unchecked while it says so.
 - **No network, no provider SDKs.** Every integration test drives a fake client;
   installing a provider SDK is not required and does not change the counts above.
