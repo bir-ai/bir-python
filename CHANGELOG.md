@@ -437,6 +437,14 @@ Before publishing, verify the release with the SDK release checklist in
   is swept anyway, because only a reused process id can be both, and without that
   second rule one abandoned copy could outlive every future prune.
 
+  "Gone" is asked platform by platform: `os.kill(pid, 0)` on POSIX, and an
+  `OpenProcess` query through `ctypes` on Windows, where `os.kill` terminates the
+  process rather than asking about it. The Windows answer reads the exit code
+  rather than trusting the handle, because a reaped child stays openable while
+  anyone still holds a handle to it. A probe that cannot get an answer — a number
+  too large to be a pid, a call that fails — reports the process as running, so
+  an unanswerable name is never the reason a file is removed.
+
   The index directory now carries the pid that built it
   (`bir-prune-index-<pid>-*`); it stays in the system temporary directory rather
   than moving next to the store, so `bir prune --dry-run` keeps working on a
@@ -455,9 +463,11 @@ Before publishing, verify the release with the SDK release checklist in
   be measured or removed is left where it is and not counted, rather than failing
   the prune that found it — the rule sidecar compaction already follows.
 
-  `tests/test_prune_leftovers.py` pins it, including the six names the sweep must
-  *not* remove and the two leftovers it must leave when it cannot read them; 7 of
-  its 19 cases fail against the previous code.
+  `tests/test_prune_leftovers.py` pins it, including the five names the sweep must
+  *not* remove, the two leftovers it must leave when it cannot read them, and the
+  Windows probe's whole decision table driven against a stand-in library, since
+  only two of its rows are reachable on the Windows CI leg and none anywhere
+  else; 7 of its 20 cases fail against the previous code.
 
 - `bir traces | head` is no longer treated as a failure. A reader that stops
   reading gave the CLI a `BrokenPipeError`, which it reported like any other

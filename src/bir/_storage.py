@@ -45,6 +45,10 @@ _PRUNE_INDEX_PREFIX = "bir-prune-index-"
 # a number the operating system handed to a long-lived process would keep one
 # abandoned copy forever -- which is the state this sweep exists to end.
 _STALE_PRUNE_LEFTOVER_SECONDS = 24 * 60 * 60
+# Win32 values used by the Windows half of the liveness probe below.
+_WINDOWS_QUERY_LIMITED_INFORMATION = 0x1000
+_WINDOWS_STILL_ACTIVE = 259
+_WINDOWS_ERROR_INVALID_PARAMETER = 87
 _SCHEMA_VERSION = "1.0"
 _EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
 _EVENT_STATUSES = {"success", "error"}
@@ -1322,11 +1326,8 @@ def _process_is_running(pid: int) -> bool:
     ``os.kill(pid, 0)`` is the POSIX probe, and a process this user may not
     signal -- or a number too large for this system to hold a pid in -- is
     answered as running, because neither is evidence that a file is abandoned.
-
-    On Windows ``os.kill`` is not a probe at all -- it terminates the process --
-    so every pid but this one is reported as gone and the file system decides
-    instead: a staging file or index a live prune still holds open cannot be
-    removed there, and the sweep keeps whatever it fails to remove.
+    Windows has its own probe, for the reason in
+    :func:`_windows_process_is_running`, and answers the same three cases.
     """
 
     if pid <= 0:
@@ -1335,7 +1336,7 @@ def _process_is_running(pid: int) -> bool:
     if pid == os.getpid():
         return True
     if os.name == "nt":
-        return False
+        return _windows_process_is_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1345,6 +1346,60 @@ def _process_is_running(pid: int) -> bool:
         # on this system, are both answered with "leave that file alone".
         return True
     return True
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    """Ask Windows whether ``pid`` is a process that is still running.
+
+    ``os.kill`` cannot be the probe there: it terminates the process instead of
+    asking about it. ``OpenProcess`` for query-only access asks. A handle means
+    the pid resolves, and the exit code then separates a process that is running
+    from one that has finished and is only still addressable because somebody
+    holds a handle to it -- which is exactly the state a reaped child is in.
+    Among the failures, ``ERROR_INVALID_PARAMETER`` is the one that means "no
+    such process"; access being denied means it exists and belongs to somebody
+    else.
+
+    Everything else answers "running": a number too large to pass as a pid, a
+    call that raises, and this function reached anywhere but Windows. A probe
+    that could not get an answer must never be the reason a file is removed.
+    """
+
+    # Imported here rather than at module scope: only a prune on Windows reaches
+    # it, and importing it everywhere would charge every ``import bir`` for it.
+    import ctypes
+
+    load_library = getattr(ctypes, "WinDLL", None)
+    if load_library is None:
+        return True
+
+    try:
+        kernel32 = load_library("kernel32", use_last_error=True)
+        # HANDLE is a pointer, so the signatures are declared rather than left
+        # to ctypes' default C int, which would truncate it on 64-bit Windows.
+        kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+
+        handle = kernel32.OpenProcess(_WINDOWS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if not handle:
+            return getattr(ctypes, "get_last_error")() != _WINDOWS_ERROR_INVALID_PARAMETER
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == _WINDOWS_STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        # Deliberately broad: ctypes reports an unusable pid, a library it
+        # cannot load, and a platform it cannot run on through three different
+        # exception types, and all of them mean the same thing here -- no answer,
+        # so leave the file alone.
+        return True
 
 
 def _prune_leftover_is_live(path: Path, pid: int, *, now: float) -> bool:

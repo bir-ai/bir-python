@@ -16,6 +16,7 @@ read or remove is left alone rather than failing the prune that found it.
 
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 import os
@@ -25,9 +26,10 @@ import sys
 import tempfile
 import time
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import bir
@@ -35,10 +37,14 @@ from bir import cli
 from bir._sdk import _reset_config_for_tests
 from bir._storage import (
     _PRUNE_INDEX_PREFIX,
+    _WINDOWS_ERROR_INVALID_PARAMETER,
+    _WINDOWS_QUERY_LIMITED_INFORMATION,
+    _WINDOWS_STILL_ACTIVE,
     _entries_matching,
     _process_is_running,
     _prune_staging_path,
     _PruneTraceIndex,
+    _windows_process_is_running,
 )
 
 
@@ -309,9 +315,8 @@ class SweepLeavesWhatIsNotItsTests(DeadProcessTest):
                 workdir / f".traces.jsonl.{self.dead_pid}.notahexuuid.tmp",
                 workdir / "traces.jsonl.backup",
                 tempdir / f"{_PRUNE_INDEX_PREFIX}notapid-ab12cd34",
-                # A number no pid could be: too long for the name prune writes,
-                # and too large for the probe to answer even if it were not.
-                workdir / f".traces.jsonl.{2**31}.{'0' * 32}.tmp",
+                # A number too long for the name prune writes, so the sweep
+                # never asks whether that process is running at all.
                 workdir / f".traces.jsonl.{10**12}.{'0' * 32}.tmp",
             ]
             for path in unrelated:
@@ -415,21 +420,114 @@ class ProcessLivenessTests(DeadProcessTest):
             child.kill()
             child.wait()
 
+    @unittest.skipIf(os.name == "nt", "os.kill is not the probe on Windows")
     def test_a_process_this_user_may_not_signal_is_running(self) -> None:
         with patch("os.kill", side_effect=PermissionError("not yours")):
             self.assertTrue(_process_is_running(self.dead_pid))
 
     def test_a_number_too_large_to_be_a_pid_is_not_judged_gone(self) -> None:
-        # ``os.kill`` refuses it rather than answering, and a file whose name
-        # cannot be attributed to a finished process is not prune's to remove.
-        self.assertTrue(_process_is_running(2**31))
+        # Past what a pid can hold on either platform: POSIX refuses to convert
+        # it and Windows refuses to pass it. A name neither probe can answer for
+        # is not evidence of a finished process, so the file stays.
+        self.assertTrue(_process_is_running(2**64))
 
-    def test_on_windows_only_this_process_is_known_to_be_running(self) -> None:
-        # ``os.kill`` terminates rather than probes there, so the sweep asks the
-        # file system instead by trying the removal it would refuse.
-        with patch.object(os, "name", "nt"):
-            self.assertTrue(_process_is_running(os.getpid()))
-            self.assertFalse(_process_is_running(self.dead_pid))
+    @unittest.skipIf(os.name == "nt", "the real probe answers here")
+    def test_the_windows_probe_keeps_what_it_cannot_ask_about(self) -> None:
+        # Off Windows there is no ``ctypes.WinDLL`` to ask, which stands in for
+        # every way the probe can fail to get an answer. All of them mean the
+        # same thing: not evidence that a file is abandoned.
+        self.assertTrue(_windows_process_is_running(self.dead_pid))
+
+
+class FakeKernel32Function:
+    """A stand-in for one ``kernel32`` entry point that records its signature."""
+
+    def __init__(self, behaviour: Callable[..., int]) -> None:
+        self.behaviour = behaviour
+        self.argtypes: object = None
+        self.restype: object = None
+
+    def __call__(self, *arguments: Any) -> int:
+        return self.behaviour(*arguments)
+
+
+class FakeKernel32:
+    """The three calls the probe makes, answering as Windows would."""
+
+    def __init__(
+        self,
+        *,
+        handle: int,
+        exit_code: int = 0,
+        exit_code_readable: bool = True,
+        open_raises: BaseException | None = None,
+    ) -> None:
+        self.opened: list[tuple[int, int, int]] = []
+        self.closed: list[int] = []
+
+        def open_process(access: int, inherit: int, pid: int) -> int:
+            if open_raises is not None:
+                raise open_raises
+            self.opened.append((access, inherit, pid))
+            return handle
+
+        def get_exit_code(process: int, destination: Any) -> int:
+            if not exit_code_readable:
+                return 0
+            destination._obj.value = exit_code
+            return 1
+
+        def close_handle(process: int) -> int:
+            self.closed.append(process)
+            return 1
+
+        self.OpenProcess = FakeKernel32Function(open_process)
+        self.GetExitCodeProcess = FakeKernel32Function(get_exit_code)
+        self.CloseHandle = FakeKernel32Function(close_handle)
+
+
+class WindowsLivenessProbeTests(unittest.TestCase):
+    """The Windows probe's whole decision table, driven against a fake library.
+
+    Only two of these rows are reachable on the Windows CI leg -- a process that
+    is running and a reaped one -- and none at all anywhere else, so what the
+    probe answers for a process it may not open, a call that fails, and a number
+    too large to pass as a pid is pinned here instead of left to a platform no
+    test can reach.
+    """
+
+    def probe(self, *, last_error: int = 0, **kernel32_arguments: Any) -> tuple[bool, FakeKernel32]:
+        kernel32 = FakeKernel32(**kernel32_arguments)
+        with (
+            patch.object(ctypes, "WinDLL", create=True, return_value=kernel32),
+            patch.object(ctypes, "get_last_error", create=True, return_value=last_error),
+        ):
+            return _windows_process_is_running(4242), kernel32
+
+    def test_the_probe_answers_every_outcome_windows_can_return(self) -> None:
+        error_access_denied = 5  # It exists and belongs to somebody else.
+        cases: tuple[tuple[str, bool, dict[str, Any]], ...] = (
+            ("a running process", True, {"handle": 1234, "exit_code": _WINDOWS_STILL_ACTIVE}),
+            # A reaped child stays openable while anyone holds a handle to it,
+            # which is why the exit code rather than the handle decides.
+            ("finished, a handle still held", False, {"handle": 1234, "exit_code": 0}),
+            ("no such process", False, {"handle": 0, "last_error": _WINDOWS_ERROR_INVALID_PARAMETER}),
+            ("exists, this user may not open it", True, {"handle": 0, "last_error": error_access_denied}),
+            ("the exit code could not be read", True, {"handle": 1234, "exit_code_readable": False}),
+            ("a pid too large to pass", True, {"handle": 0, "open_raises": ctypes.ArgumentError("too large")}),
+            ("kernel32 could not be loaded", True, {"handle": 0, "open_raises": OSError("no library")}),
+        )
+        for label, expected, arguments in cases:
+            with self.subTest(label):
+                running, kernel32 = self.probe(**arguments)
+
+                self.assertIs(running, expected)
+                if arguments["handle"]:
+                    # Query-only access, the pid asked about, and no leaked handle.
+                    self.assertEqual(kernel32.opened, [(_WINDOWS_QUERY_LIMITED_INFORMATION, 0, 4242)])
+                    self.assertEqual(kernel32.closed, [1234])
+                else:
+                    self.assertEqual(kernel32.closed, [])
 
 
 if __name__ == "__main__":
