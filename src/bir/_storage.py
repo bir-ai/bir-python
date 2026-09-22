@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sqlite3
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +38,13 @@ else:
     import fcntl
 
 _SENT_IDS_SUFFIX = ".sent"
+_PRUNE_INDEX_PREFIX = "bir-prune-index-"
+# How long a leftover whose recorded pid is running must sit untouched before it
+# is swept anyway. The pid is the primary evidence and this is the second: only a
+# reused pid can make a leftover both live-looking and a day old, and without it
+# a number the operating system handed to a long-lived process would keep one
+# abandoned copy forever -- which is the state this sweep exists to end.
+_STALE_PRUNE_LEFTOVER_SECONDS = 24 * 60 * 60
 _SCHEMA_VERSION = "1.0"
 _EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
 _EVENT_STATUSES = {"success", "error"}
@@ -917,6 +927,12 @@ class _PruneResult:
     because it is not an event -- no selection filter named it and no reader
     could ever read it -- and it is already inside ``bytes_reclaimed``, which
     measures the file rather than the selection.
+
+    ``swept_leftovers`` and ``swept_leftover_bytes`` count what an *interrupted*
+    prune abandoned beside the store and in the temporary directory, which this
+    run reclaimed on its way past. They stay outside ``bytes_reclaimed`` for the
+    opposite reason: those bytes are not the store, and folding them in would
+    report a saving the selection never made.
     """
 
     removed_traces: int
@@ -925,6 +941,8 @@ class _PruneResult:
     bytes_reclaimed: int
     dry_run: bool
     incomplete_tail_bytes: int = 0
+    swept_leftovers: int = 0
+    swept_leftover_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -969,7 +987,7 @@ class _PruneTraceIndex:
         if self._connection is not None:
             raise RuntimeError("prune trace index is already open")
 
-        temporary_directory = tempfile.TemporaryDirectory(prefix="bir-prune-index-")
+        temporary_directory = tempfile.TemporaryDirectory(prefix=f"{_PRUNE_INDEX_PREFIX}{os.getpid()}-")
         database_path = Path(temporary_directory.name) / "traces.sqlite3"
         connection: sqlite3.Connection | None = None
         try:
@@ -1248,6 +1266,161 @@ def _stream_filtered_trace_file(
     return removed_events, kept_bytes
 
 
+def _prune_staging_path(file_path: Path) -> Path:
+    """Return the staging sibling a prune writes while rewriting ``file_path``.
+
+    The name records the process writing it, which is what lets a later prune
+    tell a copy an interrupted run abandoned from one a live run is still
+    filling. :func:`_sweep_abandoned_prune_leftovers` reads it back.
+    """
+
+    return file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+
+
+def _prune_leftovers(trace_path: Path) -> Iterator[tuple[Path, int]]:
+    """Yield prune's own staging siblings and index directories with their pids.
+
+    Staging siblings are matched for the store being pruned and its rotated
+    files, so neither the advisory lock, the upload sidecar's own staged write,
+    nor anything else in the directory can be mistaken for one. Index
+    directories are matched wherever they came from: every one of them belongs
+    to a prune, and each carries the pid that decides whether it is still in use.
+    Only the shape both are written with matches, so a directory an older
+    release named without a pid is left to the system's own temporary sweep
+    rather than removed on an age guess.
+    """
+
+    staging = re.compile(rf"\.{re.escape(trace_path.name)}(?:\.\d{{1,9}})?\.(\d{{1,10}})\.[0-9a-f]{{32}}\.tmp")
+    yield from _entries_matching(trace_path.parent, staging)
+    index = re.compile(rf"{re.escape(_PRUNE_INDEX_PREFIX)}(\d{{1,10}})-.+")
+    yield from _entries_matching(Path(tempfile.gettempdir()), index)
+
+
+def _entries_matching(directory: Path, pattern: re.Pattern[str]) -> Iterator[tuple[Path, int]]:
+    """Yield entries of ``directory`` whose whole name matches, with group 1 as an int.
+
+    Names are read and the directory closed before any is matched, and only a
+    match becomes a ``Path``: the temporary directory this scans on every prune
+    is shared ground and can hold thousands of entries that are nobody's business
+    here.
+    """
+
+    try:
+        with os.scandir(directory) as entries:
+            names = [entry.name for entry in entries]
+    except OSError:
+        return
+    for name in names:
+        match = pattern.fullmatch(name)
+        if match is not None:
+            yield directory / name, int(match.group(1))
+
+
+def _process_is_running(pid: int) -> bool:
+    """Return whether ``pid`` names a process still running on this machine.
+
+    ``os.kill(pid, 0)`` is the POSIX probe, and a process this user may not
+    signal -- or a number too large for this system to hold a pid in -- is
+    answered as running, because neither is evidence that a file is abandoned.
+
+    On Windows ``os.kill`` is not a probe at all -- it terminates the process --
+    so every pid but this one is reported as gone and the file system decides
+    instead: a staging file or index a live prune still holds open cannot be
+    removed there, and the sweep keeps whatever it fails to remove.
+    """
+
+    if pid <= 0:
+        # Not a process id, and ``os.kill`` would address a process group here.
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        # A process this user may not signal, and a number too large to be a pid
+        # on this system, are both answered with "leave that file alone".
+        return True
+    return True
+
+
+def _prune_leftover_is_live(path: Path, pid: int, *, now: float) -> bool:
+    """Return whether a leftover may still belong to a prune that is running."""
+
+    if not _process_is_running(pid):
+        return False
+    try:
+        return now - path.stat().st_mtime < _STALE_PRUNE_LEFTOVER_SECONDS
+    except OSError:
+        return True
+
+
+def _prune_leftover_size(path: Path) -> int | None:
+    """Return the bytes a leftover holds, or ``None`` when it cannot be measured."""
+
+    try:
+        if path.is_dir():
+            return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _remove_prune_leftover(path: Path) -> bool:
+    """Remove one leftover, reporting whether it is gone."""
+
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _sweep_abandoned_prune_leftovers(trace_path: Path, *, dry_run: bool) -> tuple[int, int]:
+    """Reclaim what an interrupted prune abandoned, returning (files, bytes).
+
+    Prune stages survivors beside the store and builds its selection in a
+    temporary index directory, removing both on success and on failure. A run
+    that is killed reaches neither removal, and nothing picked them up
+    afterwards: the command whose purpose is reclaiming space could leave more
+    behind than it freed, and running it again did not help.
+
+    A leftover is abandoned when the process named in its name is gone -- which
+    the store's own advisory lock, held by the caller, already implies for a
+    staging sibling of this store -- or when a leftover that looks live is old
+    enough that the pid must have been reused. The run's own index does not
+    exist yet, and its own pid is running, so neither can be swept here.
+
+    Best effort throughout, and measured before it is removed: a leftover that
+    cannot be measured or removed stays where it is and is not counted, rather
+    than failing the prune that found it, exactly as sidecar compaction refuses
+    to break the prune it follows. ``dry_run`` reports what a write run would
+    reclaim without removing anything, because removing a file is a write and a
+    prune without ``--yes`` performs none.
+    """
+
+    swept = 0
+    swept_bytes = 0
+    now = time.time()
+    for path, pid in _prune_leftovers(trace_path):
+        if _prune_leftover_is_live(path, pid, now=now):
+            continue
+        size = _prune_leftover_size(path)
+        if size is None:
+            continue
+        if not dry_run and not _remove_prune_leftover(path):
+            continue
+        swept += 1
+        swept_bytes += size
+    return swept, swept_bytes
+
+
 def _stage_filtered_trace_file(
     file_path: Path,
     is_removed: Callable[[str], bool],
@@ -1274,7 +1447,7 @@ def _stage_filtered_trace_file(
                 drop_incomplete_tail=drop_incomplete_tail,
             )
         else:
-            temp_path = file_path.with_name(f".{file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            temp_path = _prune_staging_path(file_path)
             # Replaces the trace file, so it is created with the store's mode
             # rather than handing prune's output a wider one.
             with open(temp_path, "xb", opener=_private_opener) as staged_file:
@@ -1324,6 +1497,11 @@ def _prune_trace_store(
     :attr:`_PruneResult.incomplete_tail_bytes`. Nothing else moved: a line that
     was written whole and cannot be parsed still raises, wherever it is, because
     only the missing terminator proves nothing was ever recorded there.
+
+    A prune that was itself interrupted abandons its staging copy and its index
+    directory. Those are reclaimed here too, before this run stages anything, and
+    reported through :attr:`_PruneResult.swept_leftovers`; see
+    :func:`_sweep_abandoned_prune_leftovers`.
     """
 
     trace_path = Path(path) if path is not None else default_path
@@ -1333,6 +1511,7 @@ def _prune_trace_store(
 
     with _write_lock:
         with _InterProcessFileLock(trace_path):
+            swept, swept_bytes = _sweep_abandoned_prune_leftovers(trace_path, dry_run=dry_run)
             incomplete_tail = ""
 
             def record_incomplete_tail(line: str) -> None:
@@ -1351,7 +1530,15 @@ def _prune_trace_store(
                 incomplete_tail_bytes = len(incomplete_tail.encode("utf-8"))
                 selection = index.select_removed_traces(before=before, keep_last=keep_last, status=status)
                 if selection.removed_traces == 0 and not incomplete_tail_bytes:
-                    return _PruneResult(0, selection.kept_traces, 0, 0, dry_run)
+                    return _PruneResult(
+                        0,
+                        selection.kept_traces,
+                        0,
+                        0,
+                        dry_run,
+                        swept_leftovers=swept,
+                        swept_leftover_bytes=swept_bytes,
+                    )
 
                 files = _trace_files_oldest_first(trace_path) if include_rotated else [trace_path]
                 removed_events = 0
@@ -1401,6 +1588,8 @@ def _prune_trace_store(
                     bytes_reclaimed=bytes_reclaimed,
                     dry_run=dry_run,
                     incomplete_tail_bytes=incomplete_tail_bytes,
+                    swept_leftovers=swept,
+                    swept_leftover_bytes=swept_bytes,
                 )
 
 

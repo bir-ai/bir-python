@@ -890,6 +890,15 @@ def _cmd_prune(args: argparse.Namespace) -> int:
             f"{verb} an incomplete final line of {result.incomplete_tail_bytes} bytes; "
             "a write never finished it, so it was never a readable event"
         )
+    # The other thing this run reclaims that no selection filter named: the
+    # staging copy and index an interrupted prune abandoned. Said out loud for
+    # the same reason, and kept out of the byte count, which measures the store.
+    if result.swept_leftovers:
+        verb = "would sweep" if result.dry_run else "swept"
+        _report(
+            f"{verb} {result.swept_leftovers} leftover file(s) of {result.swept_leftover_bytes} bytes; "
+            "an interrupted prune abandoned them and nothing else reclaims them"
+        )
 
     if args.json:
         # ``dry_run`` is a field rather than a suffix on a sentence, so a script
@@ -901,6 +910,8 @@ def _cmd_prune(args: argparse.Namespace) -> int:
                 "removed_events": result.removed_events,
                 "bytes_reclaimed": result.bytes_reclaimed,
                 "incomplete_tail_bytes": result.incomplete_tail_bytes,
+                "swept_leftovers": result.swept_leftovers,
+                "swept_leftover_bytes": result.swept_leftover_bytes,
                 "dry_run": result.dry_run,
             },
             sys.stdout,

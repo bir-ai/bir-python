@@ -1854,6 +1854,8 @@ class AutomationJsonOutputTests(CliBaseTest):
                     "removed_events",
                     "bytes_reclaimed",
                     "incomplete_tail_bytes",
+                    "swept_leftovers",
+                    "swept_leftover_bytes",
                     "dry_run",
                 },
             )

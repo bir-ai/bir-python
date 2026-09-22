@@ -100,7 +100,9 @@ than a collection that grows with the store's event or trace count. Every stagin
 file is completed before any source is replaced, and replacements remain atomic
 under the same advisory lock an append takes, so a concurrent writer can never
 interleave and a selection, parsing, or staging failure leaves every source file
-intact. Temporary index and staging files are removed after success or failure.
+intact. Temporary index and staging files are removed after success or failure,
+and what a prune that was *killed* never got to remove is reclaimed by the next
+one; see [when a prune is interrupted](#when-a-prune-is-interrupted).
 A successful prune also compacts the `--mark-sent` upload sidecar, dropping IDs
 for events the store no longer holds so it stays bounded by the retained traces
 rather than by everything ever sent; see
@@ -279,7 +281,7 @@ and the rest print a human summary by default and JSON with `--json`:
 | `experiment-show` | One experiment with its per-example results |
 | `send` | `{accepted, attempted, skipped}` |
 | `send-experiment` | `{accepted, experiment_id}` |
-| `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, incomplete_tail_bytes, dry_run}` |
+| `prune` | `{removed_traces, kept_traces, removed_events, bytes_reclaimed, incomplete_tail_bytes, swept_leftovers, swept_leftover_bytes, dry_run}` |
 | `export-otel` | `{traces, spans, endpoint}` (only on a delivered export; a failed one writes nothing to stdout and exits non-zero) |
 | `eval-gate` | `{has_regressions, deltas, regressed, regression_reasons, tolerance, effective_tolerances, failed_example_regression, baseline_example_count, baseline_error_count, candidate_example_count, candidate_error_count, ...}` (always) |
 | `config` | The effective configuration |
@@ -487,6 +489,51 @@ need, remove the damaged line from the JSONL file to make the store whole again.
 `load_events()` and `load_traces()` are likewise strict and unchanged: a program
 building on them gets all the recorded events or an error, never a silently
 partial list.
+
+### When a prune is interrupted
+
+Prune streams the survivors into a staging sibling and replaces the original only
+once that copy is whole, so a run that is killed — Ctrl-C on a long prune is the
+ordinary way — leaves the store exactly as it was. What it leaves *beside* the
+store is that staging copy, a `.traces.jsonl.<pid>.<uuid>.tmp`, and the SQLite
+selection index it was building, a `bir-prune-index-<pid>-*` directory under the
+system temporary directory. Nothing picked either up again, so the command whose
+purpose is reclaiming space could leave more behind than it freed.
+
+The next prune reclaims both before it stages anything of its own, and says so:
+
+```
+$ bir prune --keep-last 11990 --yes
+bir: swept 2 leftover file(s) of 5751200 bytes; an interrupted prune abandoned them and nothing else reclaims them
+removed=10 kept=11990 events=20 bytes=7930
+```
+
+`--dry-run` previews it (`would sweep …`) and removes nothing, because removing a
+file is a write and a prune without `--yes` performs none. `--json` reports
+`swept_leftovers` and `swept_leftover_bytes`, and those bytes stay **outside**
+`bytes_reclaimed`, which measures the store the selection shrank — the opposite of
+`incomplete_tail_bytes`, which is inside it because those bytes were part of the
+file. The sweep runs even when the selection matches nothing, so reclaiming what
+an interrupted run left never depends on `--keep-last` happening to match.
+
+Only prune's own abandoned work is swept, and only once it is abandoned:
+
+- the name must be one prune writes, for **this** store or its rotated siblings.
+  The advisory lock file, the upload sidecar's own staged write, and everything
+  else in the directory are left alone;
+- the process recorded in the name must be **gone**, so a prune that is still
+  running keeps its staging copy. The store's own advisory lock already means no
+  second prune of *this* store can be mid-run;
+- a leftover whose recorded process is running but which has not been touched for
+  **24 hours** is swept anyway, because only a reused process id can be both;
+- a leftover that cannot be measured or removed stays where it is and is not
+  counted, rather than failing the prune that found it.
+
+An index directory left by a release before this one carries no process id, so
+nothing about it says its writer is gone; it is left to the system's own sweep of
+the temporary directory rather than removed on an age guess. The staging copy
+beside the store — the one nothing else ever reclaims — is named the same way it
+always was and is swept whichever release abandoned it.
 
 ### Events with no trace root
 

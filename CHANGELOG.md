@@ -399,6 +399,66 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Fixed
 
+- `bir prune` now reclaims what an interrupted prune abandoned. Prune stages the
+  survivors beside the store and replaces the original only once that copy is
+  whole, which is what keeps a killed run safe — and that half was already sound.
+  What was not sound is what the killed run left. Measured on a 9.55 MB store
+  with `--keep-last 11990`, `SIGKILL` 0.5 s in, which abandoned a 2.62 MB staging
+  copy and a 3.13 MB index (how far the copy got is up to where the kill lands):
+
+  ```
+                                 before             after
+  after the next prune           both still there   both swept, 5,751,200 bytes
+  after one more prune           both still there   nothing left to sweep
+  ```
+
+  The staging copy is a `.traces.jsonl.<pid>.<uuid>.tmp` sibling of the store and
+  the index is a `bir-prune-index-*` directory in the system temporary directory.
+  Neither was ever picked up again — in the "before" column both survived every
+  later prune — so the command whose purpose is reclaiming space left close to
+  6 MB behind to reclaim 7.9 KB, and running it again did not help. Ctrl-C on a
+  long prune is the ordinary way to reach it.
+
+  The next prune now sweeps both before it stages anything of its own, and says
+  so on stderr the way it already says what else it repaired on the way past:
+
+  ```
+  bir: swept 2 leftover file(s) of 5751200 bytes; an interrupted prune abandoned them and nothing else reclaims them
+  ```
+
+  **How a leftover is recognized as abandoned**, which was the decision this
+  needed: the name must be one prune writes, for this store or its rotated
+  siblings — so the advisory lock, the upload sidecar's own staged write, and
+  everything else in the directory are untouched — and the process recorded in
+  the name must be gone. A live one keeps its leftover. The store's own advisory
+  lock, held across the sweep, already means no second prune of this store can be
+  mid-run, so the process check is what covers the index directories, which are
+  shared ground. A leftover that looks live but has not been touched for 24 hours
+  is swept anyway, because only a reused process id can be both, and without that
+  second rule one abandoned copy could outlive every future prune.
+
+  The index directory now carries the pid that built it
+  (`bir-prune-index-<pid>-*`); it stays in the system temporary directory rather
+  than moving next to the store, so `bir prune --dry-run` keeps working on a
+  volume with no space left, which is one of the times it is most worth running.
+  One left over from an earlier release carries no pid, so nothing about it says
+  its writer is gone and it is left to the system's own sweep rather than removed
+  on an age guess. The staging copy — the one nothing else ever reclaims — is
+  named exactly as it always was, so it is swept whichever release abandoned it.
+
+  `--dry-run` previews the sweep (`would sweep …`) and removes nothing, because
+  removing a file is a write and a prune without `--yes` performs none. `--json`
+  gains `swept_leftovers` and `swept_leftover_bytes`, and those bytes stay outside
+  `bytes_reclaimed`, which measures the store the selection shrank. The sweep runs
+  even when the selection matches nothing, so reclaiming what an interrupted run
+  left never depends on `--keep-last` happening to match. A leftover that cannot
+  be measured or removed is left where it is and not counted, rather than failing
+  the prune that found it — the rule sidecar compaction already follows.
+
+  `tests/test_prune_leftovers.py` pins it, including the six names the sweep must
+  *not* remove and the two leftovers it must leave when it cannot read them; 7 of
+  its 19 cases fail against the previous code.
+
 - `bir traces | head` is no longer treated as a failure. A reader that stops
   reading gave the CLI a `BrokenPipeError`, which it reported like any other
   `OSError` and turned into exit 1 — and then the interpreter's own flush of

@@ -46,8 +46,9 @@ theme behind the first of them was new — recording is documented never to *bre
 a traced call, and nobody had asked whether it can *stop* one. That one, the
 audit's only P2, has shipped; shipping it produced a fifth item, about what a
 child that *can* record writes into a trace its parent owns, and that has shipped
-too, along with the closed pipe and the store path that followed the working
-directory. One is left, a P3.
+too, along with the closed pipe, the store path that followed the working
+directory, and the staging copy an interrupted prune abandoned. Every one of them
+is in `CHANGELOG.md`, and nothing from this audit is left open.
 
 The concurrency the guardrails actually promise is sound and is recorded below
 with its numbers: eight processes appending to one store lost nothing, rotation
@@ -74,68 +75,23 @@ breaking release says otherwise:
 
 ## Prioritized work
 
-| # | Improvement | Priority | Size | Primary outcome | Depends on |
-|---|---|---|---|---|---|
-| 1 | An interrupted `prune --yes` abandons a staging copy nothing reclaims | P3 | S | The command that reclaims space does not leave more behind than it freed | — |
-
-### 1. An interrupted `prune --yes` abandons a staging copy nothing reclaims
-
-**Why.** Prune stages the survivors and replaces the original, which is what keeps
-it crash-safe — and that half is sound: killed at four different offsets, the
-store was intact and loadable every time (24,000 lines before, 24,000 after). What
-is not sound is what the killed run leaves. Measured on an 8.56 MB store with
-`--keep-last 11990`, SIGKILL 0.6 s in:
-
-```
-store 8.56 MB   abandoned staging copy 6.93 MB   abandoned index 3.12 MB
-```
-
-The staging copy is a `.traces.jsonl.<pid>.<uuid>.tmp` sibling in the store's own
-directory; the index is a `bir-prune-index-*/traces.sqlite3` in `TMPDIR`. Neither
-is ever picked up again — three later successful prunes and 50 further recorded
-traces left both exactly where they were:
-
-```
-after a prune killed mid-run     siblings=['.traces.jsonl.18864....tmp'] index_dirs=1
-after successful prune #1        siblings=['.traces.jsonl.18864....tmp'] index_dirs=1
-after successful prune #2        siblings=['.traces.jsonl.18864....tmp'] index_dirs=1
-after successful prune #3        siblings=['.traces.jsonl.18864....tmp'] index_dirs=1
-after recording 50 more traces   siblings=['.traces.jsonl.18864....tmp'] index_dirs=1
-```
-
-So the command whose purpose is reclaiming space leaves 10 MB behind to reclaim
-0, and running it again does not help. Ctrl-C on a long prune is the ordinary way
-to reach this. The staging copy holds recorded events, including whatever capture
-was enabled for; it is created `0600` like the store, so this is a space and
-confusion problem rather than a privacy one, and `TMPDIR` is swept by the system
-eventually while the sibling next to the store is not.
-
-**Scope.**
-
-- Remove stale staging siblings for the store being pruned, at the start of a
-  prune, before staging a new one.
-- Decide and record how a stale one is recognized. The name carries the writing
-  process's pid, so a live pid must not be swept, and an age threshold has to be
-  chosen for the rest.
-- Include the index directory, or move it under the store rather than `TMPDIR`
-  so a single sweep finds both.
-- Report what was swept, the way `incomplete_tail_bytes` already reports the
-  other thing prune repairs on the way past.
-
-**Done when** a prune that follows an interrupted one reclaims what the
-interrupted one left.
+Nothing is open. The eighth audit's five items have all shipped; the next list
+comes from the next audit, which should re-measure against the current code
+rather than continue this one.
 
 ## Sequencing
 
-Four of the audit's five have shipped: a child forked out of a recording process
-records instead of hanging, it no longer writes a second copy of an event its
-parent opened, a read command piped into `head` is an ordinary success rather than
-exit 120, and a relative store path is anchored once rather than re-resolved on
-every append.
+All five of the audit's items have shipped: a child forked out of a recording
+process records instead of hanging, it no longer writes a second copy of an event
+its parent opened, a read command piped into `head` is an ordinary success rather
+than exit 120, a relative store path is anchored once rather than re-resolved on
+every append, and a prune reclaims what an interrupted prune abandoned.
 
-One is left. It is contained inside one function and needs no decision beyond how
-a stale sibling is recognized: the staging file's name carries the pid that wrote
-it, so a live one must not be swept, and the rest need an age threshold.
+The last one needed one decision, and it is recorded with the code and in
+`CHANGELOG.md`: a leftover is abandoned when the process named in its own name is
+gone — which the store's advisory lock, held across the sweep, already implies for
+a staging sibling of that store — or when a live-looking one has sat untouched for
+24 hours, which only a reused process id can produce.
 
 Beta readiness is tracked on the checklist in `docs/site/stability.md`, not here.
 Its remaining entries are outside this repository's reach or are release
@@ -188,20 +144,21 @@ evaluator's name, an example's id, an experiment's name — to be a string, and
 re-creating the store's locks in a forked child so a pre-forking worker records
 instead of hanging, writing each event only in the process that opened it so a
 fork cannot put one event id in the store twice, ending quietly with 141 when
-whoever was reading a command's output stops, and anchoring a relative store path
-once so a process that changes directory does not split its store.
+whoever was reading a command's output stops, anchoring a relative store path
+once so a process that changes directory does not split its store, and sweeping
+the staging copy and selection index an interrupted prune abandoned.
 Regressions in those areas are bugs; new scope requires a new issue with current
 evidence.
 
-Item 4 sits beside "pruning a store whose final line an interrupted write never
+The sweep sits beside "pruning a store whose final line an interrupted write never
 finished" and reopens none of it. That work asked what prune does with a store the
 *writer* left half-finished, and it holds: the fragment is dropped and reported
-through `incomplete_tail_bytes`. This asks what prune leaves when *prune* is the
-thing interrupted, which is the other side of the same command and was never
+through `incomplete_tail_bytes`. This asked what prune leaves when *prune* is the
+thing interrupted, which is the other side of the same command and had never been
 driven — the earlier "zero leftover `bir-prune-index-*` directories" measurement
 counted successful runs only.
 
-Item 2 sits beside "streaming the CLI read commands" and "escaping and bounding
+The closed pipe sits beside "streaming the CLI read commands" and "escaping and bounding
 what the CLI prints on its error channel", and reopens neither. Streaming is what
 makes the closed pipe reachable at all rather than what makes it fail, and the
 error-channel work asked what a *message* may contain, not what the process does
@@ -341,8 +298,8 @@ damaged line.
 **`bir prune --yes` against live writers, and against a kill.** Prune run while
 four processes appended: no unparsed lines, no torn file, the store loads. Prune
 SIGKILLed at four offsets: the store is exactly as it was (24,000 lines before,
-24,000 after) and loads back every time. What the killed run leaves behind is
-item 4; the file it was rewriting is never the casualty.
+24,000 after) and loads back every time. What the killed run left behind is now
+swept by the next prune; the file it was rewriting was never the casualty.
 
 **`bir tail` while the file is replaced underneath it.** A prune during a follow
 is reported rather than silently swallowed —

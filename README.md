@@ -59,7 +59,9 @@ under the same lock as appends. It is also the repair path after a full disk: an
 interrupted write leaves a final line with no newline, which was never a complete
 event, and prune drops that one line as it rewrites (reported on stderr and as
 `incomplete_tail_bytes` in `--json`). A line that was written whole and cannot be
-parsed still refuses, wherever it sits.
+parsed still refuses, wherever it sits. A prune that is itself interrupted leaves
+its staging copy and its selection index behind; the next prune reclaims both
+before staging anything of its own and reports them as `swept_leftovers`.
 `bir config` prints the effective resolved configuration (trace path, capture
 flags, sampling, service metadata, rotation, and capture-size limits) plus which
 `BIR_*` variables are set, so you can answer "why isn't capture on?" without a
