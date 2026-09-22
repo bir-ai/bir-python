@@ -149,18 +149,30 @@ class CorpusIsWhatTheSdkRecordsTests(ContractTestCase):
                 self.assertNotIn(b"\r\n", (CONTRACT_DIR / name).read_bytes())
 
     def test_a_store_written_with_windows_line_endings_records_the_same_corpus(self) -> None:
-        # What a Windows recording produces, reproduced here by translating the
-        # bytes the way text mode does there.
+        # What a Windows recording produces, reproduced by translating the store
+        # the way text mode does there. Normalizing before translating keeps
+        # this the same simulation on Windows itself, where the store already
+        # ends its lines that way and translating twice would make \r\r\n --
+        # a corpus broken by the test rather than by what it is testing.
         real_read_bytes = Path.read_bytes
+        translated: list[bytes] = []
 
         def as_windows_wrote_it(path: Path) -> bytes:
             data = real_read_bytes(path)
-            return data.replace(b"\n", b"\r\n") if path.suffix == ".jsonl" else data
+            if path.suffix != ".jsonl":
+                return data
+            crlf = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            translated.append(crlf)
+            return crlf
 
         with patch.object(Path, "read_bytes", new=as_windows_wrote_it):
             recorded = contract.build_corpus()
 
         self.assertEqual(recorded, contract.build_corpus())
+        # And the simulation simulated something: a read that never saw a store
+        # would make the assertion above pass for no reason.
+        self.assertTrue(translated, "no store was read through the translation")
+        self.assertTrue(any(b"\r\n" in data for data in translated))
 
     def test_the_manifest_describes_the_committed_corpus(self) -> None:
         manifest = json.loads((CONTRACT_DIR / contract.MANIFEST_NAME).read_text(encoding="utf-8"))
