@@ -126,3 +126,10 @@ jobs:
       # bir (product) repo's fixtures job. See tests/fixtures/README.md.
       - name: Verify shared contract fixtures match the committed manifest
         run: python scripts/fixtures.py check
+
+      # Re-records the schema 1.0 corpus and fails if tests/contract/ is not
+      # byte-for-byte what the SDK writes, so a change to the recorded shape
+      # cannot merge without the corpus changing with it. Stdlib-only too: the
+      # SDK has no dependencies, so PYTHONPATH=src is enough to import it.
+      - name: Verify the schema 1.0 contract corpus is what the SDK records
+        run: PYTHONPATH=src python scripts/contract.py check

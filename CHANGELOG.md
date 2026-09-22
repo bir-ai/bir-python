@@ -354,6 +354,55 @@ Before publishing, verify the release with the SDK release checklist in
 
 ### Added
 
+- A machine-checkable corpus for the schema `1.0` contract, in `tests/contract/`.
+  What existed was one hand-written trace in `tests/fixtures/valid-events.jsonl`:
+  it pins the field shape of five event types, and nothing pinned what a *store*
+  looks like — how an event names its parent, how a consumer turns a flat file
+  into traces, or what the framework bridges record. `bir-app` reads all of that.
+
+  The corpus is **recorded rather than written**. Every line came out of the
+  public API into a real trace store, with only the event ids and the clock
+  replaced, so the same bytes come out on every machine:
+
+  ```
+  core-events.jsonl     8 events, 2 traces   trace/span/tool_call/generation/score,
+                                             a retrieval, a priced generation, and a
+                                             failed trace carrying its error
+  bridge-events.jsonl  15 events, 7 traces   one trace per shipped framework bridge,
+                                             including the turn span AG2 inserts
+  ```
+
+  `scripts/contract.py` is the tool around it. `export` re-records it, `check`
+  re-records it and compares byte for byte against what is committed, `verify`
+  validates a corpus against `event-schema-v1.json` and the structural rules with
+  nothing but the standard library, and `bundle` writes a directory a consumer
+  repository can vendor — schema, corpus, manifest, the verifier itself, and a
+  README of what to do with them.
+
+  **What this makes impossible.** A change to what the SDK records cannot merge
+  without the corpus changing in the same commit, because `check` re-records and
+  diffs; and a corpus edited by hand cannot merge at all, because re-recording
+  will not reproduce it. CI runs it in the fixture drift job, and
+  `tests/test_schema_contract.py` runs the same comparison in the unit-test job.
+
+  The structural rules are the half that was never written down: ids are unique,
+  a root's `parent_id` is null and its id is its own trace id, every other event's
+  `parent_id` resolves to an event **in the same file and the same trace**, each
+  trace has exactly one root, following parents terminates, and a child is written
+  before its parent — so a consumer must group by `trace_id` rather than assume
+  tree order. Service metadata sits on the root and nowhere else, which is where a
+  consumer attributes a trace to a service.
+
+  **What it does not do is confirm `bir-app` accepts any of it.** No checkout,
+  release, or endpoint of it is reachable from here, and saying so is part of the
+  work: `tests/contract/CROSS_REPO.json` records the status in machine-readable
+  form, `scripts/contract.py check` prints it on every run
+  (`cross-repo: NOT VALIDATED -- ...`), and a test holds that file and the Beta
+  checklist item in `docs/site/stability.md` to each other. Claiming the
+  validation without ticking the box fails; ticking it without a recorded
+  consumer release and timestamp fails; ticking it while the attestation says
+  otherwise fails. The item cannot be ticked from inside this repository alone.
+
 - `run_experiment()` and `run_experiment_async()` take `total_timeout`, a limit
   on the run. `timeout` bounds an example and never bounded the run: a task that
   outran it keeps its worker until it returns, so a run against a backend that

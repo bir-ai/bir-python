@@ -1,0 +1,22 @@
+{
+  "validated": false,
+  "reason": "No bir-app checkout, release artifact, or endpoint is reachable from this repository or its CI, so nothing here has been fed to the consumer that is supposed to read it. Everything in tests/contract/ is verified against the schema and against what this SDK records; whether bir-app accepts it is not known.",
+  "consumer": {
+    "repository": "bir-app",
+    "release": null,
+    "commit": null,
+    "checked_by": null
+  },
+  "validated_at": null,
+  "schema_version": "1.0",
+  "covers": [
+    "core-events.jsonl",
+    "bridge-events.jsonl"
+  ],
+  "how_to_record_a_validation": [
+    "1. python scripts/contract.py bundle --out <dir>",
+    "2. In the consumer repository, feed both JSONL files through its ingestion path and assert it accepts every event, groups them into the traces MANIFEST.json counts, and resolves every parent_id inside its own trace.",
+    "3. Set validated to true and fill in consumer.release, consumer.commit, consumer.checked_by, and validated_at (ISO 8601) with what was actually run.",
+    "4. Only then may the cross-repo item in docs/site/stability.md's Beta checklist be ticked; tests/test_schema_contract.py holds the checkbox and this file to each other."
+  ]
+}

@@ -187,6 +187,14 @@ Python API:
   coordinated `bir-app` release.
 - `tests/fixtures/` holds the shared fixtures both repositories verify against,
   guarded by a checksum manifest. A change there is a contract change.
+- `tests/contract/` holds the corpus that says what a *store* looks like rather
+  than what one event looks like: a trace covering every event type, a failed
+  trace, and the event tree each framework bridge records. It is re-recorded by
+  the SDK rather than written by hand, so a change to what the SDK writes cannot
+  merge without the corpus changing in the same commit
+  (`python scripts/contract.py check`), and a consumer can take the whole thing
+  with `python scripts/contract.py bundle --out <dir>` and verify its own copy
+  with the stdlib-only verifier in it.
 
 The types are enforced where a value enters, not only where a file is read. Every
 identity a caller passes — an event name, a prompt's name and version, a
@@ -306,6 +314,11 @@ call.
 - [x] Capture is opt-in and redaction cannot be disabled.
 - [ ] The event-schema `1.0` contract is confirmed against the current `bir-app`
       release, including the event-tree shape the framework bridges now record.
+      The corpus to confirm it against exists and is guarded
+      (`tests/contract/`); what has not happened is a run of it through
+      `bir-app`, which is recorded in `tests/contract/CROSS_REPO.json`. That
+      file and this checkbox are held to each other by a test, so this item
+      cannot be ticked from inside this repository alone.
 - [x] A benchmark harness measures trace write, load, prune, send, and
       evaluation cost in time and peak memory, runs a smoke subset in CI, and
       fails a release run that regresses against a recorded baseline.

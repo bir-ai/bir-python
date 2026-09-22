@@ -1,0 +1,32 @@
+{
+  "files": {
+    "bridge-events.jsonl": {
+      "event_types": {
+        "generation": 7,
+        "span": 1,
+        "trace": 7
+      },
+      "events": 15,
+      "sha256": "4154078e5dd10fffa264362dedcbef81e196d7cd68a3d142cd7347f248ba83ad",
+      "traces": 7
+    },
+    "core-events.jsonl": {
+      "event_types": {
+        "generation": 2,
+        "score": 1,
+        "span": 1,
+        "tool_call": 2,
+        "trace": 2
+      },
+      "events": 8,
+      "sha256": "5fe424ced48cdcfae9b33b22d771129e0fa19349fb8124d53f709aa6239eedcd",
+      "traces": 2
+    }
+  },
+  "generated_by": "scripts/contract.py export",
+  "schema": {
+    "file": "event-schema-v1.json",
+    "sha256": "a6392356108d2484248e1da1c485e7f39a1a0ce389a4b5de86dd2aea9fb152b8"
+  },
+  "schema_version": "1.0"
+}

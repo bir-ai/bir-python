@@ -43,6 +43,17 @@ Nothing kept these in sync before, so they drifted. Now:
 
 Never hand-edit `CHECKSUMS.sha256`.
 
+## The corpus next door
+
+`tests/fixtures/` pins what *one event* looks like. [`tests/contract/`](../contract/)
+pins what a *store* looks like — parentage, grouping, the failed trace, and the
+event tree each framework bridge records — and is re-recorded by the SDK rather
+than written by hand. It is SDK-owned and not part of this shared set, so it can
+grow without a paired change in the product repo; it is verified against
+`event-schema-v1.json` from this directory, and its manifest records that file's
+checksum so the two cannot come apart. `python scripts/contract.py bundle --out
+<dir>` packs it up for a consumer.
+
 ## Tradeoff
 
 `check` verifies a repo against *its own* committed manifest and deliberately
