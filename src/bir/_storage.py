@@ -49,6 +49,7 @@ _STALE_PRUNE_LEFTOVER_SECONDS = 24 * 60 * 60
 _WINDOWS_QUERY_LIMITED_INFORMATION = 0x1000
 _WINDOWS_STILL_ACTIVE = 259
 _WINDOWS_ERROR_INVALID_PARAMETER = 87
+_WINDOWS_MAX_PID = 0xFFFFFFFF
 _SCHEMA_VERSION = "1.0"
 _EVENT_TYPES = {"trace", "span", "generation", "tool_call", "score"}
 _EVENT_STATUSES = {"success", "error"}
@@ -1360,10 +1361,19 @@ def _windows_process_is_running(pid: int) -> bool:
     such process"; access being denied means it exists and belongs to somebody
     else.
 
-    Everything else answers "running": a number too large to pass as a pid, a
-    call that raises, and this function reached anywhere but Windows. A probe
-    that could not get an answer must never be the reason a file is removed.
+    Everything else answers "running": a number outside the pid space, a call
+    that raises, and this function reached anywhere but Windows. A probe that
+    could not get an answer must never be the reason a file is removed.
     """
+
+    if not 0 < pid <= _WINDOWS_MAX_PID:
+        # Asked rather than passed on, because ctypes masks an out-of-range
+        # value into the C type instead of refusing it: 2**64 arrives as 0, and
+        # 5,000,000,000 arrives as 705,032,704, which may well name a process
+        # that is running and is not the one the file was written by. A number
+        # outside the pid space is a question this cannot ask, so it gets the
+        # same answer as every other one it cannot ask.
+        return True
 
     # Imported here rather than at module scope: only a prune on Windows reaches
     # it, and importing it everywhere would charge every ``import bir`` for it.

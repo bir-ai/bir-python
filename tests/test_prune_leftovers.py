@@ -38,6 +38,7 @@ from bir._sdk import _reset_config_for_tests
 from bir._storage import (
     _PRUNE_INDEX_PREFIX,
     _WINDOWS_ERROR_INVALID_PARAMETER,
+    _WINDOWS_MAX_PID,
     _WINDOWS_QUERY_LIMITED_INFORMATION,
     _WINDOWS_STILL_ACTIVE,
     _entries_matching,
@@ -496,13 +497,13 @@ class WindowsLivenessProbeTests(unittest.TestCase):
     test can reach.
     """
 
-    def probe(self, *, last_error: int = 0, **kernel32_arguments: Any) -> tuple[bool, FakeKernel32]:
+    def probe(self, *, pid: int = 4242, last_error: int = 0, **kernel32_arguments: Any) -> tuple[bool, FakeKernel32]:
         kernel32 = FakeKernel32(**kernel32_arguments)
         with (
             patch.object(ctypes, "WinDLL", create=True, return_value=kernel32),
             patch.object(ctypes, "get_last_error", create=True, return_value=last_error),
         ):
-            return _windows_process_is_running(4242), kernel32
+            return _windows_process_is_running(pid), kernel32
 
     def test_the_probe_answers_every_outcome_windows_can_return(self) -> None:
         error_access_denied = 5  # It exists and belongs to somebody else.
@@ -514,7 +515,7 @@ class WindowsLivenessProbeTests(unittest.TestCase):
             ("no such process", False, {"handle": 0, "last_error": _WINDOWS_ERROR_INVALID_PARAMETER}),
             ("exists, this user may not open it", True, {"handle": 0, "last_error": error_access_denied}),
             ("the exit code could not be read", True, {"handle": 1234, "exit_code_readable": False}),
-            ("a pid too large to pass", True, {"handle": 0, "open_raises": ctypes.ArgumentError("too large")}),
+            ("the call itself raised", True, {"handle": 0, "open_raises": ctypes.ArgumentError("refused")}),
             ("kernel32 could not be loaded", True, {"handle": 0, "open_raises": OSError("no library")}),
         )
         for label, expected, arguments in cases:
@@ -528,6 +529,25 @@ class WindowsLivenessProbeTests(unittest.TestCase):
                     self.assertEqual(kernel32.closed, [1234])
                 else:
                     self.assertEqual(kernel32.closed, [])
+
+    def test_a_number_outside_the_pid_space_is_never_asked_about(self) -> None:
+        # ctypes masks an out-of-range value into the C type rather than
+        # refusing it, so asking would be asking about a different process:
+        # 2**64 arrives as pid 0, and 5,000,000,000 as pid 705,032,704, which
+        # can name something that really is running. Both are answered without
+        # the library being called at all.
+        for pid in (2**64, _WINDOWS_MAX_PID + 1, 5_000_000_000, 0, -1):
+            with self.subTest(pid=pid):
+                running, kernel32 = self.probe(pid=pid, handle=1234, exit_code=_WINDOWS_STILL_ACTIVE)
+
+                self.assertIs(running, True)
+                self.assertEqual(kernel32.opened, [])
+
+    def test_the_largest_pid_windows_can_hold_is_still_asked_about(self) -> None:
+        running, kernel32 = self.probe(pid=_WINDOWS_MAX_PID, handle=0, last_error=_WINDOWS_ERROR_INVALID_PARAMETER)
+
+        self.assertIs(running, False)
+        self.assertEqual(kernel32.opened, [(_WINDOWS_QUERY_LIMITED_INFORMATION, 0, _WINDOWS_MAX_PID)])
 
 
 if __name__ == "__main__":
