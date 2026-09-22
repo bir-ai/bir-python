@@ -33,6 +33,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from unittest.mock import patch
 
 from test_integration_contract import BRIDGES
 
@@ -134,6 +135,32 @@ class CorpusIsWhatTheSdkRecordsTests(ContractTestCase):
             _sdk._current_parent_id.reset(parent_token)
 
         self.assertEqual(clean, inside)
+
+    def test_the_corpus_has_one_line_ending_on_every_platform(self) -> None:
+        # The store is appended to in text mode, so the same events recorded on
+        # Windows come back CRLF-terminated and hash differently. The corpus has
+        # one canonical form; without this the drift guard would fail on Windows
+        # for a reason that is not drift.
+        for name, data in contract.build_corpus().items():
+            with self.subTest(name):
+                self.assertNotIn(b"\r\n", data)
+        for name in contract.CORPUS_NAMES:
+            with self.subTest(f"committed {name}"):
+                self.assertNotIn(b"\r\n", (CONTRACT_DIR / name).read_bytes())
+
+    def test_a_store_written_with_windows_line_endings_records_the_same_corpus(self) -> None:
+        # What a Windows recording produces, reproduced here by translating the
+        # bytes the way text mode does there.
+        real_read_bytes = Path.read_bytes
+
+        def as_windows_wrote_it(path: Path) -> bytes:
+            data = real_read_bytes(path)
+            return data.replace(b"\n", b"\r\n") if path.suffix == ".jsonl" else data
+
+        with patch.object(Path, "read_bytes", new=as_windows_wrote_it):
+            recorded = contract.build_corpus()
+
+        self.assertEqual(recorded, contract.build_corpus())
 
     def test_the_manifest_describes_the_committed_corpus(self) -> None:
         manifest = json.loads((CONTRACT_DIR / contract.MANIFEST_NAME).read_text(encoding="utf-8"))

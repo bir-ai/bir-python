@@ -1,0 +1,8 @@
+# Byte identity is the contract for these two directories: their checksums are
+# recorded in manifests (tests/fixtures/CHECKSUMS.sha256, tests/contract/MANIFEST.json)
+# and compared on every platform CI runs. Without this, git's Windows default
+# rewrites their line endings on checkout, every recorded checksum stops matching
+# what is on disk, and the drift guards fail for a reason that has nothing to do
+# with drift.
+tests/fixtures/** text eol=lf
+tests/contract/** text eol=lf

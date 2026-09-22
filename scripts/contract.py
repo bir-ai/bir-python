@@ -172,7 +172,12 @@ def _record(scenario: Any, counters: dict[str, int]) -> bytes:
             recorded = store.read_bytes() if store.exists() else b""
             _sdk._reset_config_for_tests()
             _sdk._restore_context(outer_context)
-    return recorded
+    # The store is appended to in text mode, so a recording made on Windows ends
+    # every line with CRLF and the same events would hash differently there. The
+    # corpus has one canonical form, which is the one every other platform
+    # already writes; what the drift guard compares is the events, not which
+    # terminator the operating system put after them.
+    return recorded.replace(b"\r\n", b"\n")
 
 
 def _core_scenarios() -> list[Any]:

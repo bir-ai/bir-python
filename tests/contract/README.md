@@ -49,6 +49,14 @@ Beyond each event matching the schema:
 standard library, and does not import the SDK, so a consumer repository can
 vendor the bundle and run the same verification on its own copy.
 
+One thing a consumer must not assume is the line terminator. The store is
+appended to in text mode, so a store written on Windows ends its lines with
+`\r\n` while every other platform writes `\n` — and a store that has been
+through `bir prune` is rewritten with `\n` wherever it was written. Read a
+store line by line and strip, rather than splitting on a fixed terminator. The
+corpus here is recorded in the canonical `\n` form on every platform, which is
+what its checksums are taken over.
+
 ## Relationship to `../fixtures/`
 
 [`tests/fixtures/`](../fixtures/) holds the four files the SDK and the product

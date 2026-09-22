@@ -393,6 +393,16 @@ Before publishing, verify the release with the SDK release checklist in
   tree order. Service metadata sits on the root and nowhere else, which is where a
   consumer attributes a trace to a service.
 
+  The corpus is recorded in one canonical line ending on every platform, and
+  `.gitattributes` keeps git from rewriting the committed copies on checkout.
+  Both matter because the guard compares bytes: the store is appended to in text
+  mode, so a recording made on Windows is CRLF-terminated, and git's Windows
+  default would have converted the committed files to match — two different ways
+  for the same events to hash differently for no reason. A consumer should read a
+  store line by line and strip rather than split on a fixed terminator; a store
+  written on Windows ends its lines with `\r\n`, and one rewritten by `bir prune`
+  ends them with `\n` wherever it was written.
+
   **What it does not do is confirm `bir-app` accepts any of it.** No checkout,
   release, or endpoint of it is reachable from here, and saying so is part of the
   work: `tests/contract/CROSS_REPO.json` records the status in machine-readable
